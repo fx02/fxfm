@@ -171,22 +171,22 @@ mod tests {
             mode: 0,
             hidden: false,
         };
-        let mut v = vec![mk("dom"), mk("Cesta"), mk("c\u{30C}aj"), mk("Ante")];
+        let mut v = vec![mk("dora"), mk("Carl"), mk("c\u{30C}apek"), mk("Ante")];
         sort_entries(&mut v);
-        // "dom" discriminates NFC: without .nfc() the NFD name would sort before it.
-        assert_eq!(names(&v), ["Ante", "Cesta", "dom", "c\u{30C}aj"]);
+        // "dora" discriminates NFC: without .nfc() the NFD name would sort before it.
+        assert_eq!(names(&v), ["Ante", "Carl", "dora", "c\u{30C}apek"]);
         let mut w = vec![
-            mk("\u{10D}aj"),
-            mk("dom"),
-            mk("Cesta"),
-            mk("c\u{30C}aj"),
+            mk("\u{10D}apek"),
+            mk("dora"),
+            mk("Carl"),
+            mk("c\u{30C}apek"),
             mk("Ante"),
         ];
         sort_entries(&mut w);
         // NFC and NFD spellings of the same name sort together.
-        assert_eq!(names(&w)[..2], ["Ante", "Cesta"]);
-        assert_eq!(names(&w)[2], "dom");
-        assert_eq!(names(&w)[3..], ["c\u{30C}aj", "\u{10D}aj"]);
+        assert_eq!(names(&w)[..2], ["Ante", "Carl"]);
+        assert_eq!(names(&w)[2], "dora");
+        assert_eq!(names(&w)[3..], ["c\u{30C}apek", "\u{10D}apek"]);
     }
 
     #[test]

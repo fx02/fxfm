@@ -1,83 +1,83 @@
-# fxfm plan 3: serveri (Ctrl+F) – Implementation Plan
+# fxfm plan 3: servers (Ctrl+F) – Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ctrl+F otvara TC dijalog "Connect to server" s listom servera. Spajanje radi preko SFTP, SCP, FTP i FTPS, s ključevima po serveru, provjerom host keya i lozinkama spremljenim u Keychain ili u trezor zaključan master lozinkom. Spojeni server je "disk" u traci, panel ga pregledava kao mapu i rade F3, F4 (upload natrag), F5, F6, F7, F8, F2 i chmod.
+**Goal:** Ctrl+F opens the TC "Connect to server" dialog with a list of servers. Connecting works over SFTP, SCP, FTP and FTPS, with per-server keys, host key verification, and passwords stored in the Keychain or in a vault locked by a master password. A connected server is a "drive" in the drive bar, the panel browses it like a folder, and F3, F4 (upload back), F5, F6, F7, F8, F2 and chmod all work.
 
 **Architecture:**
-- Novi `fxfm-core` modul `remote/`:
-  - trait `RemoteFs` (sinkroni API) s tri backenda: `sftp.rs` (russh + russh-sftp), `scp.rs` (russh exec: `scp -t/-f`, listing preko SFTP-a ili `ls`), `ftp.rs` (suppaftp, FTPS preko rustls);
-  - `known_hosts.rs`, `transfer.rs` (upload/download stabla, `.part` pa zamjena);
-  - registar veza `Sessions` u `vfs::Ctx`.
-- **Uvodi se trait** (najavljeno u planu 2): `RemoteFs` za servere. `Local` i `Archive` ostaju kakvi jesu u `vfs`, a `vfs` dobiva treću granu `Loc::Remote`.
-- Prijenosi u kojima sudjeluje server idu kao u planu 2 preko lokalnog staginga:
-  - server → lokalno: preuzmi u `stage-<n>`, zatim `ops::copy`/`ops::move_` (isti konflikti i progress);
-  - lokalno → server: direktan upload s pitanjem za svaku datoteku;
-  - server ↔ server i arhiva ↔ server: preko staginga.
-- Novi `fxfm-core` moduli `servers.rs` (lista servera, `servers.json`, parsiranje URL-a) i `secrets.rs` (trait `SecretStore`, `Vault` s master lozinkom). Keychain je tanki sloj u `src-tauri` (`security-framework`).
-- Spajanje je **bez stanja** prema UI-ju: `connect` vraća ili `Connected` ili pitanje (host key, lozinka, passphrase, master lozinka). UI pita korisnika i ponovno zove `connect` s odgovorom.
-- russh je async: `remote::rt()` je jedan zajednički tokio runtime (2 worker threada). Sinkrone metode backenda zovu `rt().block_on(...)` s vremenskim ograničenjem. Pozivatelji su uvijek job threadovi ili `spawn_blocking`, nikad tokio worker.
+- New `fxfm-core` module `remote/`:
+  - trait `RemoteFs` (synchronous API) with three backends: `sftp.rs` (russh + russh-sftp), `scp.rs` (russh exec: `scp -t/-f`, listing via SFTP or `ls`), `ftp.rs` (suppaftp, FTPS via rustls);
+  - `known_hosts.rs`, `transfer.rs` (upload/download of trees, `.part` then replace);
+  - connection registry `Sessions` in `vfs::Ctx`.
+- **A trait is introduced** (announced in plan 2): `RemoteFs` for servers. `Local` and `Archive` stay as they are in `vfs`, and `vfs` gets a third branch `Loc::Remote`.
+- Transfers involving a server go through local staging, as in plan 2:
+  - server → local: download into `stage-<n>`, then `ops::copy`/`ops::move_` (same conflicts and progress);
+  - local → server: direct upload, asking about each file;
+  - server ↔ server and archive ↔ server: via staging.
+- New `fxfm-core` modules `servers.rs` (server list, `servers.json`, URL parsing) and `secrets.rs` (trait `SecretStore`, `Vault` with a master password). Keychain is a thin layer in `src-tauri` (`security-framework`).
+- Connecting is **stateless** with respect to the UI: `connect` returns either `Connected` or a question (host key, password, passphrase, master password). The UI asks the user and calls `connect` again with the answer.
+- russh is async: `remote::rt()` is a single shared tokio runtime (2 worker threads). The synchronous backend methods call `rt().block_on(...)` with a timeout. Callers are always job threads or `spawn_blocking`, never a tokio worker.
 
 **Tech Stack:**
-- sve iz plana 1 i 2;
-- `russh` 0.65 (`default-features = false`, features `ring`, `rsa`, `flate2`, `des`; **ne** `aws-lc-rs`);
-- `russh-sftp` (verzija koja odgovara russh 0.65; ako 3.x ne kompajlira s 0.65, uzmi par koji navodi README od russh-sftp);
+- everything from plans 1 and 2;
+- `russh` 0.65 (`default-features = false`, features `ring`, `rsa`, `flate2`, `des`; **not** `aws-lc-rs`);
+- `russh-sftp` (the version matching russh 0.65; if 3.x does not compile with 0.65, use the pair given in the russh-sftp README);
 - `tokio` 1 (`rt-multi-thread`, `time`, `sync`, `io-util`, `net`);
-- `suppaftp` 12 (sinkroni, feature `rustls-ring`);
-- `argon2` 0.5/0.6 i `chacha20poly1305` (XChaCha20-Poly1305), `rand` za sol i nonce, `base64`, `sha2`;
-- `security-framework` 3 u `src-tauri`, samo `cfg(target_os = "macos")`;
-- dev-dependencies u `fxfm-core`: `libunftp` 0.24 + `unftp-sbe-fs` (FTP testni server), `rcgen` (cert za FTPS test).
+- `suppaftp` 12 (synchronous, feature `rustls-ring`);
+- `argon2` 0.5/0.6 and `chacha20poly1305` (XChaCha20-Poly1305), `rand` for salt and nonce, `base64`, `sha2`;
+- `security-framework` 3 in `src-tauri`, only `cfg(target_os = "macos")`;
+- dev-dependencies in `fxfm-core`: `libunftp` 0.24 + `unftp-sbe-fs` (FTP test server), `rcgen` (cert for the FTPS test).
 
-Sve je čisti Rust ili `ring` (cc), pa universal build ostaje bez Homebrewa, OpenSSL-a i cmakea.
+Everything is pure Rust or `ring` (cc), so the universal build stays free of Homebrew, OpenSSL and cmake.
 
-**Spec:** `docs/superpowers/specs/2026-11-06-fxfm-design.md` (§2 cilj 5, §4 traka diskova i red s putanjom, §5 F3/F4/F5/F6/F8 i Ctrl+F, Ctrl+Shift+F, §6 remote stavke u hotlisti, §7 Serveri, §8 arhive na serveru, §9 master lozinka i Keychain, §10 ugrađene biblioteke). Plan 2: `docs/superpowers/plans/2026-11-07-fxfm-plan2-archives.md`, čije konvencije (lokacije kao `String`, `OpObserver`, staging, editwatch) vrijede i ovdje.
+**Spec:** `docs/superpowers/specs/2026-11-06-fxfm-design.md` (§2 goal 5, §4 drive bar and path row, §5 F3/F4/F5/F6/F8 and Ctrl+F, Ctrl+Shift+F, §6 remote items in the hotlist, §7 Servers, §8 archives on a server, §9 master password and Keychain, §10 bundled libraries). Plan 2: `docs/superpowers/plans/2026-11-07-fxfm-plan2-archives.md`, whose conventions (locations as `String`, `OpObserver`, staging, editwatch) apply here too.
 
 ## Global Constraints
 
-- Sve iz Global Constraints plana 1 i 2 vrijedi i dalje: Tauri izolacija, `fxfm-core` se builda i testira na Linuxu, commitovi samo kao `zbuzanic@gmail.com` s Co-Authored-By linijom, UI tekstovi na engleskom.
-- Grana `feat/plan3-servers` odvaja se od `feat/plan2-archives`.
-- **Lokacija na serveru** je `<scheme>://<ime servera>/<apsolutna putanja>`, npr. `sftp://web-1/var/www/html`. Korijen je `sftp://web-1/`.
-  - Scheme je `sftp`, `scp`, `ftp` ili `ftps`. Server se traži **po imenu**, a scheme se pri formatiranju uvijek uzima iz protokola servera.
-  - Ime servera ne smije sadržavati `/` i mora biti jedinstveno u cijeloj listi (ne samo unutar mape), jer ga koriste lokacije i hotlista.
-  - Brza veza preko "New URL…" ima ime `user@host` ili `user@host:port` ako port nije zadani. Ne sprema se u listu.
-  - Putanje u lokaciji su doslovne (bez percent-encodinga). Percent-encoding se dekodira samo u URL-u iz "New URL…".
-- **Zadani portovi:** SFTP/SCP 22, FTP/FTPS 21.
-- **Podatkovna mapa** (portable ili sistemska) dobiva:
-  - `servers.json`: stablo servera, **bez lozinki i passphraseova**;
-  - `known_hosts`: prihvaćeni host keyevi i FTPS certifikati;
-  - `keys/`: importirani privatni ključevi, prava 0600;
-  - `secrets.json`: samo u portable načinu, kriptirani trezor.
-- **Lozinke:**
-  - Sistemski način: macOS Keychain, servis `fxfm`, račun `<server id>/password` ili `<server id>/passphrase`.
-  - Portable način: `secrets.json` kriptiran master lozinkom (Argon2id m=64 MiB, t=3, p=1; XChaCha20-Poly1305; nova sol pri svakoj promjeni master lozinke, novi nonce za svaki zapis). Bez master lozinke lozinke se ne spremaju.
-  - Master lozinka se traži jednom po pokretanju, kad zatreba, i drži se samo u memoriji.
-  - Unesene a nespremljene lozinke drže se u memoriji do izlaza, zbog ponovnog spajanja.
-- **Testovi nikad ne pišu u pravi Keychain ni u pravu podatkovnu mapu** (pravilo vlasnika). Keychain kod se testira samo ručno. Mrežni testovi koriste samo `127.0.0.1` i servere pokrenute u samom testu.
-- **Vremena:** spajanje 15 s; svaki zahtjev ili blok prijenosa 60 s bez napretka daje `RemoteError::Timeout`; SSH keepalive svakih 30 s. Operacija nikad ne visi zauvijek.
-- **Upload na server nikad ne ostavlja skraćen original:**
-  1. piše u `.<ime>.fxfm-<pid>-<n>.part` u istoj mapi;
-  2. postavlja prava: ako cilj postoji, kopira njegova prava; inače prava lokalnog izvora (FTP preskače);
-  3. zamjenjuje cilj (SFTP `posix-rename@openssh.com` ako ga server nudi, inače brisanje cilja pa rename; FTP `RNFR`/`RNTO`, a ako to ne uspije, `DELE` pa `RNTO`).
+- Everything from Global Constraints of plans 1 and 2 still applies: Tauri isolation, `fxfm-core` is built and tested on Linux, commits only as `zbuzanic@gmail.com` with a Co-Authored-By line, UI texts in English.
+- Branch `feat/plan3-servers` is cut from `feat/plan2-archives`.
+- A **server location** is `<scheme>://<server name>/<absolute path>`, e.g. `sftp://web-1/var/www/html`. The root is `sftp://web-1/`.
+  - The scheme is `sftp`, `scp`, `ftp` or `ftps`. The server is looked up **by name**, and when formatting, the scheme is always taken from the server's protocol.
+  - A server name must not contain `/` and must be unique across the whole list (not just within a folder), because locations and the hotlist use it.
+  - A quick connection via "New URL…" is named `user@host` or `user@host:port` if the port is not the default. It is not saved to the list.
+  - Paths in a location are literal (no percent-encoding). Percent-encoding is decoded only in the URL from "New URL…".
+- **Default ports:** SFTP/SCP 22, FTP/FTPS 21.
+- **The data folder** (portable or system) gets:
+  - `servers.json`: the server tree, **without passwords and passphrases**;
+  - `known_hosts`: accepted host keys and FTPS certificates;
+  - `keys/`: imported private keys, permissions 0600;
+  - `secrets.json`: portable mode only, the encrypted vault.
+- **Passwords:**
+  - System mode: macOS Keychain, service `fxfm`, account `<server id>/password` or `<server id>/passphrase`.
+  - Portable mode: `secrets.json` encrypted with the master password (Argon2id m=64 MiB, t=3, p=1; XChaCha20-Poly1305; new salt on every master password change, new nonce for every entry). Without a master password, passwords are not saved.
+  - The master password is requested once per launch, when needed, and is kept in memory only.
+  - Entered but unsaved passwords are kept in memory until exit, to allow reconnecting.
+- **Tests never write to the real Keychain or to the real data folder** (owner's rule). Keychain code is tested manually only. Network tests use only `127.0.0.1` and servers started inside the test itself.
+- **Timeouts:** connecting 15 s; each request or transfer block with no progress for 60 s yields `RemoteError::Timeout`; SSH keepalive every 30 s. An operation never hangs forever.
+- **Upload to a server never leaves a truncated original:**
+  1. writes to `.<name>.fxfm-<pid>-<n>.part` in the same folder;
+  2. sets permissions: if the target exists, copies its permissions; otherwise the permissions of the local source (FTP skips this);
+  3. replaces the target (SFTP `posix-rename@openssh.com` if the server offers it, otherwise delete the target then rename; FTP `RNFR`/`RNTO`, and if that fails, `DELE` then `RNTO`).
 
-  Iznimke:
-  - Ako je cilj symlink, ili se `.part` ne može stvoriti zbog prava, piše se direktno u cilj (truncate + write).
-  - Kod greške ili Cancela `.part` se briše.
-- **Brisanje na serveru** je uvijek trajno. Dijalog: `Delete N file(s) from the server? This cannot be undone.`
-- **Prekid veze:** svaka operacija na mrtvoj vezi vraća `RemoteError::Disconnected`. Veza se tada izbacuje iz registra, a UI prikazuje `Connection to <ime> lost` s gumbima `Reconnect` i `Close`.
-- **Provjera buildova:** `cargo tree -i openssl-sys` i `cargo tree -i aws-lc-sys` moraju biti prazni.
+  Exceptions:
+  - If the target is a symlink, or the `.part` cannot be created because of permissions, write directly to the target (truncate + write).
+  - On error or Cancel the `.part` is deleted.
+- **Deleting on a server** is always permanent. Dialog: `Delete N file(s) from the server? This cannot be undone.`
+- **Connection loss:** every operation on a dead connection returns `RemoteError::Disconnected`. The connection is then dropped from the registry, and the UI shows `Connection to <name> lost` with `Reconnect` and `Close` buttons.
+- **Build check:** `cargo tree -i openssl-sys` and `cargo tree -i aws-lc-sys` must be empty.
 
 ## Review Focus
 
-1. **Veza pukne usred posla** (ugašen VPN, server stane, mreža visi bez RST-a):
-   - operacija završi greškom najkasnije za 60 s, ne visi;
-   - upload ostavi cilj netaknut, a `.part` se počisti ako se još može;
-   - panel prikaže "Connection lost" i ponudi Reconnect.
+1. **Connection breaks mid-operation** (VPN turned off, server stops, network hangs without RST):
+   - the operation ends with an error within 60 s at the latest, it does not hang;
+   - an upload leaves the target untouched, and the `.part` is cleaned up if still possible;
+   - the panel shows "Connection lost" and offers Reconnect.
 
-   Testovi: Task 4 `upload_interrupted_leaves_target_intact`, Task 6 `stalled_server_times_out`, Task 9 `disconnected_error_drops_session`.
-2. **Promijenjen host key**: spajanje se prekida **prije slanja lozinke ili ključa**, upozorenje je glasno, a novi ključ se upisuje tek nakon izričite potvrde. Testovi u Tasku 6: `changed_host_key_refuses_before_auth` i `accepting_requires_matching_fingerprint`.
-3. **Imena sa razmakom, `'`, `$`, `;`, `*` i Unicodeom** na SCP-u (shell naredbe) i FTP-u: nikad se ne izvršava kao shell i nikad ne promaši datoteku. Testovi: Task 7 `scp_names_with_shell_chars` i Task 8 `ftp_names_with_spaces_and_unicode`.
-4. **Lozinke na disku**: `servers.json` nikad ne sadrži lozinku, kriva master lozinka ne kvari trezor, a prekid pisanja trezora ostavlja stari trezor. Testovi u Tasku 2: `servers_json_never_contains_secret`, `vault_wrong_master_password_keeps_file` i `vault_tampered_file_is_rejected`.
-5. **Pozivi iz Tauri async konteksta**: `block_on` unutar tokio konteksta paničari. Sinkroni API mora raditi iz `spawn_blocking` threada tuđeg runtimea. Test u Tasku 6: `sftp_calls_work_from_spawn_blocking`.
+   Tests: Task 4 `upload_interrupted_leaves_target_intact`, Task 6 `stalled_server_times_out`, Task 9 `disconnected_error_drops_session`.
+2. **Changed host key**: connecting is aborted **before sending the password or key**, the warning is loud, and the new key is written only after explicit confirmation. Tests in Task 6: `changed_host_key_refuses_before_auth` and `accepting_requires_matching_fingerprint`.
+3. **Names with a space, `'`, `$`, `;`, `*` and Unicode** over SCP (shell commands) and FTP: never executed as a shell and never miss the file. Tests: Task 7 `scp_names_with_shell_chars` and Task 8 `ftp_names_with_spaces_and_unicode`.
+4. **Passwords on disk**: `servers.json` never contains a password, a wrong master password does not corrupt the vault, and an interrupted vault write leaves the old vault. Tests in Task 2: `servers_json_never_contains_secret`, `vault_wrong_master_password_keeps_file` and `vault_tampered_file_is_rejected`.
+5. **Calls from the Tauri async context**: `block_on` inside a tokio context panics. The synchronous API must work from a `spawn_blocking` thread of someone else's runtime. Test in Task 6: `sftp_calls_work_from_spawn_blocking`.
 
 ---
 
@@ -90,31 +90,31 @@ crates/core/src/servers.rs              ServerNode/ServerEntry/Protocol/Auth, se
 crates/core/src/secrets.rs              SecretStore trait, MemoryStore, Vault (secrets.json), migrate_secrets
 crates/core/src/remote/mod.rs           RemoteFs, RemoteStat, RemoteError, RemoteLoc, parse/format, Sessions, rt(), connect()
 crates/core/src/remote/known_hosts.rs   KnownHosts: check/trust, fingerprint format
-crates/core/src/remote/transfer.rs      download_tree, upload_tree (.part + zamjena), remove_tree, walk_size
-crates/core/src/remote/sftp.rs          SftpFs (russh + russh-sftp), ssh_connect (zajedničko za SCP)
+crates/core/src/remote/transfer.rs      download_tree, upload_tree (.part + replace), remove_tree, walk_size
+crates/core/src/remote/sftp.rs          SftpFs (russh + russh-sftp), ssh_connect (shared with SCP)
 crates/core/src/remote/scp.rs           ScpFs (exec: scp -t/-f, ls, mkdir, rm, mv, chmod; shell_quote)
-crates/core/src/remote/ftp.rs           FtpFs (suppaftp, FTPS rustls s TOFU verifierom)
-crates/core/src/remote/testutil.rs      #[cfg(test)] MemFs (RemoteFs u memoriji s ubacivanjem grešaka), SshTestServer, FtpTestServer
+crates/core/src/remote/ftp.rs           FtpFs (suppaftp, FTPS rustls with a TOFU verifier)
+crates/core/src/remote/testutil.rs      #[cfg(test)] MemFs (in-memory RemoteFs with error injection), SshTestServer, FtpTestServer
 crates/core/src/vfs/mod.rs              Loc::Remote, routing list/nearest/dir_size/mkdir/rename/delete/materialize/entry_stamp/check_upload_target
-crates/core/src/vfs/transfer.rs         matrica prijenosa s udaljenim izvorom/odredištem
+crates/core/src/vfs/transfer.rs         transfer matrix with a remote source/destination
 src-tauri/Cargo.toml                    + security-framework (macos)
-src-tauri/src/keychain.rs               KeychainStore: SecretStore preko security-framework
-src-tauri/src/remote.rs                 Connector: servers, secrets, known_hosts, session password cache; komande connect/disconnect/…
+src-tauri/src/keychain.rs               KeychainStore: SecretStore over security-framework
+src-tauri/src/remote.rs                 Connector: servers, secrets, known_hosts, session password cache; connect/disconnect/… commands
 src-tauri/src/state.rs                  + remote: Connector
-src-tauri/src/commands.rs               edit_file/open_viewer za server, set_storage_mode s lozinkama, chmod
-crates/core/src/keymap.rs               cm_connect/cm_disconnect available; + cm_chmod (Files, bez zadane tipke)
-ui/lib.mjs                              parseRemote, remoteRoot, parentLocation za server, serverDefaults, validateServer, connectionLabel
-ui/servers.js                           Ctrl+F dijalog, Edit dijalog, New URL, Encrypt, tok spajanja (host key, lozinke)
-ui/app.js / panel.js / hotlist.js       ☁️ u traci diskova, red s putanjom, Ctrl+Shift+F, Connection lost, remote hotlist, chmod
-README.md, docs/ROADMAP.md              odjeljak "Serveri"; ažurirani roadmap
+src-tauri/src/commands.rs               edit_file/open_viewer for a server, set_storage_mode with passwords, chmod
+crates/core/src/keymap.rs               cm_connect/cm_disconnect available; + cm_chmod (Files, no default key)
+ui/lib.mjs                              parseRemote, remoteRoot, parentLocation for a server, serverDefaults, validateServer, connectionLabel
+ui/servers.js                           Ctrl+F dialog, Edit dialog, New URL, Encrypt, connect flow (host key, passwords)
+ui/app.js / panel.js / hotlist.js       ☁️ in the drive bar, path row, Ctrl+Shift+F, Connection lost, remote hotlist, chmod
+README.md, docs/ROADMAP.md              "Serveri" section; updated roadmap
 ```
 
-## Zajednički tipovi (novi)
+## Shared types (new)
 
 ```rust
 // remote/mod.rs
-pub struct RemoteLoc { pub scheme: String, pub server: String, pub path: String /* apsolutna, "/" = korijen */ }
-pub fn parse_remote(loc: &str) -> Option<RemoteLoc>;   // samo sftp|scp|ftp|ftps; "sftp://m" == "sftp://m/"
+pub struct RemoteLoc { pub scheme: String, pub server: String, pub path: String /* absolute, "/" = root */ }
+pub fn parse_remote(loc: &str) -> Option<RemoteLoc>;   // only sftp|scp|ftp|ftps; "sftp://m" == "sftp://m/"
 pub fn format_remote(scheme: &str, server: &str, path: &str) -> String;
 
 pub struct RemoteStat { pub is_dir: bool, pub is_symlink: bool, pub size: u64, pub mtime: i64, pub mode: u32 }
@@ -131,32 +131,32 @@ pub enum RemoteError {
     #[error("{0}")] Other(String),
 }
 
-/// Sinkroni API. `progress(bytes_since_last)` vraća false za Cancel.
+/// Synchronous API. `progress(bytes_since_last)` returns false for Cancel.
 pub trait RemoteFs: Send + Sync {
-    fn display(&self) -> String;                          // "sftp://user@host" (":port" ako nije zadani)
+    fn display(&self) -> String;                          // "sftp://user@host" (":port" if not the default)
     fn home(&self) -> Result<String, RemoteError>;
-    fn list(&self, path: &str) -> Result<Vec<Entry>, RemoteError>;       // bez "." i ".."; hidden = počinje s '.'
-    fn stat(&self, path: &str) -> Result<Option<RemoteStat>, RemoteError>; // lstat; None = ne postoji
+    fn list(&self, path: &str) -> Result<Vec<Entry>, RemoteError>;       // without "." and ".."; hidden = starts with '.'
+    fn stat(&self, path: &str) -> Result<Option<RemoteStat>, RemoteError>; // lstat; None = does not exist
     fn read_link(&self, path: &str) -> Result<String, RemoteError>;       // FTP: Unsupported
     fn read_to(&self, path: &str, out: &mut dyn Write, progress: &mut dyn FnMut(u64) -> bool) -> Result<(), RemoteError>;
     fn write_from(&self, path: &str, input: &mut dyn Read, progress: &mut dyn FnMut(u64) -> bool) -> Result<(), RemoteError>; // create/truncate
     fn mkdir(&self, path: &str) -> Result<(), RemoteError>;
-    fn remove_file(&self, path: &str) -> Result<(), RemoteError>;        // briše i symlink (ne cilj)
-    fn remove_dir(&self, path: &str) -> Result<(), RemoteError>;         // prazna mapa
-    fn rename(&self, from: &str, to: &str) -> Result<(), RemoteError>;   // Exists ako `to` postoji
-    fn replace(&self, from: &str, to: &str) -> Result<(), RemoteError>;  // rename preko postojećeg (pravila iz Global Constraints)
+    fn remove_file(&self, path: &str) -> Result<(), RemoteError>;        // also deletes a symlink (not its target)
+    fn remove_dir(&self, path: &str) -> Result<(), RemoteError>;         // empty folder
+    fn rename(&self, from: &str, to: &str) -> Result<(), RemoteError>;   // Exists if `to` exists
+    fn replace(&self, from: &str, to: &str) -> Result<(), RemoteError>;  // rename over an existing target (rules from Global Constraints)
     fn symlink(&self, target: &str, link: &str) -> Result<(), RemoteError>; // FTP: Unsupported
     fn set_mode(&self, path: &str, mode: u32) -> Result<(), RemoteError>;   // FTP: Unsupported
-    fn fork(&self) -> Result<Arc<dyn RemoteFs>, RemoteError>;           // veza za dugi job (FTP: nova prijava; SSH: Arc klon sebe)
+    fn fork(&self) -> Result<Arc<dyn RemoteFs>, RemoteError>;           // connection for a long job (FTP: new login; SSH: Arc clone of itself)
     fn close(&self);
 }
 ```
 
-`RemoteError` → `ListError`: `NotFound` → `NotFound`, `PermissionDenied` → `PermissionDenied`, ostalo → `Io("<loc>: <poruka>")`. → `OpError`: `Cancelled` → `Cancelled`, ostalo → `Io(poruka)`. UI prepoznaje poruke s prefiksom `connection lost` i `server not responding` (Task 10).
+`RemoteError` → `ListError`: `NotFound` → `NotFound`, `PermissionDenied` → `PermissionDenied`, anything else → `Io("<loc>: <message>")`. → `OpError`: `Cancelled` → `Cancelled`, anything else → `Io(message)`. The UI recognizes messages with the prefix `connection lost` and `server not responding` (Task 10).
 
 ---
 
-### Task 1: Lista servera, URL i ključevi
+### Task 1: Server list, URL and keys
 
 **Files:** Create `crates/core/src/servers.rs`; Modify `crates/core/src/lib.rs`, `crates/core/Cargo.toml` (`rand`)
 
@@ -168,10 +168,10 @@ pub trait RemoteFs: Send + Sync {
   pub enum Protocol { Sftp, Scp, Ftp, Ftps }                 // serde lowercase; .scheme() -> &str; .default_port() -> u16
   pub enum Auth { Password, Key, KeyPassphrase }            // serde camelCase
   pub enum FtpEncoding { Utf8, Windows1250, Latin1 }        // serde camelCase, default Utf8
-  pub struct ServerEntry {                                  // serde camelCase, sve opcionalno ima #[serde(default)]
-      pub id: String,            // 16 hex znakova, stabilan (veže lozinke)
+  pub struct ServerEntry {                                  // serde camelCase, everything optional has #[serde(default)]
+      pub id: String,            // 16 hex characters, stable (binds the passwords)
       pub name: String, pub protocol: Protocol, pub host: String, pub port: u16, pub user: String,
-      pub auth: Auth, pub key_path: Option<String>,   // apsolutna ili "keys/<ime>" (relativno na data dir)
+      pub auth: Auth, pub key_path: Option<String>,   // absolute or "keys/<name>" (relative to the data dir)
       pub save_password: bool, pub remote_dir: Option<String>, pub local_dir: Option<String>,
       pub legacy_algorithms: bool, pub ftp_passive: bool /* default true */, pub ftp_encoding: FtpEncoding,
   }
@@ -181,38 +181,38 @@ pub trait RemoteFs: Send + Sync {
       pub fn find_by_name(&self, name: &str) -> Option<&ServerEntry>;
       pub fn find_by_id(&self, id: &str) -> Option<&ServerEntry>;
       pub fn all(&self) -> Vec<&ServerEntry>;
-      pub fn validate(&self) -> Result<(), String>;        // prva greška, tekst za UI
+      pub fn validate(&self) -> Result<(), String>;        // first error, text for the UI
   }
   pub fn new_id() -> String;
-  pub fn parse_url(url: &str) -> Result<ServerEntry, String>; // ime = user@host[:port], remote_dir = putanja
+  pub fn parse_url(url: &str) -> Result<ServerEntry, String>; // name = user@host[:port], remote_dir = path
   pub fn key_file(entry: &ServerEntry, data_dir: &Path) -> Option<PathBuf>;
-  pub fn import_key(src: &Path, data_dir: &Path) -> io::Result<String>;   // vraća "keys/<ime>"
+  pub fn import_key(src: &Path, data_dir: &Path) -> io::Result<String>;   // returns "keys/<name>"
   ```
 
-- [ ] **Step 1: testovi** u `servers.rs`:
-  - `servers_roundtrip_json`: stablo s mapom i dva servera se `save_json`/`load_json` vrati jednako. Nedostajuća polja daju zadane vrijednosti (`ftp_passive == true`, `ftp_encoding == Utf8`).
-  - `validate_rejects_bad_entries`. Poruke:
-    - prazno ime → `Name is required`;
-    - ime s `/` → `Name cannot contain '/'`;
-    - isto ime u dvije različite mape → `Another server is already named 'x'`;
-    - prazan host → `Host is required`;
-    - `Auth::Key` bez `key_path` → `Choose a key file`.
+- [ ] **Step 1: tests** in `servers.rs`:
+  - `servers_roundtrip_json`: a tree with a folder and two servers is returned equal after `save_json`/`load_json`. Missing fields get default values (`ftp_passive == true`, `ftp_encoding == Utf8`).
+  - `validate_rejects_bad_entries`. Messages:
+    - empty name → `Name is required`;
+    - name with `/` → `Name cannot contain '/'`;
+    - same name in two different folders → `Another server is already named 'x'`;
+    - empty host → `Host is required`;
+    - `Auth::Key` without `key_path` → `Choose a key file`.
   - `parse_url_variants`:
-    - `sftp://zb@web-1:2222/var/www` → protokol Sftp, user `zb`, host `web-1`, port 2222, `remote_dir == Some("/var/www")`, ime `zb@web-1:2222`;
-    - `ftp://h` → port 21, user `anonymous`, ime `anonymous@h`;
+    - `sftp://zb@web-1:2222/var/www` → protocol Sftp, user `zb`, host `web-1`, port 2222, `remote_dir == Some("/var/www")`, name `zb@web-1:2222`;
+    - `ftp://h` → port 21, user `anonymous`, name `anonymous@h`;
     - `ftps://u@h/a%20b` → `remote_dir == Some("/a b")`;
     - `http://h` → `Err("Unsupported protocol 'http'")`.
-  - `servers_json_never_contains_secret`: serijalizirani `ServerList` nema polje `password` ni `passphrase` (provjera nad tekstom JSON-a). Strukture **nemaju** takvo polje, a test to drži.
+  - `servers_json_never_contains_secret`: the serialized `ServerList` has no `password` or `passphrase` field (checked against the JSON text). The structs **have no** such field, and the test enforces that.
   - `import_key_copies_with_0600`:
-    - `import_key` kopira u `<data>/keys/id_ed25519` s pravima 0600 i vraća `keys/id_ed25519`;
-    - drugi import istog imena daje `keys/id_ed25519-2`;
-    - `key_file` za `keys/...` vraća `<data>/keys/...`, a za apsolutnu putanju nju samu.
+    - `import_key` copies to `<data>/keys/id_ed25519` with permissions 0600 and returns `keys/id_ed25519`;
+    - a second import of the same name gives `keys/id_ed25519-2`;
+    - `key_file` for `keys/...` returns `<data>/keys/...`, and for an absolute path returns the path itself.
 - [ ] **Step 2:** Run `cargo test -p fxfm-core servers`. Expected: FAIL.
-- [ ] **Step 3:** Implementiraj. Za `id` koristi `rand` (8 bajtova, hex).
+- [ ] **Step 3:** Implement. For `id` use `rand` (8 bytes, hex).
 - [ ] **Step 4:** Run `cargo test -p fxfm-core && cargo clippy -p fxfm-core -- -D warnings`. Expected: PASS.
 - [ ] **Step 5:** Commit `feat(core): server list, URL parsing, key import`.
 
-### Task 2: Trezor lozinki i SecretStore
+### Task 2: Password vault and SecretStore
 
 **Files:** Create `crates/core/src/secrets.rs`; Modify `crates/core/src/lib.rs`, `crates/core/Cargo.toml` (`argon2`, `chacha20poly1305`, `base64`)
 
@@ -222,175 +222,175 @@ pub trait RemoteFs: Send + Sync {
   pub trait SecretStore: Send + Sync {
       fn get(&self, account: &str) -> Result<Option<String>, String>;
       fn set(&self, account: &str, secret: &str) -> Result<(), String>;
-      fn delete(&self, account: &str) -> Result<(), String>;   // nepostojeći = Ok
+      fn delete(&self, account: &str) -> Result<(), String>;   // nonexistent = Ok
   }
   pub fn account(server_id: &str, kind: SecretKind) -> String;  // "<id>/password" | "<id>/passphrase"
   pub enum SecretKind { Password, Passphrase }
-  pub struct MemoryStore;                                       // HashMap iza Mutexa; za testove i "nespremljene" lozinke
+  pub struct MemoryStore;                                       // HashMap behind a Mutex; for tests and "unsaved" passwords
   pub const VAULT_FILE: &str = "secrets.json";
-  pub struct Vault;                                             // otključan trezor (ključ u memoriji)
+  pub struct Vault;                                             // unlocked vault (key in memory)
   impl Vault {
       pub fn exists(data_dir: &Path) -> bool;
-      pub fn create(data_dir: &Path, master: &str) -> io::Result<Vault>;          // greška ako već postoji
+      pub fn create(data_dir: &Path, master: &str) -> io::Result<Vault>;          // error if it already exists
       pub fn unlock(data_dir: &Path, master: &str) -> Result<Vault, VaultError>;
-      pub fn change_master(&mut self, new_master: &str) -> io::Result<()>;        // nova sol, sve ponovno kriptirano
+      pub fn change_master(&mut self, new_master: &str) -> io::Result<()>;        // new salt, everything re-encrypted
   }
-  impl SecretStore for Vault { … }                              // svaki set/delete atomski piše cijeli file
+  impl SecretStore for Vault { … }                              // every set/delete atomically writes the whole file
   pub enum VaultError { WrongPassword, Corrupt(String), Io(String) }  // Display: "Wrong master password", "Password file is damaged: …"
-  pub fn migrate_secrets(from: &dyn SecretStore, to: &dyn SecretStore, accounts: &[String]) -> Result<usize, String>; // vraća broj kopiranih
+  pub fn migrate_secrets(from: &dyn SecretStore, to: &dyn SecretStore, accounts: &[String]) -> Result<usize, String>; // returns the number copied
   ```
-- Format `secrets.json`: `{"version":1,"kdf":{"alg":"argon2id","m":65536,"t":3,"p":1,"salt":"<b64>"},"check":"<b64 nonce|ct od 'fxfm'>","items":{"<account>":"<b64 nonce|ct>"}}`. Imena računa su vidljiva (nisu tajna), a vrijednosti su kriptirane. AAD svakog zapisa je ime računa, pa se zapisi ne mogu zamijeniti.
+- Format of `secrets.json`: `{"version":1,"kdf":{"alg":"argon2id","m":65536,"t":3,"p":1,"salt":"<b64>"},"check":"<b64 nonce|ct od 'fxfm'>","items":{"<account>":"<b64 nonce|ct>"}}`. Account names are visible (not secret), and the values are encrypted. The AAD of each entry is the account name, so entries cannot be swapped.
 
-- [ ] **Step 1: testovi**:
-  - `vault_roundtrip`: `create` → `set("a/password","x")` → novi `unlock` istom lozinkom → `get == Some("x")`; `delete` → `None`.
-  - `vault_wrong_master_password_keeps_file`: `unlock` s krivom daje `VaultError::WrongPassword`, a datoteka je bajt-identična.
-  - `vault_tampered_file_is_rejected`: promijenjen bajt u ciphertextu zapisa → `get` vraća `Err` s `damaged`; zamijenjene vrijednosti dvaju računa → `Err`.
-  - `vault_change_master`: nakon `change_master("n")` stara lozinka daje `WrongPassword`, nova radi, a sol je drugačija.
-  - `vault_plaintext_not_in_file`: tekst `secrets.json` ne sadrži lozinku `hunter2-unique`.
-  - `migrate_secrets_copies_existing_only`: iz `MemoryStore` s dva od tri računa u drugi `MemoryStore` → vraća 2.
-  - Testovi koriste `Params` s malim `m` (npr. 8 MiB), preko `#[cfg(test)]` konstante, da ne traju dugo.
+- [ ] **Step 1: tests**:
+  - `vault_roundtrip`: `create` → `set("a/password","x")` → a new `unlock` with the same password → `get == Some("x")`; `delete` → `None`.
+  - `vault_wrong_master_password_keeps_file`: `unlock` with the wrong password gives `VaultError::WrongPassword`, and the file is byte-identical.
+  - `vault_tampered_file_is_rejected`: a changed byte in an entry's ciphertext → `get` returns `Err` with `damaged`; swapped values of two accounts → `Err`.
+  - `vault_change_master`: after `change_master("n")` the old password gives `WrongPassword`, the new one works, and the salt is different.
+  - `vault_plaintext_not_in_file`: the text of `secrets.json` does not contain the password `hunter2-unique`.
+  - `migrate_secrets_copies_existing_only`: from a `MemoryStore` with two of three accounts into another `MemoryStore` → returns 2.
+  - Tests use `Params` with a small `m` (e.g. 8 MiB), via a `#[cfg(test)]` constant, so they do not take long.
 - [ ] **Step 2:** Run `cargo test -p fxfm-core secrets`. Expected: FAIL.
-- [ ] **Step 3:** Implementiraj. Pisanje ide preko `storage::save_json` (atomski).
+- [ ] **Step 3:** Implement. Writing goes through `storage::save_json` (atomic).
 - [ ] **Step 4:** Run `cargo test -p fxfm-core && cargo clippy -p fxfm-core -- -D warnings`. Expected: PASS.
 - [ ] **Step 5:** Commit `feat(core): encrypted password vault and SecretStore`.
 
-### Task 3: Remote tipovi, known_hosts i vfs routing (bez prijenosa)
+### Task 3: Remote types, known_hosts and vfs routing (no transfers)
 
 **Files:** Create `crates/core/src/remote/{mod.rs,known_hosts.rs,testutil.rs}`; Modify `crates/core/src/vfs/mod.rs`, `crates/core/src/lib.rs`
 
 **Interfaces:**
 - Consumes: `listing::{Entry, ListError, sort_entries}`, `ops::{OpError, OpObserver, OpSummary, valid_name}`.
 - Produces:
-  - tipovi iz "Zajednički tipovi";
-  - `pub struct Sessions` s metodama `insert(name: &str, fs: Arc<dyn RemoteFs>)`, `get(name) -> Option<Arc<dyn RemoteFs>>`, `remove(name) -> Option<Arc<dyn RemoteFs>>`, `names() -> Vec<String>`; `vfs::Ctx` dobiva `pub sessions: Sessions`;
-  - `vfs::Loc::Remote(RemoteLoc)`; `vfs::parse` prvo provjerava `parse_remote`;
-  - postojeće `vfs` funkcije dobivaju granu za server:
+  - the types from "Shared types (new)";
+  - `pub struct Sessions` with methods `insert(name: &str, fs: Arc<dyn RemoteFs>)`, `get(name) -> Option<Arc<dyn RemoteFs>>`, `remove(name) -> Option<Arc<dyn RemoteFs>>`, `names() -> Vec<String>`; `vfs::Ctx` gets `pub sessions: Sessions`;
+  - `vfs::Loc::Remote(RemoteLoc)`; `vfs::parse` checks `parse_remote` first;
+  - existing `vfs` functions get a server branch:
     - `list`;
-    - `nearest`: najbliža postojeća nadmapa preko `stat`; korijen `/`; nepostojeća veza vraća lokaciju nepromijenjenu;
-    - `dir_size` (rekurzivno, poštuje `cancel`);
-    - `mkdir` i `rename` (uz `valid_name`);
-    - `delete` (rekurzivno, trajno, `obs.error` po stavci, `to_trash` se ignorira);
-    - `local_dir_for` (server → `home` korisnika; potpis dobiva `home: &Path`, a svi pozivatelji se ažuriraju);
-  - `fn session_for(ctx: &Ctx, r: &RemoteLoc) -> Result<Arc<dyn RemoteFs>, RemoteError>`: nema veze → `Disconnected`. Kod `Disconnected` iz bilo koje operacije veza se **izbacuje** iz `sessions`.
-  - `remote::rt() -> &'static tokio::runtime::Runtime` (OnceLock, multi-thread, 2 workera, `enable_all`);
-  - `pub fn with_timeout<T>(fut: impl Future<Output = Result<T, RemoteError>>, secs: u64) -> Result<T, RemoteError>` (`rt().block_on(tokio::time::timeout(...))`, isteklo → `Timeout`);
+    - `nearest`: the nearest existing parent folder via `stat`; root `/`; a nonexistent connection returns the location unchanged;
+    - `dir_size` (recursive, honors `cancel`);
+    - `mkdir` and `rename` (with `valid_name`);
+    - `delete` (recursive, permanent, `obs.error` per item, `to_trash` is ignored);
+    - `local_dir_for` (server → the user's `home`; the signature gets `home: &Path`, and all callers are updated);
+  - `fn session_for(ctx: &Ctx, r: &RemoteLoc) -> Result<Arc<dyn RemoteFs>, RemoteError>`: no connection → `Disconnected`. On `Disconnected` from any operation the connection is **dropped** from `sessions`.
+  - `remote::rt() -> &'static tokio::runtime::Runtime` (OnceLock, multi-thread, 2 workers, `enable_all`);
+  - `pub fn with_timeout<T>(fut: impl Future<Output = Result<T, RemoteError>>, secs: u64) -> Result<T, RemoteError>` (`rt().block_on(tokio::time::timeout(...))`, expired → `Timeout`);
   - `known_hosts.rs`:
     ```rust
     pub const KNOWN_HOSTS_FILE: &str = "known_hosts";
     pub enum HostCheck { Known, Unknown, Changed { old_fingerprint: String } }
-    pub struct KnownHosts { /* putanja datoteke */ }
+    pub struct KnownHosts { /* file path */ }
     impl KnownHosts {
         pub fn new(path: PathBuf) -> KnownHosts;
         pub fn check(&self, host: &str, port: u16, key_type: &str, fingerprint: &str) -> HostCheck;
-        pub fn trust(&self, host: &str, port: u16, key_type: &str, fingerprint: &str) -> io::Result<()>; // zamjenjuje stari zapis
+        pub fn trust(&self, host: &str, port: u16, key_type: &str, fingerprint: &str) -> io::Result<()>; // replaces the old entry
     }
-    pub fn fingerprint_sha256(blob: &[u8]) -> String;   // "SHA256:" + base64 bez paddinga, kao `ssh-keygen -l`
+    pub fn fingerprint_sha256(blob: &[u8]) -> String;   // "SHA256:" + base64 without padding, as `ssh-keygen -l`
     ```
-    Format retka je `<host>:<port> <key_type> <fingerprint>`. Prazni retci i `#` komentari se čuvaju. FTPS certifikat koristi `key_type` `x509`.
-  - `remote::testutil::MemFs`: `RemoteFs` u memoriji (stablo putanja → datoteka/mapa/symlink s modeom i mtimeom), uz `fail_after_bytes(n)`, koji poslije n bajtova pisanja vraća `Disconnected` (za Review Focus 1).
+    A line has the format `<host>:<port> <key_type> <fingerprint>`. Empty lines and `#` comments are preserved. An FTPS certificate uses `key_type` `x509`.
+  - `remote::testutil::MemFs`: an in-memory `RemoteFs` (a tree of path → file/folder/symlink with mode and mtime), with `fail_after_bytes(n)`, which returns `Disconnected` after n bytes of writing (for Review Focus 1).
 
-- [ ] **Step 1: testovi**:
+- [ ] **Step 1: tests**:
   - `parse_remote_variants`:
     - `sftp://m/var/www` → (`sftp`, `m`, `/var/www`);
-    - `sftp://m` → putanja `/`;
+    - `sftp://m` → path `/`;
     - `ftp://a b/x` → server `a b`;
-    - `http://x/y` i `/Users/x` → `None`;
+    - `http://x/y` and `/Users/x` → `None`;
     - `format_remote("sftp","m","/")` → `sftp://m/`.
   - `known_hosts_check_and_trust`:
-    - prazno → `Unknown`;
-    - nakon `trust` → `Known`;
-    - drugi fingerprint → `Changed { old_fingerprint }`;
-    - `trust` novog zamijeni redak i sačuva komentar;
-    - isti host na drugom portu je `Unknown`.
-  - `fingerprint_matches_ssh_keygen`: poznati ed25519 javni ključ (blob iz fiksnog testnog `.pub`, u testu kao konstanta) daje očekivani `SHA256:...` (vrijednost izračunata `ssh-keygen -lf` i upisana u test).
-  - `vfs_routes_remote`: `Ctx` s `MemFs` pod imenom `m`:
-    - `list("sftp://m/d")` daje sortirane unose, `.hidden` ima `hidden == true`;
-    - `mkdir("sftp://m/d","n")` vraća `sftp://m/d/n`;
-    - `rename` vraća novu lokaciju;
-    - `delete(["sftp://m/d"])` briše rekurzivno i `done` broji datoteke;
+    - empty → `Unknown`;
+    - after `trust` → `Known`;
+    - a different fingerprint → `Changed { old_fingerprint }`;
+    - `trust` of a new one replaces the line and keeps the comment;
+    - the same host on a different port is `Unknown`.
+  - `fingerprint_matches_ssh_keygen`: a known ed25519 public key (blob from a fixed test `.pub`, a constant in the test) gives the expected `SHA256:...` (value computed with `ssh-keygen -lf` and written into the test).
+  - `vfs_routes_remote`: `Ctx` with a `MemFs` under the name `m`:
+    - `list("sftp://m/d")` gives sorted entries, `.hidden` has `hidden == true`;
+    - `mkdir("sftp://m/d","n")` returns `sftp://m/d/n`;
+    - `rename` returns the new location;
+    - `delete(["sftp://m/d"])` deletes recursively and `done` counts the files;
     - `nearest("sftp://m/d/nema/x")` → `sftp://m/d`;
-    - `dir_size` daje (bajtovi, broj datoteka).
-  - `vfs_remote_without_session`: `list("sftp://nema/")` → `ListError::Io` s `connection lost`; `nearest` vraća ulaz nepromijenjen.
-  - `disconnected_drops_session`: `MemFs` koji na `list` vrati `Disconnected` → poslije poziva `ctx.sessions.get("m")` je `None`.
-  - `remote_calls_from_inside_tokio_spawn_blocking`: unutar `#[tokio::test]` s vlastitim runtimeom, `spawn_blocking(|| with_timeout(async { Ok(1) }, 1))` vraća `Ok(1)` bez panike.
+    - `dir_size` gives (bytes, file count).
+  - `vfs_remote_without_session`: `list("sftp://nema/")` → `ListError::Io` with `connection lost`; `nearest` returns the input unchanged.
+  - `disconnected_drops_session`: a `MemFs` that returns `Disconnected` on `list` → after the call `ctx.sessions.get("m")` is `None`.
+  - `remote_calls_from_inside_tokio_spawn_blocking`: inside a `#[tokio::test]` with its own runtime, `spawn_blocking(|| with_timeout(async { Ok(1) }, 1))` returns `Ok(1)` without panicking.
 - [ ] **Step 2:** Run `cargo test -p fxfm-core remote vfs`. Expected: FAIL.
-- [ ] **Step 3:** Implementiraj.
-- [ ] **Step 4:** Run `cargo test -p fxfm-core && cargo clippy -p fxfm-core -- -D warnings`. Expected: PASS. Postojeći vfs i archive testovi ostaju zeleni.
+- [ ] **Step 3:** Implement.
+- [ ] **Step 4:** Run `cargo test -p fxfm-core && cargo clippy -p fxfm-core -- -D warnings`. Expected: PASS. Existing vfs and archive tests stay green.
 - [ ] **Step 5:** Commit `feat(core): remote locations, known_hosts, vfs routing for servers`.
 
-### Task 4: Prijenosi sa servera i na server
+### Task 4: Transfers from and to a server
 
 **Files:** Create `crates/core/src/remote/transfer.rs`; Modify `crates/core/src/vfs/transfer.rs`, `crates/core/src/vfs/mod.rs`
 
 **Interfaces:**
-- Consumes: Task 3, `ops::{copy, move_, resolve_dest}`, staging iz plana 2 (`Ctx::new_temp_dir("stage")`, `cleanup_dir`), postojeće `archive_to_local`/`local_to_archive`.
+- Consumes: Task 3, `ops::{copy, move_, resolve_dest}`, staging from plan 2 (`Ctx::new_temp_dir("stage")`, `cleanup_dir`), the existing `archive_to_local`/`local_to_archive`.
 - Produces:
   - `remote::transfer::download_tree(fs: &dyn RemoteFs, items: &[String], to_dir: &Path, obs: &dyn OpObserver, progress: &mut ProgressState) -> Result<(), OpError>`:
-    - mape stvara lokalno;
-    - symlinke stvara kao symlinke (`read_link`; ako je `Unsupported`, preuzima cilj);
-    - postavlja mtime i prava;
-    - greške po stavci idu kroz `obs.error` (Retry/Skip/SkipAll/Cancel).
+    - creates folders locally;
+    - creates symlinks as symlinks (`read_link`; if `Unsupported`, downloads the target);
+    - sets mtime and permissions;
+    - per-item errors go through `obs.error` (Retry/Skip/SkipAll/Cancel).
   - `remote::transfer::upload_tree(fs: &dyn RemoteFs, sources: &[PathBuf], to_dir: &str, obs: &dyn OpObserver, progress: &mut ProgressState) -> Result<OpSummary, OpError>`:
-    - za svaku datoteku `stat` cilja; ako postoji, `obs.conflict` (svi `ConflictAnswer`, uključujući `Rename` i `OverwriteAllOlder` po mtimeu);
-    - postojeća mapa se spaja bez pitanja (kao `ops`);
-    - mapa na mjestu datoteke ili obrnuto daje `obs.error` s `ops::type_clash` tekstom;
-    - pisanje prema pravilu `.part` iz Global Constraints.
-  - `remote::transfer::remove_tree(fs, path, obs) -> Result<u64, OpError>` (broj obrisanih datoteka; koristi ga i `vfs::delete`).
-  - `ProgressState`: zbraja `Progress` i zove `obs.progress` najviše svakih 100 ms.
-  - `vfs::copy`/`vfs::move_` (u `transfer.rs`) za svaku kombinaciju s udaljenom stranom:
+    - for each file, `stat` the target; if it exists, `obs.conflict` (all `ConflictAnswer`s, including `Rename` and `OverwriteAllOlder` by mtime);
+    - an existing folder is merged without asking (as in `ops`);
+    - a folder where a file is expected or vice versa gives `obs.error` with the `ops::type_clash` text;
+    - writing follows the `.part` rule from Global Constraints.
+  - `remote::transfer::remove_tree(fs, path, obs) -> Result<u64, OpError>` (number of deleted files; also used by `vfs::delete`).
+  - `ProgressState`: accumulates `Progress` and calls `obs.progress` at most every 100 ms.
+  - `vfs::copy`/`vfs::move_` (in `transfer.rs`) for each combination with a remote side:
 
-    | izvor → odredište | kako |
+    | source → destination | how |
     |---|---|
-    | server → lokalno | `download_tree` u `stage-<n>`, pa `ops::copy` ili `ops::move_` stage → odredište (konflikti iz `ops`) |
-    | lokalno → server | `upload_tree` direktno |
-    | arhiva → server | izvuci u stage (postojeći kod), pa `upload_tree` |
-    | server → arhiva | `download_tree` u stage, pa postojeći `local_to_archive` |
-    | server → server, različite veze | stage, pa `upload_tree` (job koristi `fork()` za obje strane) |
-    | isti server, move | `fs.rename` po stavci (bez prijenosa); `Exists` → `obs.conflict` (Overwrite = `remove_tree` cilja + `rename`) |
-    | isti server, copy | stage, pa `upload_tree` |
+    | server → local | `download_tree` into `stage-<n>`, then `ops::copy` or `ops::move_` stage → destination (conflicts from `ops`) |
+    | local → server | `upload_tree` directly |
+    | archive → server | extract to stage (existing code), then `upload_tree` |
+    | server → archive | `download_tree` to stage, then the existing `local_to_archive` |
+    | server → server, different connections | stage, then `upload_tree` (the job uses `fork()` for both sides) |
+    | same server, move | `fs.rename` per item (no transfer); `Exists` → `obs.conflict` (Overwrite = `remove_tree` of the target + `rename`) |
+    | same server, copy | stage, then `upload_tree` |
 
-    Kod **move** se izvor briše tek nakon što je odredište uspješno upisano. Preskočene stavke se ne brišu.
-  - Ukupna veličina za progress: `walk_size` na serveru prije početka. Ne broji se dvaput kad prijenos ide kroz stage (dio stage → odredište se ne prikazuje kao novi posao).
+    On **move** the source is deleted only after the destination has been written successfully. Skipped items are not deleted.
+  - Total size for progress: `walk_size` on the server before starting. It is not counted twice when the transfer goes through stage (the stage → destination part is not shown as a new job).
 
-- [ ] **Step 1: testovi** (s `MemFs`):
-  - `upload_new_tree`: lokalna mapa `d/{a.txt, sub/b.txt}` → `sftp://m/up`, sadržaj i prava odgovaraju, a `.part` ne ostaje nigdje.
-  - `upload_conflict_answers`: `Skip` ostavlja cilj, `Overwrite` ga zamijeni, a `Rename { new_name: "a(2).txt" }` napravi novu datoteku.
-  - `upload_replace_keeps_target_mode`: cilj s pravima 0755 i lokalni izvor 0644 → nakon prepisivanja cilj ima 0755.
-  - `upload_interrupted_leaves_target_intact`: `fail_after_bytes(10)` kod prepisivanja 1 MB datoteke → `OpError::Io` s `connection lost`, a cilj je bajt-identičan starom.
-  - `upload_over_symlink_writes_through`: cilj je symlink na `real.txt` → poslije uploada link je i dalje link, a `real.txt` ima novi sadržaj.
-  - `upload_without_dir_write_permission_writes_directly`: `MemFs` mapa označena "no create" i postojeći cilj → sadržaj se upiše direktno.
-  - `download_to_local_with_conflicts`: server → lokalno kroz `ops` konflikte (`SkipAll` preskoči sve postojeće); stage mapa ne postoji poslije.
-  - `move_remote_to_local_deletes_source_after_success`: izvor obrisan; kod `Skip` jedne stavke ta ostaje na serveru.
-  - `move_within_same_server_renames`: `move_(["sftp://m/a/x"], "sftp://m/b/")` ne zove `read_to` (MemFs broji pozive) i `x` je u `b`.
-  - `cancel_during_upload_removes_part`: `obs.is_cancelled()` nakon prve datoteke → `summary.cancelled`, bez `.part`.
-  - `archive_to_remote_and_back`: `a.zip/d` → `sftp://m/x` → `<t>/out`, sadržaj jednak izvoru.
+- [ ] **Step 1: tests** (with `MemFs`):
+  - `upload_new_tree`: local folder `d/{a.txt, sub/b.txt}` → `sftp://m/up`, content and permissions match, and no `.part` remains anywhere.
+  - `upload_conflict_answers`: `Skip` leaves the target, `Overwrite` replaces it, and `Rename { new_name: "a(2).txt" }` creates a new file.
+  - `upload_replace_keeps_target_mode`: target with permissions 0755 and local source 0644 → after overwriting the target has 0755.
+  - `upload_interrupted_leaves_target_intact`: `fail_after_bytes(10)` while overwriting a 1 MB file → `OpError::Io` with `connection lost`, and the target is byte-identical to the old one.
+  - `upload_over_symlink_writes_through`: the target is a symlink to `real.txt` → after the upload the link is still a link, and `real.txt` has the new content.
+  - `upload_without_dir_write_permission_writes_directly`: a `MemFs` folder marked "no create" and an existing target → the content is written directly.
+  - `download_to_local_with_conflicts`: server → local through `ops` conflicts (`SkipAll` skips all existing); the stage folder does not exist afterwards.
+  - `move_remote_to_local_deletes_source_after_success`: source deleted; on `Skip` of one item, that item stays on the server.
+  - `move_within_same_server_renames`: `move_(["sftp://m/a/x"], "sftp://m/b/")` does not call `read_to` (MemFs counts calls) and `x` is in `b`.
+  - `cancel_during_upload_removes_part`: `obs.is_cancelled()` after the first file → `summary.cancelled`, no `.part`.
+  - `archive_to_remote_and_back`: `a.zip/d` → `sftp://m/x` → `<t>/out`, content equal to the source.
 - [ ] **Step 2:** Run `cargo test -p fxfm-core transfer`. Expected: FAIL.
-- [ ] **Step 3:** Implementiraj.
+- [ ] **Step 3:** Implement.
 - [ ] **Step 4:** Run `cargo test -p fxfm-core && cargo clippy -p fxfm-core -- -D warnings`. Expected: PASS.
 - [ ] **Step 5:** Commit `feat(core): copy and move to, from and between servers`.
 
-### Task 5: materialize, entry_stamp i upload natrag za server
+### Task 5: materialize, entry_stamp and upload back for a server
 
 **Files:** Modify `crates/core/src/vfs/mod.rs`
 
 **Interfaces:**
 - Consumes: Task 3–4.
-- Produces (proširenja postojećih potpisa, bez promjene za lokalno i arhivu):
-  - `vfs::materialize(ctx, "sftp://m/x/f.php", prefix)` preuzima u `<prefix>-<n>/f.php`; mapa daje `Only files can be opened from a server`;
-  - `vfs::entry_stamp(ctx, loc)` za server vraća `Some((size, mtime))` iz `stat`, a `None` ako datoteka ne postoji;
-  - `vfs::check_upload_target(loc)` za server: `Ok` ako je veza u `sessions`, inače `Err("Not connected to <ime>; your edited copy is kept")`. Potpis dobiva `ctx: &Ctx` i pozivatelji se ažuriraju (`editwatch.rs`, `jobs.rs`);
-  - `JobRequest::Upload { local, target }` za server ide kroz `upload_tree` s `NullObserver` (overwrite), tj. istim pravilom `.part`.
+- Produces (extensions of existing signatures, no change for local and archive):
+  - `vfs::materialize(ctx, "sftp://m/x/f.php", prefix)` downloads to `<prefix>-<n>/f.php`; a folder gives `Only files can be opened from a server`;
+  - `vfs::entry_stamp(ctx, loc)` for a server returns `Some((size, mtime))` from `stat`, and `None` if the file does not exist;
+  - `vfs::check_upload_target(loc)` for a server: `Ok` if the connection is in `sessions`, otherwise `Err("Not connected to <name>; your edited copy is kept")`. The signature gets `ctx: &Ctx` and callers are updated (`editwatch.rs`, `jobs.rs`);
+  - `JobRequest::Upload { local, target }` for a server goes through `upload_tree` with `NullObserver` (overwrite), i.e. the same `.part` rule.
 
-- [ ] **Step 1: testovi**:
-  - `materialize_remote_file`: sadržaj preuzete kopije jednak je MemFs datoteci.
-  - `entry_stamp_remote_changes_after_write`: stamp prije i poslije promjene na serveru se razlikuje.
-  - `check_upload_target_needs_session`: s vezom `Ok`, bez nje `Err` koji sadrži `your edited copy is kept`.
+- [ ] **Step 1: tests**:
+  - `materialize_remote_file`: the content of the downloaded copy equals the MemFs file.
+  - `entry_stamp_remote_changes_after_write`: the stamp before and after a change on the server differs.
+  - `check_upload_target_needs_session`: with a connection `Ok`, without one `Err` containing `your edited copy is kept`.
 - [ ] **Step 2:** Run `cargo test -p fxfm-core vfs`. Expected: FAIL.
-- [ ] **Step 3:** Implementiraj.
-- [ ] **Step 4:** Run `cargo test --workspace && cargo clippy --workspace -- -D warnings`. Expected: PASS (uključujući `src-tauri` editwatch testove).
+- [ ] **Step 3:** Implement.
+- [ ] **Step 4:** Run `cargo test --workspace && cargo clippy --workspace -- -D warnings`. Expected: PASS (including the `src-tauri` editwatch tests).
 - [ ] **Step 5:** Commit `feat(core): F3/F4 materialize and upload back for server files`.
 
-### Task 6: SFTP backend i spajanje preko SSH-a
+### Task 6: SFTP backend and connecting over SSH
 
 **Files:** Create `crates/core/src/remote/sftp.rs`; Modify `crates/core/src/remote/{mod.rs,testutil.rs}`, `crates/core/Cargo.toml`
 
@@ -402,45 +402,45 @@ pub trait RemoteFs: Send + Sync {
   #[derive(Debug, Clone, PartialEq)]
   pub enum ConnectError {
       HostKey { host: String, port: u16, key_type: String, fingerprint: String, changed_from: Option<String> },
-      NeedPassword, NeedPassphrase,          // nedostaje; UI pita
-      AuthFailed,                            // poslano, odbijeno ("Wrong user name, password or key")
+      NeedPassword, NeedPassphrase,          // missing; the UI asks
+      AuthFailed,                            // sent, rejected ("Wrong user name, password or key")
       Timeout,                               // "Server did not answer within 15 seconds"
-      Failed(String),                        // DNS, odbijena veza, nepodržani algoritmi (poruka kaže da uključi legacy opciju)
+      Failed(String),                        // DNS, refused connection, unsupported algorithms (the message says to enable the legacy option)
   }
   pub struct ConnectOptions<'a> { pub data_dir: &'a Path, pub known: &'a KnownHosts, pub accept_fingerprint: Option<&'a str> }
-  pub fn connect(server: &ServerEntry, creds: &Credentials, opts: &ConnectOptions) -> Result<Arc<dyn RemoteFs>, ConnectError>; // u remote/mod.rs, bira backend po protokolu
-  pub(crate) fn ssh_connect(server, creds, opts) -> Result<SshSession, ConnectError>;  // dijele SFTP i SCP
+  pub fn connect(server: &ServerEntry, creds: &Credentials, opts: &ConnectOptions) -> Result<Arc<dyn RemoteFs>, ConnectError>; // in remote/mod.rs, picks the backend by protocol
+  pub(crate) fn ssh_connect(server, creds, opts) -> Result<SshSession, ConnectError>;  // shared by SFTP and SCP
   ```
-- Host key se provjerava u `check_server_key` russh handlera:
-  - `Known` → nastavi;
-  - `Unknown` ili `Changed` → ako je `accept_fingerprint == Some(fp)` i jednak predočenom, `trust` pa nastavi; inače prekini vezu **prije autentikacije** i vrati `HostKey`.
-- Autentikacija:
+- The host key is checked in the russh handler's `check_server_key`:
+  - `Known` → continue;
+  - `Unknown` or `Changed` → if `accept_fingerprint == Some(fp)` and equal to the one presented, `trust` and continue; otherwise abort the connection **before authentication** and return `HostKey`.
+- Authentication:
   - `Password`;
-  - `Key`: ključ bez passphrasea; ako je kriptiran, a passphrase nije dan → `NeedPassphrase`;
+  - `Key`: a key without a passphrase; if it is encrypted and no passphrase was given → `NeedPassphrase`;
   - `KeyPassphrase`.
 
-  Učitavanje preko `russh::keys::decode_secret_key` podržava OpenSSH (RSA, ECDSA, Ed25519) i PEM (PKCS#1, PKCS#8, kriptirani). Za RSA se koristi `best_supported_rsa_hash`.
-- `legacy_algorithms`: `Preferred` dodaje `ssh-rsa` (SHA-1) za host key i korisnički ključ te `diffie-hellman-group14-sha1` i `diffie-hellman-group1-sha1` za kex.
-- `SftpFs` ima `display()` `sftp://user@host[:port]` i `home()` = `canonicalize(".")`. `replace` koristi `posix-rename@openssh.com` ako ga server nudi. `fork()` vraća klon iste veze (SFTP multipleksira).
-- `testutil::SshTestServer`: russh server na `127.0.0.1:0` u testu, s generiranim ed25519 host keyem. Prihvaća lozinku `pw` ili zadani javni ključ korisnika.
-  - Subsystem `sftp` pokreće sistemski `sftp-server` (`/usr/libexec/sftp-server`, `/usr/lib/openssh/sftp-server`, `/usr/lib/ssh/sftp-server`) i preusmjerava stdio.
-  - `exec` pokreće `sh -c <cmd>` (za SCP, Task 7).
-  - Opcija `stall()` prestaje odgovarati bez zatvaranja veze.
-  - Ako `sftp-server` nije pronađen, testovi ispisuju `skipped: no sftp-server` i prolaze.
+  Loading via `russh::keys::decode_secret_key` supports OpenSSH (RSA, ECDSA, Ed25519) and PEM (PKCS#1, PKCS#8, encrypted). For RSA, `best_supported_rsa_hash` is used.
+- `legacy_algorithms`: `Preferred` adds `ssh-rsa` (SHA-1) for the host key and user key, and `diffie-hellman-group14-sha1` and `diffie-hellman-group1-sha1` for kex.
+- `SftpFs` has `display()` `sftp://user@host[:port]` and `home()` = `canonicalize(".")`. `replace` uses `posix-rename@openssh.com` if the server offers it. `fork()` returns a clone of the same connection (SFTP multiplexes).
+- `testutil::SshTestServer`: a russh server on `127.0.0.1:0` inside the test, with a generated ed25519 host key. It accepts the password `pw` or the user's given public key.
+  - The `sftp` subsystem starts the system `sftp-server` (`/usr/libexec/sftp-server`, `/usr/lib/openssh/sftp-server`, `/usr/lib/ssh/sftp-server`) and redirects stdio.
+  - `exec` runs `sh -c <cmd>` (for SCP, Task 7).
+  - The `stall()` option stops responding without closing the connection.
+  - If `sftp-server` is not found, the tests print `skipped: no sftp-server` and pass.
 
-- [ ] **Step 1: testovi** (`#[test]`, protiv `SshTestServer`):
-  - `sftp_password_login_and_list`: lista privremene mape servera odgovara `fs::read_dir` (imena, `is_dir`, veličine).
-  - `sftp_key_login_ed25519_and_encrypted_pem`: OpenSSH ed25519 ključ radi; kriptirani PKCS#8 bez passphrasea daje `NeedPassphrase`, a s ispravnim passphraseom radi.
-  - `unknown_host_key_asks_then_trusts`: prvo `HostKey { changed_from: None }`, zatim s `accept_fingerprint` = taj fingerprint spaja i upisuje u `known_hosts`; treći put spaja bez pitanja.
-  - `changed_host_key_refuses_before_auth`: `known_hosts` ima drugi fingerprint → `HostKey { changed_from: Some(old) }`, a server **nije primio** nijedan auth zahtjev (brojač u test serveru je 0).
-  - `accepting_requires_matching_fingerprint`: `accept_fingerprint` drugog ključa → opet `HostKey`, `known_hosts` nepromijenjen.
+- [ ] **Step 1: tests** (`#[test]`, against `SshTestServer`):
+  - `sftp_password_login_and_list`: the listing of a server temp folder matches `fs::read_dir` (names, `is_dir`, sizes).
+  - `sftp_key_login_ed25519_and_encrypted_pem`: an OpenSSH ed25519 key works; an encrypted PKCS#8 without a passphrase gives `NeedPassphrase`, and works with the correct passphrase.
+  - `unknown_host_key_asks_then_trusts`: first `HostKey { changed_from: None }`, then with `accept_fingerprint` = that fingerprint it connects and writes to `known_hosts`; the third time it connects without asking.
+  - `changed_host_key_refuses_before_auth`: `known_hosts` has a different fingerprint → `HostKey { changed_from: Some(old) }`, and the server **received no** auth request (the counter in the test server is 0).
+  - `accepting_requires_matching_fingerprint`: `accept_fingerprint` of a different key → `HostKey` again, `known_hosts` unchanged.
   - `wrong_password_is_auth_failed`, `missing_password_is_need_password`.
-  - `sftp_file_ops_roundtrip`: `write_from`, `read_to`, `mkdir`, `rename` (`Exists` ako cilj postoji), `replace`, `set_mode`, `symlink`/`read_link`, `remove_file` i `remove_dir` rade na pravom `sftp-server`u.
-  - `stalled_server_times_out`: nakon `stall()` poziv `list` vraća `Timeout` za ≤ 65 s. Test koristi `#[cfg(test)]` timeout 2 s preko `with_timeout` parametra, pa traje ~2 s.
-  - `sftp_calls_work_from_spawn_blocking`: `list` pozvan iz `tokio::task::spawn_blocking` unutar drugog runtimea vraća `Ok`.
+  - `sftp_file_ops_roundtrip`: `write_from`, `read_to`, `mkdir`, `rename` (`Exists` if the target exists), `replace`, `set_mode`, `symlink`/`read_link`, `remove_file` and `remove_dir` work against a real `sftp-server`.
+  - `stalled_server_times_out`: after `stall()` a `list` call returns `Timeout` within ≤ 65 s. The test uses a `#[cfg(test)]` timeout of 2 s via the `with_timeout` parameter, so it takes ~2 s.
+  - `sftp_calls_work_from_spawn_blocking`: `list` called from `tokio::task::spawn_blocking` inside another runtime returns `Ok`.
 - [ ] **Step 2:** Run `cargo test -p fxfm-core sftp`. Expected: FAIL.
-- [ ] **Step 3:** Implementiraj.
-- [ ] **Step 4:** Run `cargo test -p fxfm-core && cargo clippy -p fxfm-core -- -D warnings && cargo tree -p fxfm-core -i aws-lc-sys; cargo tree -p fxfm-core -i openssl-sys`. Expected: testovi PASS, a oba `cargo tree` ispisuju da paket nije pronađen.
+- [ ] **Step 3:** Implement.
+- [ ] **Step 4:** Run `cargo test -p fxfm-core && cargo clippy -p fxfm-core -- -D warnings && cargo tree -p fxfm-core -i aws-lc-sys; cargo tree -p fxfm-core -i openssl-sys`. Expected: tests PASS, and both `cargo tree` commands report that the package was not found.
 - [ ] **Step 5:** Commit `feat(core): SFTP backend with host key check and key auth`.
 
 ### Task 7: SCP backend
@@ -448,82 +448,82 @@ pub trait RemoteFs: Send + Sync {
 **Files:** Create `crates/core/src/remote/scp.rs`; Modify `crates/core/src/remote/mod.rs`
 
 **Interfaces:**
-- Consumes: `ssh_connect` iz Taska 6.
+- Consumes: `ssh_connect` from Task 6.
 - Produces:
-  - `ScpFs: RemoteFs`. Pri spajanju pokušava otvoriti SFTP subsystem:
-    - ako uspije, `list`, `stat`, `read_link` i `home` idu preko SFTP-a;
-    - inače `list` izvršava `LC_ALL=C ls -la --time-style=+%s -- <path>` (GNU), a ako to ne uspije, `LC_ALL=C ls -la -T -- <path>` (BSD);
-    - `stat` je `ls -lad`; `home` je `pwd`.
-  - Prijenos ide uvijek preko `scp -t` i `scp -f` (SCP protokol: `C<mode> <size> <name>\n`, potvrde `\0`, greške `\1`/`\2`).
-  - `mkdir`, `remove_file`, `remove_dir`, `rename` (`mv -n`, zatim provjera), `replace` (`mv -f`), `symlink` (`ln -s`) i `set_mode` (`chmod`) su exec naredbe. Izlazni kod ≠ 0 daje `RemoteError` po stderru: `No such file` → `NotFound`, `Permission denied` → `PermissionDenied`, ostalo `Other(stderr)`.
-  - `pub(crate) fn shell_quote(s: &str) -> String`: POSIX single-quote (`'` → `'\''`). Svaki argument u svakoj naredbi prolazi kroz `shell_quote`, a putanje idu iza `--`.
-  - `pub(crate) fn parse_ls(line: &str, gnu: bool) -> Option<(String, RemoteStat, Option<String>)>` (ime, stat, cilj symlinka).
+  - `ScpFs: RemoteFs`. On connecting it tries to open the SFTP subsystem:
+    - if that succeeds, `list`, `stat`, `read_link` and `home` go over SFTP;
+    - otherwise `list` runs `LC_ALL=C ls -la --time-style=+%s -- <path>` (GNU), and if that fails, `LC_ALL=C ls -la -T -- <path>` (BSD);
+    - `stat` is `ls -lad`; `home` is `pwd`.
+  - Transfers always go through `scp -t` and `scp -f` (SCP protocol: `C<mode> <size> <name>\n`, acknowledgements `\0`, errors `\1`/`\2`).
+  - `mkdir`, `remove_file`, `remove_dir`, `rename` (`mv -n`, then a check), `replace` (`mv -f`), `symlink` (`ln -s`) and `set_mode` (`chmod`) are exec commands. An exit code ≠ 0 gives a `RemoteError` based on stderr: `No such file` → `NotFound`, `Permission denied` → `PermissionDenied`, anything else `Other(stderr)`.
+  - `pub(crate) fn shell_quote(s: &str) -> String`: POSIX single-quote (`'` → `'\''`). Every argument in every command goes through `shell_quote`, and paths come after `--`.
+  - `pub(crate) fn parse_ls(line: &str, gnu: bool) -> Option<(String, RemoteStat, Option<String>)>` (name, stat, symlink target).
 
-- [ ] **Step 1: testovi**:
-  - `shell_quote_cases`: `a b` → `'a b'`, `it's` → `'it'\''s'`, `$(rm -rf ~)` ostaje doslovan unutar navodnika.
-  - `parse_ls_gnu_and_bsd`: fiksni retci (datoteka, mapa, symlink `a -> b`, ime s razmacima, ime s `->` u imenu datoteke nije symlink ako prvi znak nije `l`) daju očekivane vrijednosti.
-  - `scp_roundtrip_against_test_server` (SshTestServer; exec pokreće sistemski `scp`): upload i download 1 MB datoteke daju isti sadržaj; `mkdir`, `rename`, `remove_*` i `set_mode` rade.
-  - `scp_names_with_shell_chars`: datoteke `a b.txt`, `it's.php`, `$x;y*.sh` i `čćž.txt` prežive upload, list, rename, download i delete. Nijedna druga datoteka u mapi ne nestane, a nije nastala datoteka `y`.
-  - `scp_list_without_sftp_uses_ls`: test server s isključenim SFTP subsystemom daje isti listing kao sa SFTP-om (imena, `is_dir`, veličina).
+- [ ] **Step 1: tests**:
+  - `shell_quote_cases`: `a b` → `'a b'`, `it's` → `'it'\''s'`, `$(rm -rf ~)` stays literal inside the quotes.
+  - `parse_ls_gnu_and_bsd`: fixed lines (file, folder, symlink `a -> b`, a name with spaces, a file name containing `->` is not a symlink if the first character is not `l`) give the expected values.
+  - `scp_roundtrip_against_test_server` (SshTestServer; exec runs the system `scp`): upload and download of a 1 MB file give the same content; `mkdir`, `rename`, `remove_*` and `set_mode` work.
+  - `scp_names_with_shell_chars`: files `a b.txt`, `it's.php`, `$x;y*.sh` and `čćž.txt` survive upload, list, rename, download and delete. No other file in the folder disappears, and no file `y` was created.
+  - `scp_list_without_sftp_uses_ls`: a test server with the SFTP subsystem disabled gives the same listing as with SFTP (names, `is_dir`, size).
 - [ ] **Step 2:** Run `cargo test -p fxfm-core scp`. Expected: FAIL.
-- [ ] **Step 3:** Implementiraj.
+- [ ] **Step 3:** Implement.
 - [ ] **Step 4:** Run `cargo test -p fxfm-core && cargo clippy -p fxfm-core -- -D warnings`. Expected: PASS.
 - [ ] **Step 5:** Commit `feat(core): SCP backend with ls fallback`.
 
-### Task 8: FTP i FTPS backend
+### Task 8: FTP and FTPS backend
 
 **Files:** Create `crates/core/src/remote/ftp.rs`; Modify `crates/core/src/remote/{mod.rs,testutil.rs}`, `crates/core/Cargo.toml`
 
 **Interfaces:**
 - Consumes: Task 1, Task 3 (`KnownHosts`).
 - Produces:
-  - `FtpFs: RemoteFs`. Jedna kontrolna veza iza `Mutex`a. `fork()` otvara novu prijavu s istim podacima, pa dugi jobovi ne blokiraju listanje panela.
-  - Listanje: `MLSD` ako ga server oglašava u `FEAT`, inače `LIST -a` parsiran suppaftpovim `list::File` (Unix i DOS format).
-  - Načini: pasivni (zadano) ili aktivni (`ftp_passive == false`).
-  - FTPS je explicit TLS (`AUTH TLS`) s rustls. Certifikat se provjerava **TOFU** preko `known_hosts` (`key_type` `x509`, SHA-256 DER-a), na isti način kao SSH host key (`ConnectError::HostKey`). Prolazak webpki provjere nije uvjet, jer LAN serveri imaju self-signed certifikate.
+  - `FtpFs: RemoteFs`. A single control connection behind a `Mutex`. `fork()` opens a new login with the same credentials, so long jobs do not block panel listing.
+  - Listing: `MLSD` if the server advertises it in `FEAT`, otherwise `LIST -a` parsed by suppaftp's `list::File` (Unix and DOS format).
+  - Modes: passive (default) or active (`ftp_passive == false`).
+  - FTPS is explicit TLS (`AUTH TLS`) with rustls. The certificate is verified with **TOFU** via `known_hosts` (`key_type` `x509`, SHA-256 of the DER), the same way as an SSH host key (`ConnectError::HostKey`). Passing the webpki check is not a requirement, because LAN servers have self-signed certificates.
   - `ftp_encoding`:
-    - Utf8 → `OPTS UTF8 ON` ako ga server podržava;
-    - Windows1250 ili Latin1 → imena se dekodiraju i kodiraju preko `encoding_rs`.
+    - Utf8 → `OPTS UTF8 ON` if the server supports it;
+    - Windows1250 or Latin1 → names are decoded and encoded via `encoding_rs`.
 
-    **Ako suppaftp ne izlaže sirove bajtove imena** (provjeri u izvoru 12.x), podrži samo Utf8, sakrij polje u UI-ju (Task 11) i dodaj stavku u `docs/ROADMAP.md`. Ne smije se dogoditi da se ime koje se ne može dekodirati tiho promijeni.
-  - `set_mode` → `SITE CHMOD`; ako ga server odbije, `Unsupported("This server does not support changing permissions")`. `symlink` i `read_link` → `Unsupported`.
-  - `replace` → `RNFR`/`RNTO`, a ako to ne uspije, `DELE` cilja pa `RNTO`.
-  - `testutil::FtpTestServer`: libunftp s `unftp-sbe-fs` nad privremenom mapom na `127.0.0.1:0`, korisnik `u`/`pw`, opcionalno FTPS s rcgen self-signed certifikatom.
+    **If suppaftp does not expose the raw bytes of the name** (check in the 12.x source), support only Utf8, hide the field in the UI (Task 11) and add an item to `docs/ROADMAP.md`. A name that cannot be decoded must never be silently altered.
+  - `set_mode` → `SITE CHMOD`; if the server rejects it, `Unsupported("This server does not support changing permissions")`. `symlink` and `read_link` → `Unsupported`.
+  - `replace` → `RNFR`/`RNTO`, and if that fails, `DELE` of the target then `RNTO`.
+  - `testutil::FtpTestServer`: libunftp with `unftp-sbe-fs` over a temp folder on `127.0.0.1:0`, user `u`/`pw`, optionally FTPS with an rcgen self-signed certificate.
 
-- [ ] **Step 1: testovi**:
-  - `ftp_login_list_roundtrip`: list, `write_from`/`read_to` 1 MB, `mkdir`, `rename`, `replace`, `remove_file` i `remove_dir`.
+- [ ] **Step 1: tests**:
+  - `ftp_login_list_roundtrip`: list, `write_from`/`read_to` of 1 MB, `mkdir`, `rename`, `replace`, `remove_file` and `remove_dir`.
   - `ftp_wrong_password_is_auth_failed`.
-  - `ftps_unknown_cert_asks_then_trusts`: prvo `HostKey` s `key_type == "x509"`, zatim s prihvaćenim fingerprintom spaja; promijenjeni cert daje `changed_from: Some(_)`.
-  - `ftp_names_with_spaces_and_unicode`: `a b.txt` i `čćž.txt` prežive upload, list, rename, download i delete.
-  - `ftp_fork_is_independent`: dok jedan `fork()` čita 5 MB datoteku u drugom threadu, `list` na originalu vraća rezultat prije kraja čitanja.
-  - `ftp_active_mode_lists`: `ftp_passive = false` daje isti listing.
+  - `ftps_unknown_cert_asks_then_trusts`: first `HostKey` with `key_type == "x509"`, then with the accepted fingerprint it connects; a changed cert gives `changed_from: Some(_)`.
+  - `ftp_names_with_spaces_and_unicode`: `a b.txt` and `čćž.txt` survive upload, list, rename, download and delete.
+  - `ftp_fork_is_independent`: while one `fork()` reads a 5 MB file in another thread, `list` on the original returns a result before the read finishes.
+  - `ftp_active_mode_lists`: `ftp_passive = false` gives the same listing.
 - [ ] **Step 2:** Run `cargo test -p fxfm-core ftp`. Expected: FAIL.
-- [ ] **Step 3:** Implementiraj.
-- [ ] **Step 4:** Run `cargo test -p fxfm-core && cargo clippy -p fxfm-core -- -D warnings && cargo tree -p fxfm-core -i openssl-sys`. Expected: PASS, a za `openssl-sys` paket nije pronađen.
+- [ ] **Step 3:** Implement.
+- [ ] **Step 4:** Run `cargo test -p fxfm-core && cargo clippy -p fxfm-core -- -D warnings && cargo tree -p fxfm-core -i openssl-sys`. Expected: PASS, and for `openssl-sys` the package is not found.
 - [ ] **Step 5:** Commit `feat(core): FTP and FTPS backend`.
 
-### Task 9: Tauri sloj – veze, lozinke, Keychain, F3/F4 i migracija
+### Task 9: Tauri layer – connections, passwords, Keychain, F3/F4 and migration
 
 **Files:** Create `src-tauri/src/remote.rs`, `src-tauri/src/keychain.rs`; Modify `src-tauri/src/{state.rs,commands.rs,jobs.rs,main.rs}`, `src-tauri/Cargo.toml`
 
 **Interfaces:**
-- Consumes: Task 1–8; postojeći `blocking`, `Jobs`, `EditWatch`, `storage::migrate`.
+- Consumes: Task 1–8; the existing `blocking`, `Jobs`, `EditWatch`, `storage::migrate`.
 - Produces:
-  - `KeychainStore: SecretStore` (`security_framework::passwords::{get_generic_password, set_generic_password, delete_generic_password}`, servis `fxfm`), samo `cfg(target_os = "macos")`. Na drugim sustavima `set` vraća `Err("No system keychain on this platform")`.
-  - `pub struct Connector` u `AppState.remote`. Sadrži `servers: Mutex<ServerList>`, `vault: Mutex<Option<Vault>>`, `session_secrets: MemoryStore` (unesene, nespremljene lozinke) i `quick: Mutex<HashMap<String, ServerEntry>>` (brze veze po imenu).
-  - Komande (sve `async` + `blocking`, kao postojeće):
+  - `KeychainStore: SecretStore` (`security_framework::passwords::{get_generic_password, set_generic_password, delete_generic_password}`, service `fxfm`), only `cfg(target_os = "macos")`. On other systems `set` returns `Err("No system keychain on this platform")`.
+  - `pub struct Connector` in `AppState.remote`. It holds `servers: Mutex<ServerList>`, `vault: Mutex<Option<Vault>>`, `session_secrets: MemoryStore` (entered, unsaved passwords) and `quick: Mutex<HashMap<String, ServerEntry>>` (quick connections by name).
+  - Commands (all `async` + `blocking`, like the existing ones):
     - `servers_load() -> ServerList`;
-    - `servers_save(list: ServerList) -> Result<(), String>`: radi `validate`. Za obrisane servere briše njihove tajne iz trenutnog storea (Keychain ili otključan trezor) i iz `session_secrets`;
-    - `server_secret_set(id: String, kind: SecretKind, secret: Option<String>) -> Result<(), ConnectReply>`: `None` briše. Portable bez otključanog trezora vraća `NeedMaster { create }`;
+    - `servers_save(list: ServerList) -> Result<(), String>`: runs `validate`. For deleted servers it deletes their secrets from the current store (Keychain or unlocked vault) and from `session_secrets`;
+    - `server_secret_set(id: String, kind: SecretKind, secret: Option<String>) -> Result<(), ConnectReply>`: `None` deletes. Portable without an unlocked vault returns `NeedMaster { create }`;
     - `connect(req: ConnectRequest) -> Result<ConnectReply, String>`;
-    - `disconnect(name: String) -> Result<(), String>`: `close()` i uklanjanje iz `sessions`; emitira `connections://changed`. Briše `view-*` kopije s te veze i F4 kopije bez neučitanih promjena (spec §5: "privremene kopije čiste se pri zatvaranju veze"). Kopije s neučitanim promjenama ostaju, a upload kasnije javlja `Not connected…` (Task 5). Test: `disconnect_cleans_clean_copies_only`;
+    - `disconnect(name: String) -> Result<(), String>`: `close()` and removal from `sessions`; emits `connections://changed`. Deletes `view-*` copies from that connection and F4 copies with no unsaved changes (spec §5: "temporary copies are cleaned up when the connection is closed"). Copies with unsaved changes stay, and a later upload reports `Not connected…` (Task 5). Test: `disconnect_cleans_clean_copies_only`;
     - `list_connections() -> Vec<ConnectionInfo>`: `ConnectionInfo { name, display, root: String /* "sftp://name/" */ }`;
-    - `master_unlock(password: String) -> Result<(), String>`, `master_set(old: Option<String>, new: String) -> Result<(), String>` (stvara trezor ili mijenja lozinku), `master_status() -> MasterStatus { mode: StorageMode, exists: bool, unlocked: bool }`;
+    - `master_unlock(password: String) -> Result<(), String>`, `master_set(old: Option<String>, new: String) -> Result<(), String>` (creates the vault or changes the password), `master_status() -> MasterStatus { mode: StorageMode, exists: bool, unlocked: bool }`;
     - `import_key(path: String) -> Result<String, String>`;
-    - `chmod(location: String, mode: u32) -> Result<(), String>`: lokalno i arhiva → `Change attributes works on SFTP and SCP servers`.
+    - `chmod(location: String, mode: u32) -> Result<(), String>`: local and archive → `Change attributes works on SFTP and SCP servers`.
     ```rust
     #[serde(rename_all = "camelCase")]
-    pub struct ConnectRequest { pub server: Option<String> /* ime */, pub url: Option<String>,
+    pub struct ConnectRequest { pub server: Option<String> /* name */, pub url: Option<String>,
         pub password: Option<String>, pub passphrase: Option<String>, pub save: bool, pub accept_fingerprint: Option<String> }
     #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
     pub enum ConnectReply {
@@ -533,82 +533,82 @@ pub trait RemoteFs: Send + Sync {
         NeedMaster { create: bool },
     }
     ```
-  - Tok `connect`:
-    1. pronađe server (ime u listi ili `parse_url`); ako je već spojen, odmah `Connected`;
-    2. lozinke uzima iz zahtjeva, zatim `session_secrets`, zatim storea. U portable načinu s `save_password` i zaključanim trezorom vraća `NeedMaster { create: !Vault::exists }`;
-    3. zove `remote::connect` (`blocking`);
-    4. `NeedPassword`/`NeedPassphrase` → reply s `retry: false`; `AuthFailed` → `NeedPassword { retry: true }` (za ključ s passphraseom `NeedPassphrase { retry: true }`), a pogrešna lozinka se briše iz `session_secrets`;
-    5. kod uspjeha: unesena lozinka ide u `session_secrets`, a uz `save` i u store; veza se registrira u `sessions`; emitira se `connections://changed`; vraća se `Connected` s `remote_dir` ili `home()`.
-  - `Disconnected` iz bilo koje komande ili joba emitira `connections://changed` (veza je već izbačena u core-u, Task 3).
-  - `edit_file` i `open_viewer` za server rade kao za arhivu (`materialize`, `EditWatch`). Naslov viewera je puna lokacija.
+  - The `connect` flow:
+    1. finds the server (a name in the list or `parse_url`); if already connected, returns `Connected` immediately;
+    2. takes passwords from the request, then `session_secrets`, then the store. In portable mode with `save_password` and a locked vault it returns `NeedMaster { create: !Vault::exists }`;
+    3. calls `remote::connect` (`blocking`);
+    4. `NeedPassword`/`NeedPassphrase` → reply with `retry: false`; `AuthFailed` → `NeedPassword { retry: true }` (for a key with a passphrase `NeedPassphrase { retry: true }`), and the wrong password is deleted from `session_secrets`;
+    5. on success: the entered password goes into `session_secrets`, and with `save` also into the store; the connection is registered in `sessions`; `connections://changed` is emitted; `Connected` is returned with `remote_dir` or `home()`.
+  - `Disconnected` from any command or job emits `connections://changed` (the connection has already been dropped in core, Task 3).
+  - `edit_file` and `open_viewer` for a server work as for an archive (`materialize`, `EditWatch`). The viewer title is the full location.
   - `set_storage_mode(mode, master: Option<String>)`:
-    - Portable → System: treba otključan trezor (inače `Err("master password required")`). Nakon migracije datoteka sve tajne idu u Keychain (`migrate_secrets`).
-    - System → Portable: `master` je obavezan i stvara novi trezor u novom `fxfm-data`. Tajne se kopiraju iz Keychaina, a iz Keychaina se brišu tek nakon što se trezor ponovno otvori i svaka vrijednost provjeri.
-    - Poruka potvrde navodi broj preseljenih lozinki.
-  - Izlaz: `close()` svih veza; privremene kopije s neučitanim promjenama ostaju (postojeće pravilo editwatcha).
+    - Portable → System: needs an unlocked vault (otherwise `Err("master password required")`). After the file migration, all secrets go to the Keychain (`migrate_secrets`).
+    - System → Portable: `master` is required and creates a new vault in the new `fxfm-data`. Secrets are copied from the Keychain, and deleted from the Keychain only after the vault is reopened and every value verified.
+    - The confirmation message states the number of migrated passwords.
+  - Exit: `close()` on all connections; temporary copies with unsaved changes stay (the existing editwatch rule).
 
-- [ ] **Step 1: testovi** (`src-tauri`, bez Keychaina: `Connector` prima `Arc<dyn SecretStore>` za sistemski način, a testovi daju `MemoryStore`):
-  - `connect_reply_serde`: JSON oblici svih `ConnectReply` varijanti (`{"kind":"hostKey","host":…,"changedFrom":null}` …).
-  - `servers_save_removes_secrets_of_deleted`: obrisan server → njegov `id/password` nestaje iz storea.
-  - `portable_save_password_needs_master`: portable, trezor ne postoji → `server_secret_set` vraća `NeedMaster { create: true }`; poslije `master_set` lozinka je u `secrets.json`.
-  - `wrong_password_not_cached`: `AuthFailed` ne ostavlja lozinku u `session_secrets` (logika u čistoj funkciji `after_connect(result, entered, store)`, koja se testira bez mreže).
-  - `migrate_portable_to_system_moves_secrets` i `migrate_system_to_portable_requires_master` (MemoryStore umjesto Keychaina, privremene mape umjesto pravih).
-  - `disconnected_error_drops_session`: job koji dobije `Disconnected` → `list_connections` ga više ne vraća.
+- [ ] **Step 1: tests** (`src-tauri`, without Keychain: `Connector` takes an `Arc<dyn SecretStore>` for system mode, and tests supply a `MemoryStore`):
+  - `connect_reply_serde`: JSON shapes of all `ConnectReply` variants (`{"kind":"hostKey","host":…,"changedFrom":null}` …).
+  - `servers_save_removes_secrets_of_deleted`: a deleted server → its `id/password` disappears from the store.
+  - `portable_save_password_needs_master`: portable, no vault → `server_secret_set` returns `NeedMaster { create: true }`; after `master_set` the password is in `secrets.json`.
+  - `wrong_password_not_cached`: `AuthFailed` leaves no password in `session_secrets` (logic in the pure function `after_connect(result, entered, store)`, tested without a network).
+  - `migrate_portable_to_system_moves_secrets` and `migrate_system_to_portable_requires_master` (MemoryStore instead of Keychain, temp folders instead of real ones).
+  - `disconnected_error_drops_session`: a job that gets `Disconnected` → `list_connections` no longer returns it.
 - [ ] **Step 2:** Run `cargo test -p fxfm`. Expected: FAIL.
-- [ ] **Step 3:** Implementiraj. Registriraj komande u `main.rs`.
+- [ ] **Step 3:** Implement. Register the commands in `main.rs`.
 - [ ] **Step 4:** Run `cargo test --workspace && cargo clippy --workspace -- -D warnings`. Expected: PASS.
 - [ ] **Step 5:** Commit `feat: connections, password storage and server commands`.
 
-### Task 10: UI – server u panelima
+### Task 10: UI – a server in the panels
 
 **Files:** Modify `ui/lib.mjs`, `ui/lib.test.mjs`, `ui/app.js`, `ui/panel.js`, `ui/hotlist.js`, `ui/dialogs.js`, `crates/core/src/keymap.rs`
 
 **Interfaces:**
-- Consumes: komande iz Taska 9; događaj `connections://changed`.
-- Produces (`lib.mjs`, čiste funkcije):
-  - `parseRemote(loc) -> {scheme, server, path} | null` (ista pravila kao `parse_remote`);
+- Consumes: commands from Task 9; the `connections://changed` event.
+- Produces (`lib.mjs`, pure functions):
+  - `parseRemote(loc) -> {scheme, server, path} | null` (same rules as `parse_remote`);
   - `remoteRoot(loc) -> "sftp://m/"`;
-  - `parentLocation` za server: `sftp://m/var` → `sftp://m/`, a `sftp://m/` → `null` (Backspace u korijenu ne radi ništa);
+  - `parentLocation` for a server: `sftp://m/var` → `sftp://m/`, and `sftp://m/` → `null` (Backspace at the root does nothing);
   - `joinLocation("sftp://m/", "x")` → `sftp://m/x`;
-  - `connectionLost(message) -> boolean` (prefiksi `connection lost`, `server not responding`);
-  - `deleteConfirmText(location, n)`: na serveru `Delete N file(s) from the server? This cannot be undone.`, a inače postojeći tekstovi.
-- Ponašanje:
-  - Traka diskova dobiva gumb `☁️ <ime>` za svaku vezu iz `list_connections`. Osvježava se na `connections://changed`. Aktivan je kad je panel na toj vezi.
-  - Red s putanjom: na serveru umjesto slobodnog prostora `[sftp://user@host]` (`display`).
-  - `cm_disconnect` (Ctrl+Shift+F) prekida vezu aktivnog panela. Svi paneli na toj vezi idu na `local_dir` servera ili `~`.
-  - Greška s `connectionLost` u panelu ili jobu prikazuje dijalog `Connection to <ime> lost` s gumbima `Reconnect` (tok iz Taska 11, zatim ista putanja ili `nearest`) i `Close` (panel ide na `~`).
-  - Hotlista: `cd sftp://ime/putanja` i Target path na serveru spajaju (ako veza ne postoji) pa otvaraju putanju. `REMOTE_MSG` se uklanja.
-  - `cm_chmod` (meni Files, naslov `Change attributes…`, bez zadane tipke): dijalog s oktalnim poljem i 9 kvačica rwx, sinkroniziranih. Za više označenih stavki primjenjuje se na sve. Mape se ne obrađuju rekurzivno.
-  - `keymap.rs`: `cm_connect` i `cm_disconnect` dobivaju `available: true`; dodaje se `cm_chmod`.
-  - Session restore ostaje kakav jest (server → `~`, `restore_path`).
+  - `connectionLost(message) -> boolean` (prefixes `connection lost`, `server not responding`);
+  - `deleteConfirmText(location, n)`: on a server `Delete N file(s) from the server? This cannot be undone.`, otherwise the existing texts.
+- Behavior:
+  - The drive bar gets a button `☁️ <name>` for each connection from `list_connections`. It refreshes on `connections://changed`. It is active when the panel is on that connection.
+  - Path row: on a server, instead of free space, `[sftp://user@host]` (`display`).
+  - `cm_disconnect` (Ctrl+Shift+F) closes the connection of the active panel. All panels on that connection go to the server's `local_dir` or `~`.
+  - An error with `connectionLost` in a panel or job shows the dialog `Connection to <name> lost` with the buttons `Reconnect` (flow from Task 11, then the same path or `nearest`) and `Close` (the panel goes to `~`).
+  - Hotlist: `cd sftp://name/path` and a Target path on a server connect (if the connection does not exist) and then open the path. `REMOTE_MSG` is removed.
+  - `cm_chmod` (Files menu, title `Change attributes…`, no default key): a dialog with an octal field and 9 rwx checkboxes, kept in sync. For multiple selected items it applies to all. Folders are not processed recursively.
+  - `keymap.rs`: `cm_connect` and `cm_disconnect` get `available: true`; `cm_chmod` is added.
+  - Session restore stays as it is (server → `~`, `restore_path`).
 
-- [ ] **Step 1: testovi** u `ui/lib.test.mjs` za sve nove funkcije iz liste, s navedenim vrijednostima, te Rust test `keymap` `connect_commands_available`.
+- [ ] **Step 1: tests** in `ui/lib.test.mjs` for all the new functions in the list, with the stated values, plus the Rust `keymap` test `connect_commands_available`.
 - [ ] **Step 2:** Run `node --test ui/ && cargo test -p fxfm-core keymap`. Expected: FAIL.
-- [ ] **Step 3:** Implementiraj.
+- [ ] **Step 3:** Implement.
 - [ ] **Step 4:** Run `node --test ui/ && cargo test --workspace`. Expected: PASS.
 - [ ] **Step 5:** Commit `feat(ui): servers as drives, disconnect, connection lost, remote hotlist, chmod`.
 
-### Task 11: UI – Ctrl+F dijalog, uređivanje servera i tok spajanja
+### Task 11: UI – Ctrl+F dialog, server editing and connect flow
 
 **Files:** Create `ui/servers.js`; Modify `ui/lib.mjs`, `ui/lib.test.mjs`, `ui/app.js`, `ui/style.css`, `ui/index.html`
 
 **Interfaces:**
-- Consumes: komande iz Taska 9; stil i stablo kao `ui/hotlist.js`.
+- Consumes: commands from Task 9; style and tree as in `ui/hotlist.js`.
 - Produces:
   - `lib.mjs`:
     - `serverDefaults(protocol) -> {port, auth}` (sftp/scp → 22/`password`, ftp/ftps → 21/`password`);
-    - `validateServer(entry, allNames) -> string|null`, s porukama iz Taska 1 (UI provjerava prije spremanja; backend još jednom);
-    - `fieldsFor(protocol) -> Set<string>`: SSH ima `auth`, `keyPath`, `legacyAlgorithms`; FTP ima `ftpPassive`, `ftpEncoding`;
+    - `validateServer(entry, allNames) -> string|null`, with the messages from Task 1 (the UI checks before saving; the backend checks once more);
+    - `fieldsFor(protocol) -> Set<string>`: SSH has `auth`, `keyPath`, `legacyAlgorithms`; FTP has `ftpPassive`, `ftpEncoding`;
     - `connectionLabel(info) -> "☁️ " + name`;
     - `hostKeyText(reply)`.
 
-    `hostKeyText` za novi ključ:
+    `hostKeyText` for a new key:
     ```
     The authenticity of host '<host>:<port>' can't be established.
     <keyType> key fingerprint is <fp>.
     Connect and remember this key?
     ```
-    Za promijenjen ključ:
+    For a changed key:
     ```
     WARNING: THE HOST KEY FOR '<host>:<port>' HAS CHANGED!
     Someone may be intercepting the connection, or the server was reinstalled.
@@ -616,61 +616,61 @@ pub trait RemoteFs: Send + Sync {
     New: <fp>
     Replace the stored key and connect?
     ```
-    Promijenjen ključ ima crveni naslov, a zadani gumb je `Cancel`.
-  - Dijalog `Connect to server` (Ctrl+F):
-    - lijevo stablo mapa i servera, desno gumbi `Connect`, `New connection…`, `New URL…`, `Duplicate entry…`, `New folder…`, `Edit…`, `Delete`, `Encrypt…`, `Cancel`, `Help`;
-    - Enter i dvoklik spajaju, Esc zatvara, ↑/↓ i ←/→ (sklopi i rasklopi mapu) rade, a drag & drop i Ctrl+↑/↓ mijenjaju redoslijed (logika iz hotliste: `moveNode`, `relocateNode`);
-    - `Delete` traži potvrdu `Delete '<ime>' and its saved password?`;
-    - `Duplicate entry…` daje novi `id` i ime `<ime> (2)`, ali **bez** lozinke (poruka u statusu);
-    - `Encrypt…`: u portable načinu postavlja ili mijenja master lozinku (dva polja i staro polje ako trezor postoji); u sistemskom načinu poruka `In system mode passwords are stored in the macOS Keychain.`;
-    - `Help` prikazuje kratak tekst o tipkama i formatu URL-a.
-  - Dijalog `Edit connection`:
-    - polja: Name, Protocol, Host, Port, User, Authentication (Password / Key file / Key file + passphrase), Key file (`Choose…` i `Import…`), Save password (s poljem lozinke ili passphrasea), Remote dir, Local dir (`Choose…`), Allow legacy algorithms (ssh-rsa/SHA1), Passive mode, Name encoding;
-    - vidljiva su samo polja iz `fieldsFor`;
-    - promjena protokola mijenja port samo ako je bio zadani za stari protokol;
-    - OK sprema preko `servers_save` i, ako je lozinka unesena, `server_secret_set`. Prazno polje uz uključen "Save password" ne briše spremljenu lozinku, a isključen "Save password" je briše.
-  - `New URL…`: jedno polje (`sftp://user@host:port/path`), zatim tok spajanja.
-  - Tok spajanja u `servers.js`, `async function connectFlow(request) -> location|null`, petlja nad `connect`:
-    - `hostKey` → dijalog s `hostKeyText` → ponovi s `acceptFingerprint`;
-    - `needPassword`/`needPassphrase` → polje lozinke (s `retry` tekst `Wrong password, try again`) i kvačica `Save password` (samo za server iz liste) → ponovi;
-    - `needMaster` → polje master lozinke (`create` traži dva polja) → `master_unlock` ili `master_set` → ponovi;
-    - `connected` → aktivni panel ide na `location`, a ako je zadan `local_dir`, drugi panel ide tamo.
+    A changed key has a red title, and the default button is `Cancel`.
+  - The `Connect to server` dialog (Ctrl+F):
+    - on the left a tree of folders and servers, on the right the buttons `Connect`, `New connection…`, `New URL…`, `Duplicate entry…`, `New folder…`, `Edit…`, `Delete`, `Encrypt…`, `Cancel`, `Help`;
+    - Enter and double-click connect, Esc closes, ↑/↓ and ←/→ (collapse and expand a folder) work, and drag & drop and Ctrl+↑/↓ reorder (logic from the hotlist: `moveNode`, `relocateNode`);
+    - `Delete` asks for confirmation `Delete '<name>' and its saved password?`;
+    - `Duplicate entry…` gives a new `id` and the name `<name> (2)`, but **without** the password (message in the status);
+    - `Encrypt…`: in portable mode it sets or changes the master password (two fields, plus the old field if a vault exists); in system mode the message `In system mode passwords are stored in the macOS Keychain.`;
+    - `Help` shows a short text about the keys and the URL format.
+  - The `Edit connection` dialog:
+    - fields: Name, Protocol, Host, Port, User, Authentication (Password / Key file / Key file + passphrase), Key file (`Choose…` and `Import…`), Save password (with a password or passphrase field), Remote dir, Local dir (`Choose…`), Allow legacy algorithms (ssh-rsa/SHA1), Passive mode, Name encoding;
+    - only the fields from `fieldsFor` are visible;
+    - changing the protocol changes the port only if it was the default for the old protocol;
+    - OK saves via `servers_save` and, if a password was entered, `server_secret_set`. An empty field with "Save password" on does not delete the saved password, and turning "Save password" off deletes it.
+  - `New URL…`: a single field (`sftp://user@host:port/path`), then the connect flow.
+  - The connect flow in `servers.js`, `async function connectFlow(request) -> location|null`, a loop over `connect`:
+    - `hostKey` → dialog with `hostKeyText` → repeat with `acceptFingerprint`;
+    - `needPassword`/`needPassphrase` → password field (with the `retry` text `Wrong password, try again`) and a `Save password` checkbox (only for a server from the list) → repeat;
+    - `needMaster` → master password field (`create` asks for two fields) → `master_unlock` or `master_set` → repeat;
+    - `connected` → the active panel goes to `location`, and if `local_dir` is set, the other panel goes there.
 
-    Tok koriste i hotlista i Reconnect iz Taska 10.
+    The hotlist and Reconnect from Task 10 use this flow too.
 
-- [ ] **Step 1: testovi** u `ui/lib.test.mjs`:
+- [ ] **Step 1: tests** in `ui/lib.test.mjs`:
   - `serverDefaults`;
-  - `validateServer` (svih pet poruka);
-  - `fieldsFor` za sva četiri protokola;
-  - `hostKeyText` (novi i promijenjeni ključ, točan tekst);
-  - promjena protokola mijenja port samo kad je bio zadani (čista funkcija `portAfterProtocolChange(oldProto, newProto, port)`).
+  - `validateServer` (all five messages);
+  - `fieldsFor` for all four protocols;
+  - `hostKeyText` (new and changed key, exact text);
+  - changing the protocol changes the port only when it was the default (pure function `portAfterProtocolChange(oldProto, newProto, port)`).
 - [ ] **Step 2:** Run `node --test ui/`. Expected: FAIL.
-- [ ] **Step 3:** Implementiraj. `Ctrl+F` je `cm_connect` u `app.js` dispatch tablici.
+- [ ] **Step 3:** Implement. `Ctrl+F` is `cm_connect` in the `app.js` dispatch table.
 - [ ] **Step 4:** Run `node --test ui/ && cargo test --workspace`. Expected: PASS.
 - [ ] **Step 5:** Commit `feat(ui): Connect to server dialog, connection editor, connect flow`.
 
-### Task 12: Arhiva na serveru, README, build i ručna provjera
+### Task 12: Archive on a server, README, build and manual check
 
 **Files:** Modify `src-tauri/src/commands.rs`, `ui/panel.js`, `README.md`, `docs/ROADMAP.md`
 
 **Interfaces:**
-- Consumes: Task 5 (`materialize`), `EditWatch` iz plana 2.
+- Consumes: Task 5 (`materialize`), `EditWatch` from plan 2.
 - Produces:
-  - Enter na arhivi na serveru (`archiveKindOf` imena): nova komanda `open_remote_archive(location) -> String` preuzme arhivu kao F4 kopiju (`EditWatch::open_for_edit`, praćena) i vraća lokalnu putanju. Panel ulazi u nju.
-  - Promjena arhive (F5 unutra, F8, F2…) mijenja praćenu kopiju, pa postojeći `edit://changed` upit nudi upload natrag na server.
-  - `[..]` u korijenu takve arhive vraća na mapu na serveru, ne u temp mapu: panel pamti `{tempArchive → remote parent}` u memoriji.
-  - README dobiva odjeljak "Serveri" (Ctrl+F, protokoli, ključevi i import, host key, gdje se spremaju lozinke u portable i sistemskom načinu, Ctrl+Shift+F, Connection lost).
-  - ROADMAP: plan 3 se miče iz "Sljedeće", a otvorene stavke se upisuju (npr. FTP encoding ako je ostao samo UTF-8).
+  - Enter on an archive on a server (`archiveKindOf` of the name): the new command `open_remote_archive(location) -> String` downloads the archive as an F4 copy (`EditWatch::open_for_edit`, tracked) and returns the local path. The panel enters it.
+  - A change to the archive (F5 inside, F8, F2…) modifies the tracked copy, so the existing `edit://changed` prompt offers an upload back to the server.
+  - `[..]` at the root of such an archive returns to the folder on the server, not to the temp folder: the panel remembers `{tempArchive → remote parent}` in memory.
+  - README gets a section `Serveri` (Ctrl+F, protocols, keys and import, host key, where passwords are stored in portable and system mode, Ctrl+Shift+F, Connection lost).
+  - ROADMAP: plan 3 is removed from `Next`, and open items are recorded (e.g. FTP encoding if only UTF-8 remained).
 
-- [ ] **Step 1: test** `remote_archive_parent_returns_to_server` u `ui/lib.test.mjs` (čista funkcija `archiveParent(location, remoteArchives)`).
-- [ ] **Step 2:** Run `node --test ui/`. Expected: FAIL; zatim implementacija i PASS.
-- [ ] **Step 3:** Run cijeli paket: `cargo test --workspace && cargo clippy --workspace -- -D warnings && node --test ui/`. Expected: PASS.
-- [ ] **Step 4:** Universal build: `cargo tauri build --target universal-apple-darwin`, zatim `lipo -archs` na binaryju. Expected: `x86_64 arm64`. Novi `.dmg` ide u `~/Documents/PVT/fxfm-builds/macos/`, a stari u Trash.
-- [ ] **Step 5:** Ručna provjera (korisnik; s pravim serverom u LAN-u). Bez pisanja u korisnikove produkcijske mape, samo u testnu mapu na serveru.
-  1. Ctrl+F → New connection (SFTP, ključ) → Connect → host key upit → panel na serveru, ☁️ u traci.
-  2. F5 php datoteke na server i natrag, F6, F7, F8, F2; chmod +x na `.sh`.
-  3. F4 na datoteci na serveru → izmjena u editoru → upit za upload → sadržaj na serveru promijenjen, prava ostala.
-  4. Ugasiti VPN usred kopiranja → greška najkasnije za 60 s, Connection lost → Reconnect.
-  5. Portable način: Save password → master lozinka → restart → lozinka traži samo master lozinku.
-  6. Hotlista `cd sftp://<ime>/var/www` spaja i otvara.
+- [ ] **Step 1: test** `remote_archive_parent_returns_to_server` in `ui/lib.test.mjs` (pure function `archiveParent(location, remoteArchives)`).
+- [ ] **Step 2:** Run `node --test ui/`. Expected: FAIL; then implementation and PASS.
+- [ ] **Step 3:** Run the whole suite: `cargo test --workspace && cargo clippy --workspace -- -D warnings && node --test ui/`. Expected: PASS.
+- [ ] **Step 4:** Universal build: `cargo tauri build --target universal-apple-darwin`, then `lipo -archs` on the binary. Expected: `x86_64 arm64`. The new `.dmg` goes to `~/Documents/PVT/fxfm-builds/macos/`, and the old one to Trash.
+- [ ] **Step 5:** Manual check (user; with a real server on the LAN). No writing to the user's production folders, only to a test folder on the server.
+  1. Ctrl+F → New connection (SFTP, key) → Connect → host key prompt → panel on the server, ☁️ in the bar.
+  2. F5 a php file to the server and back, F6, F7, F8, F2; chmod +x on a `.sh`.
+  3. F4 on a file on the server → edit in the editor → upload prompt → content on the server changed, permissions preserved.
+  4. Turn off the VPN in the middle of a copy → error within 60 s at the latest, Connection lost → Reconnect.
+  5. Portable mode: Save password → master password → restart → the password asks only for the master password.
+  6. Hotlist `cd sftp://<name>/var/www` connects and opens.
 - [ ] **Step 6:** Commit `docs: servers in README, roadmap update`.

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>fxfm – glavni prozor</title>
+<html><head><meta charset="utf-8"><title>fxfm – main window</title>
 <style>
 body{margin:0;background:#2b2b2b;font-family:-apple-system,"Segoe UI",sans-serif;color:#ddd;padding:24px}
 h2{margin:0 0 4px;color:#fff;font-weight:600}
@@ -35,8 +35,8 @@ h2{margin:0 0 4px;color:#fff;font-weight:600}
 .notes{max-width:1300px;margin-top:18px;font-size:14px;line-height:1.6;color:#ccc}
 .notes b{color:#fff}
 </style></head><body>
-<h2>fxfm – glavni prozor (prijedlog)</h2>
-<p class="sub">TC raspored 1:1, prilagođen macOS-u. Lijevi panel je lokalni disk, desni je spojen na SFTP server.</p>
+<h2>fxfm – main window (proposal)</h2>
+<p class="sub">TC layout 1:1, adapted to macOS. The left panel is a local disk, the right one is connected to an SFTP server.</p>
 
 <div class="macbar"><b></b><b>fxfm</b><span>Files</span><span>Mark</span><span>Commands</span><span>Net</span><span>Show</span><span>Configuration</span><span>Start</span><span>Help</span></div>
 <div class="win">
@@ -82,16 +82,16 @@ h2{margin:0 0 4px;color:#fff;font-weight:600}
    <div class="status"><span class="n">config.php</span><span>4.218</span><span>02.11.2026 09:14</span><span>-rw-r--r--</span></div>
   </div>
  </div>
- <div class="cmd"><span>~/Documents/PVT&gt;</span><input placeholder="naredbeni redak (izvršava se u Terminalu)"></div>
+ <div class="cmd"><span>~/Documents/PVT&gt;</span><input placeholder="command line (runs in Terminal)"></div>
  <div class="fkeys"><div>F3 View</div><div>F4 Edit</div><div>F5 Copy</div><div>F6 Move</div><div>F7 NewFolder</div><div>F8 Delete</div><div>⌥F4 Exit</div></div>
 </div>
 
 <div class="notes">
-<b>Što je drugačije nego na Windowsu:</b><br>
-• <b>Traka diskova</b> umjesto c/d/l/m: <code>/</code> (Macintosh HD), <code>~</code> (home), zatim svaki montirani volumen iz <code>/Volumes</code> (USB, DMG, SMB share). Aktivne SFTP/FTP veze isto se pojavljuju kao "disk" (☁️ web-1).<br>
-• <b>Meni</b> (Files, Mark, Commands, Net, Show, Configuration, Start) nalazi se u gornjoj traci macOS-a, kao kod svake Mac aplikacije, a ne unutar prozora.<br>
-• <b>Status</b> umjesto Windows atributa (----, --h-) pokazuje Unix prava (drwxr-xr-x).<br>
-• <b>Boje</b> (moja pretpostavka): mape u [zagradama] bijele, skrivene datoteke sive, arhive narančasto-crvene, video/audio ljubičasto-plave, označene datoteke (Insert/Space) crvene. Sve se može podesiti.<br>
-• <b>Naredbeni redak</b> iznad F-tipki je kao u TC-u, ali opcionalan.
+<b>What differs from Windows:</b><br>
+• <b>Drive bar</b> instead of c/d/l/m: <code>/</code> (Macintosh HD), <code>~</code> (home), then every mounted volume from <code>/Volumes</code> (USB, DMG, SMB share). Active SFTP/FTP connections also appear as a "drive" (☁️ web-1).<br>
+• <b>Menu</b> (Files, Mark, Commands, Net, Show, Configuration, Start) lives in the macOS menu bar, like in every Mac app, not inside the window.<br>
+• <b>Status</b> shows Unix permissions (drwxr-xr-x) instead of Windows attributes (----, --h-).<br>
+• <b>Colors</b> (my assumption): folders in [brackets] white, hidden files gray, archives orange-red, video/audio purple-blue, marked files (Insert/Space) red. Everything is configurable.<br>
+• <b>Command line</b> above the F-keys works like in TC, but is optional.
 </div>
 </body></html>

@@ -41,7 +41,7 @@
     "shortDescription": "Total-Commander-style file manager",
     "macOS": {
       "minimumSystemVersion": "15.0",
-      "signingIdentity": "fxfm local signing"
+      "signingIdentity": "-"
     }
   }
 }

@@ -82,7 +82,7 @@ test("matchMask", () => {
   assert.equal(lib.matchMask("index.PHP", "*.php"), true);
   assert.equal(lib.matchMask("čćžšđ.txt", "*.txt"), true);
   // NFD file name (as macOS may store it) against an NFC mask
-  assert.equal(lib.matchMask("čevapi.txt", "č*.txt"), true);
+  assert.equal(lib.matchMask("čapek.txt", "č*.txt"), true);
   assert.equal(lib.matchMask("Makefile", "*.*"), true);
   assert.equal(lib.matchMask("a.sh", "*.php;*.sh"), true);
   assert.equal(lib.matchMask("a.sh", "*.php *.sh"), true);

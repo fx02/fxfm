@@ -1,125 +1,131 @@
 # fxfm
 
-fxfm je dvopanelni upravitelj datoteka za macOS u stilu Total Commandera (Rust + Tauri 2). Tipke su TC-ove (F3–F8, Tab, Ctrl+D…, uvijek fizički **Ctrl**, Option je Alt), meni je u macOS gornjoj traci (Files, Mark, Commands, Net, Show, Configuration, Start, Help). Radi s lokalnim diskovima, arhivama (kao mapama) i serverima (SFTP, SCP, FTP, FTPS).
+fxfm is a Total Commander-style dual-panel file manager for macOS (Rust + Tauri 2). The keys are TC's (F3–F8, Tab, Ctrl+D…, always the physical **Ctrl**, Option is Alt), and the menu lives in the macOS menu bar (Files, Mark, Commands, Net, Show, Configuration, Start, Help). It works with local disks, archives (as folders) and servers (SFTP, SCP, FTP, FTPS).
 
-Traži macOS 15 (Sequoia) ili noviji.
+Requires macOS 15 (Sequoia) or later.
+
+![Main window: two panels, a local website project on the left and music on the right](docs/screenshots/main.png)
+
+| F3 plays audio in place | Ctrl+F: servers |
+| --- | --- |
+| ![F3 plays a wav file; the player strip sits above the F-key bar](docs/screenshots/audio.png) | ![Connect to server dialog with folders and servers](docs/screenshots/servers.png) |
 
 ## Build
 
-Potrebni su Rust (toolchain iz `rust-toolchain.toml`, s targetima `aarch64-apple-darwin` i `x86_64-apple-darwin`) i `tauri-cli` 2 (`cargo install tauri-cli --version "^2"`).
+You need Rust (the toolchain from `rust-toolchain.toml`, with the `aarch64-apple-darwin` and `x86_64-apple-darwin` targets) and `tauri-cli` 2 (`cargo install tauri-cli --version "^2"`).
 
 ```sh
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
 cargo tauri build --target universal-apple-darwin
 ```
 
-Rezultat (universal, radi na Apple Silicon i Intel Macovima):
+Output (universal, runs on Apple Silicon and Intel Macs):
 
-- aplikacija: `target/universal-apple-darwin/release/bundle/macos/fxfm.app`
+- app: `target/universal-apple-darwin/release/bundle/macos/fxfm.app`
 - disk image: `target/universal-apple-darwin/release/bundle/dmg/fxfm_0.1.0_universal.dmg`
 
-Ako se `.dmg` korak sruši s "Finder is busy" (zaključan ekran, SSH), pokreni build s `CI=true`: preskače se Finderovo uređivanje izgleda DMG-a.
+If the `.dmg` step crashes with "Finder is busy" (locked screen, SSH), run the build with `CI=true`: this skips Finder's DMG layout customization.
 
-`tauri.conf.json` postavlja `signingIdentity` na "fxfm local signing", pa je svaki build potpisan tim lokalnim identitetom (nalazi se u `~/.fxfm-signing/`, nije u repou). `scripts/build-macos.sh` otključa taj keychain, napravi universal build te provjeri potpis i arhitekture. Identitet je stabilan, pa macOS pamti odobren pristup mapama između buildova.
+A plain `cargo tauri build` signs the app ad hoc (`signingIdentity` is `-` in `tauri.conf.json`). `scripts/build-macos.sh` builds with the maintainer's stable local identity "fxfm local signing" instead (kept in `~/.fxfm-signing/`, not in the repo): it unlocks that keychain, sets `APPLE_SIGNING_IDENTITY`, runs the universal build and verifies the signature and architectures. With a stable identity macOS remembers the granted folder access between builds; with an ad hoc signature it asks again after each rebuild.
 
-Provjera: `lipo -archs target/universal-apple-darwin/release/bundle/macos/fxfm.app/Contents/MacOS/fxfm` ispisuje `x86_64 arm64`.
+Check: `lipo -archs target/universal-apple-darwin/release/bundle/macos/fxfm.app/Contents/MacOS/fxfm` prints `x86_64 arm64`.
 
-Testovi: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings` i `node --test ui/`.
+Tests: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings` and `node --test ui/`.
 
-## Gdje su podaci
+## Where the data lives
 
-Postavke su četiri JSON datoteke: `settings.json`, `session.json`, `keymap.json` i `hotlist.json`. Mogu se uređivati ručno (dok fxfm nije pokrenut).
+Settings are four JSON files: `settings.json`, `session.json`, `keymap.json` and `hotlist.json`. They can be edited by hand (while fxfm is not running).
 
-- **Portable**: mapa `fxfm-data/` pored `fxfm.app`, ako postoji i zapisiva je.
-- **Sistemski** (inače): `~/Library/Application Support/fxfm/`.
+- **Portable**: an `fxfm-data/` folder next to `fxfm.app`, if it exists and is writable.
+- **System** (otherwise): `~/Library/Application Support/fxfm/`.
 
-Način se mijenja u Configuration → Options → Storage (Apply). fxfm tada kopira sve postavke na novo mjesto. Kod prelaska s portable na sistemski stara mapa ostaje kao `fxfm-data.old`.
+The mode is changed in Configuration → Options → Storage (Apply). fxfm then copies all settings to the new location. When switching from portable to system, the old folder stays as `fxfm-data.old`.
 
-## Portable postavljanje
+## Portable setup
 
-Napravi mapu, npr. na USB disku:
+Create a folder, e.g. on a USB drive:
 
 ```
 fxfm/
 ├── fxfm.app
-└── fxfm-data/      (prazna mapa)
+└── fxfm-data/      (empty folder)
 ```
 
-Kod prvog pokretanja fxfm prepozna `fxfm-data/` i sve sprema tamo; sistemska mapa se ne dira.
+On first launch fxfm detects `fxfm-data/` and stores everything there; the system folder is left alone.
 
-## Prijenos na drugi Mac
+## Moving to another Mac
 
-Kopiraj cijelu mapu `fxfm/` (USB, mreža, zip). macOS kopiranoj aplikaciji doda *quarantine* atribut. Zato je Gatekeeper može blokirati, a *App Translocation* je pokreće s nasumične read-only putanje, gdje se `fxfm-data/` ne vidi.
+Copy the whole `fxfm/` folder (USB, network, zip). macOS adds a *quarantine* attribute to the copied app. Because of this, Gatekeeper may block it, and *App Translocation* runs it from a random read-only path, where `fxfm-data/` is not visible.
 
-fxfm to prepozna i ponudi:
+fxfm detects this and offers:
 
-- **Fix and restart**: makne quarantine atribut i ponovno se pokrene s pravog mjesta, s postavkama iz `fxfm-data/`;
-- **Continue without settings**: radi dalje, ali bez portable postavki, a sesija (paneli) se ne sprema.
+- **Fix and restart**: removes the quarantine attribute and relaunches from the real location, with the settings from `fxfm-data/`;
+- **Continue without settings**: keeps running, but without the portable settings, and the session (panels) is not saved.
 
-Isto ručno, u Terminalu, prije prvog pokretanja:
+The same by hand, in Terminal, before the first launch:
 
 ```sh
-xattr -dr com.apple.quarantine /putanja/do/fxfm/fxfm.app
+xattr -dr com.apple.quarantine /path/to/fxfm/fxfm.app
 ```
 
-Aplikacija je potpisana lokalnim identitetom, ali nije notarizirana (osobna upotreba). Ako je Gatekeeper ipak odbije, najjednostavnije je pokrenuti gornju `xattr -dr com.apple.quarantine …` naredbu. Druga mogućnost: pokušaj otvoriti fxfm, pa u System Settings → Privacy & Security klikni "Open Anyway" (na macOS 15 desni klik → Open više ne zaobilazi Gatekeeper).
+The app is signed with a local identity but not notarized (personal use). If Gatekeeper still rejects it, the simplest fix is to run the `xattr -dr com.apple.quarantine …` command above. Alternatively, try to open fxfm, then click "Open Anyway" in System Settings → Privacy & Security (on macOS 15, right-click → Open no longer bypasses Gatekeeper).
 
-## Arhive
+## Archives
 
-Arhive se otvaraju kao mape. Podržani formati: `.zip`, `.tar`, `.tgz` / `.tar.gz`, `.gz` (samo ako sadrži točno jednu datoteku) i `.7z`. Ostale (bz2, xz, rar, tbz2, txz) Enter otvara zadanom aplikacijom.
+Archives open as folders. Supported formats: `.zip`, `.tar`, `.tgz` / `.tar.gz`, `.gz` (only if it contains exactly one file) and `.7z`. Other formats (bz2, xz, rar, tbz2, txz) are opened by Enter with the default application.
 
-- **Ulaz i izlaz**: Enter na arhivi ulazi u nju (arhive na serveru: vidi "Serveri"); `[..]` u korijenu arhive vraća u mapu s kursorom na arhivi. Ugniježđene arhive Enter otvara zadanom aplikacijom (ne kao mape).
-- **Unutar arhive rade**: F3, F4, F5 i F6 (u arhivu i iz nje), F7, F8 i F2. Shift+F4 unutra nije dostupan.
-- **F8** briše trajno: "Delete N file(s) from archive? This cannot be undone."
-- **Kopiranje u arhivu** postavlja jedno pitanje o konfliktu po stavci najviše razine; prepisivanje mape spaja sadržaj u nju.
-- **Lozinka**: za zip zaštićen lozinkom fxfm je pita kad se datoteka otvori ili raspakira; kriva lozinka pita ponovno.
-- **F4 (uređivanje)**: datoteka se uredi kao kopija u privremenoj mapi. Nakon svakog spremanja fxfm pita `"<ime>" was changed. Upload it back into the archive?`. Ako se unos u arhivi u međuvremenu promijenio, prije prepisivanja pita još jednom.
-- **Neučitane izmjene**: kopije koje nisu učitane natrag preživljavaju Cmd+Q i rušenje. Pri sljedećem pokretanju fxfm ih navodi ("Edited copies from a previous session were not uploaded:"): **Show in Finder** ih otvara, **Keep** (zadano, i Esc) ih ostavlja pa se dijalog javlja opet pri sljedećem pokretanju, a **Discard** nakon potvrde ("Move these copies to the Trash?") premješta kopije u Trash.
-- **Pisanje**: svaka promjena piše privremenu arhivu pored originala, koja ga zamjenjuje tek ako je sve uspjelo. **7z** se pritom u potpunosti prepakira (sporije, treba slobodnog mjesta pored arhive, rezultat nije solid).
-- **Odbijanja**: kriptirane arhive se ne mijenjaju; kriptirani 7z se ne može čitati; 7z s nesigurnim imenima unosa se ne prepisuje; tar u kojem hard link pokazuje na stavku koja se briše ili preimenuje se ne mijenja; `.gz` ima vlastita ograničenja (jedna datoteka).
-- **Privremene datoteke**: `~/Library/Caches/fxfm/tmp/<pid>/`. Brišu se pri izlasku, osim neučitanih izmjena.
+- **Entering and leaving**: Enter on an archive enters it (archives on a server: see "Servers"); `[..]` at the archive root returns to the folder with the cursor on the archive. Nested archives are opened by Enter with the default application (not as folders).
+- **Working inside an archive**: F3, F4, F5 and F6 (into and out of the archive), F7, F8 and F2. Shift+F4 is not available inside.
+- **F8** deletes permanently: "Delete N file(s) from archive? This cannot be undone."
+- **Copying into an archive** asks one conflict question per top-level item; overwriting a folder merges the contents into it.
+- **Password**: for a password-protected zip, fxfm asks for it when the file is opened or extracted; a wrong password asks again.
+- **F4 (edit)**: the file is edited as a copy in a temporary folder. After each save fxfm asks `"<name>" was changed. Upload it back into the archive?`. If the entry in the archive changed in the meantime, it asks once more before overwriting.
+- **Unuploaded changes**: copies that were not uploaded back survive Cmd+Q and crashes. On the next launch fxfm lists them ("Edited copies from a previous session were not uploaded:"): **Show in Finder** opens them, **Keep** (default, and Esc) leaves them so the dialog shows up again on the next launch, and **Discard**, after confirmation ("Move these copies to the Trash?"), moves the copies to the Trash.
+- **Writing**: every change writes a temporary archive next to the original, which replaces it only if everything succeeded. **7z** is fully repacked in the process (slower, needs free space next to the archive, the result is not solid).
+- **Refusals**: encrypted archives are not modified; encrypted 7z cannot be read; 7z with unsafe entry names is not overwritten; a tar in which a hard link points to an entry being deleted or renamed is not modified; `.gz` has its own limitation (a single file).
+- **Temporary files**: `~/Library/Caches/fxfm/tmp/<pid>/`. They are deleted on exit, except for unuploaded changes.
 
-## Serveri
+## Servers
 
-**Ctrl+F** (Net → Connect to server) otvara popis servera: stablo mapa i servera, s gumbima *New connection…* i *New URL…*. Protokoli: **SFTP**, **SCP** (zadani port 22), **FTP** i **FTPS** (21). *New URL…* spaja jednokratno, bez spremanja, npr. `sftp://korisnik@host:2222/var/www`; FTP bez korisnika se prijavljuje kao anonymous.
+**Ctrl+F** (Net → Connect to server) opens the server list: a tree of folders and servers, with the buttons *New connection…* and *New URL…*. Protocols: **SFTP**, **SCP** (default port 22), **FTP** and **FTPS** (21). *New URL…* connects once, without saving, e.g. `sftp://user@host:2222/var/www`; FTP without a user logs in as anonymous.
 
-- **Lokacija** je `<protokol>://<ime servera>/<putanja>`, npr. `sftp://web-1/var/www/html`. Ime servera mora biti jedinstveno u cijelom popisu. Spojeni serveri se pojavljuju kao diskovi u traci iznad panela (☁️ ime), a u zaglavlju je njihova adresa. Hotlista prima iste lokacije (`cd sftp://<ime>/var/www` u naredbenom retku spaja i otvara).
-- **Autentikacija**: lozinka, ključ ili ključ + passphrase. Privatni ključ se bira s diska ili uvozi (*Import…*): kopija ide u `keys/` u mapi s podacima, s pravima 0600. Opcije po serveru: lokalna mapa koja se nakon spajanja otvara u DRUGOM panelu, kodiranje imena na FTP-u (UTF-8, Windows-1250, Latin-1), stariji SSH algoritmi, FTP aktivni/pasivni način.
-- **Host key**: pri prvom spajanju fxfm pokaže otisak ključa servera (kod FTPS-a certifikat); prihvaćeni se pamte u `known_hosts` u mapi s podacima. Promijenjen ključ se ne prihvaća šutke: dijalog nudi *Replace and connect* ili Cancel.
-- **Lozinke** nikad ne idu u `servers.json`.
-  - *Sistemski način*: macOS Keychain, servis `fxfm`, račun `<id servera>/password` ili `<id servera>/passphrase`.
-  - *Portable način*: `secrets.json` u `fxfm-data/`, kriptiran **master lozinkom** (Argon2id 64 MiB, XChaCha20-Poly1305). Master lozinka se traži jednom po pokretanju, kad zatreba, i drži se samo u memoriji. Bez nje se lozinke ne spremaju (unesena a nespremljena lozinka vrijedi do izlaza, zbog ponovnog spajanja).
-- **Rad**: F3, F4, F5, F6, F7, F8 i F2 rade i na serveru, kao i **chmod** (Files → Change attributes…, bez zadane tipke; samo SFTP i SCP). F8 briše trajno: "Delete N file(s) from the server? This cannot be undone.". Upload piše u privremenu `.<ime>.fxfm-<pid>-<n>.part` pored cilja pa ga zamjenjuje, pa prekid nikad ne ostavlja skraćen original; na SFTP-u i SCP-u prava postojeće datoteke ostaju (FTP i FTPS ne postavljaju prava).
-- **Simbolički linkovi**: Enter na linku do mape ulazi u mapu, a F8 briše samo link. Neki FTP serveri link do mape prikazuju kao običnu mapu; tamo F8 na njemu briše sadržaj ciljne mape.
-- **F4** na datoteci na serveru uređuje privremenu kopiju; nakon spremanja fxfm pita `"<ime>" was changed. Upload it back to the server?`.
-- **Arhive na serveru**: Enter na arhivi preuzima je kao F4 kopiju i ulazi u nju. Izmjene unutra (F5, F8, F2…) mijenjaju kopiju, pa fxfm nudi upload natrag na server. `[..]` u korijenu arhive vraća u mapu na serveru.
-- **Ctrl+Shift+F** (Net → Disconnect) zatvara vezu aktivnog panela; paneli na tom serveru idu u lokalnu mapu servera ili u home. Privremene kopije datoteka tog servera (bez neučitanih izmjena) se brišu.
-- **Connection lost**: spajanje traje najviše 15 s, a prijenos ili zahtjev bez napretka 60 s; SSH šalje keepalive svakih 30 s, a FTP `NOOP` nakon 30 s neaktivnosti. Mrtva veza se javlja dijalogom `Connection to <ime> lost` s gumbima **Reconnect** (paneli ponovno listaju svoje mape) i **Close**.
-- **Podaci**: `servers.json` (stablo, bez lozinki), `known_hosts`, `keys/` i (portable) `secrets.json`, u mapi s podacima.
+- **Location** is `<protocol>://<server name>/<path>`, e.g. `sftp://web-1/var/www/html`. The server name must be unique across the whole list. Connected servers appear as drives in the bar above the panels (☁️ name), and their address is in the header. The hotlist accepts the same locations (`cd sftp://<ime>/var/www` on the command line connects and opens).
+- **Authentication**: password, key, or key + passphrase. A private key is picked from disk or imported (*Import…*): the copy goes to `keys/` in the data folder, with permissions 0600. Per-server options: a local folder that opens in the OTHER panel after connecting, filename encoding on FTP (UTF-8, Windows-1250, Latin-1), older SSH algorithms, FTP active/passive mode.
+- **Host key**: on first connection fxfm shows the server's key fingerprint (the certificate for FTPS); accepted ones are remembered in `known_hosts` in the data folder. A changed key is not silently accepted: the dialog offers *Replace and connect* or Cancel.
+- **Passwords** never go into `servers.json`.
+  - *System mode*: macOS Keychain, service `fxfm`, account `<id servera>/password` or `<id servera>/passphrase`.
+  - *Portable mode*: `secrets.json` in `fxfm-data/`, encrypted with a **master password** (Argon2id 64 MiB, XChaCha20-Poly1305). The master password is asked for once per launch, when needed, and is kept in memory only. Without it, passwords are not saved (a password that was entered but not saved is valid until exit, so reconnecting works).
+- **Operations**: F3, F4, F5, F6, F7, F8 and F2 also work on a server, as does **chmod** (Files → Change attributes…, no default key; SFTP and SCP only). F8 deletes permanently: "Delete N file(s) from the server? This cannot be undone.". An upload writes to a temporary `.<ime>.fxfm-<pid>-<n>.part` next to the target and then replaces it, so an interruption never leaves a truncated original; on SFTP and SCP the existing file's permissions are kept (FTP and FTPS do not set permissions).
+- **Symbolic links**: Enter on a link to a folder enters the folder, and F8 deletes only the link. Some FTP servers show a link to a folder as a plain folder; there, F8 on it deletes the contents of the target folder.
+- **F4** on a file on a server edits a temporary copy; after saving, fxfm asks `"<name>" was changed. Upload it back to the server?`.
+- **Archives on a server**: Enter on an archive downloads it as an F4 copy and enters it. Changes inside (F5, F8, F2…) modify the copy, so fxfm offers to upload it back to the server. `[..]` at the archive root returns to the folder on the server.
+- **Ctrl+Shift+F** (Net → Disconnect) closes the active panel's connection; panels on that server go to the server's local folder or to home. Temporary copies of that server's files (without unuploaded changes) are deleted.
+- **Connection lost**: connecting takes at most 15 s, and a transfer or request with no progress 60 s; SSH sends a keepalive every 30 s, and FTP sends `NOOP` after 30 s of inactivity. A dead connection is reported with the dialog `Connection to <ime> lost` with the buttons **Reconnect** (the panels re-list their folders) and **Close**.
+- **Data**: `servers.json` (the tree, no passwords), `known_hosts`, `keys/` and (portable) `secrets.json`, in the data folder.
 
-## F3 preslušavanje zvuka
+## F3 audio preview
 
-F3 na audio datoteci svira je odmah, u glavnom prozoru; fokus ostaje u panelu. Traka iznad F-tipki pokazuje ime, `m:ss / m:ss` i kodek; klik na traku skače na to mjesto. F3 na istoj datoteci ili Esc zaustavlja. Radi i u arhivama i na serverima. Formati: wav (PCM, float, A-law, μ-law, ADPCM, GSM 6.10), mp3, flac, ogg, opus, m4a, aiff.
+F3 on an audio file plays it immediately, in the main window; focus stays in the panel. The bar above the F-keys shows the name, `m:ss / m:ss` and the codec; clicking the bar seeks to that position. F3 on the same file or Esc stops it. It also works in archives and on servers. Formats: wav (PCM, float, A-law, μ-law, ADPCM, GSM 6.10), mp3, flac, ogg, opus, m4a, aiff.
 
-Izlazni uređaj se bira u Options → Audio → *Output device* (zadano *System default*); promjena vrijedi odmah, i za ono što upravo svira. Ako izabrani uređaj nije spojen, svira se na zadanom, a traka to jednom javi.
+The output device is chosen in Options → Audio → *Output device* (default *System default*); a change takes effect immediately, including for what is currently playing. If the chosen device is not connected, playback uses the default one, and the bar reports it once.
 
 ## Drag & drop
 
-- **Van**: povlačenje označenih stavki (ili retka pod pokazivačem) iz panela u druge aplikacije, npr. Finder. Samo kopiranje, i to samo lokalnih datoteka.
-- **Unutra**: iz Findera u panel.
-- **Između panela**: ispuštanje otvara F5 dijalog s ciljem = mapa pod pokazivačem ili mapa panela. **Shift** pri ispuštanju daje F6 (premještanje). Dijalog ima i gumb *Move instead* / *Copy instead*, ako Shift promakne.
+- **Out**: dragging the selected items (or the row under the pointer) from a panel into other applications, e.g. Finder. Copy only, and only for local files.
+- **In**: from Finder into a panel.
+- **Between panels**: dropping opens the F5 dialog with the target = the folder under the pointer or the panel's folder. **Shift** while dropping gives F6 (move). The dialog also has a *Move instead* / *Copy instead* button, in case you miss Shift.
 
-## Napomene
+## Notes
 
-- **Trash (F8)**: fxfm premješta u Trash preko `NSFileManager`, a ne preko Findera. Brže je i ne traži dozvolu za Automation, ali Finderov "Put Back" ne radi za stavke koje je obrisao fxfm.
-- **PDF u F3 vieweru**: PDF se prikazuje u iframeu preko asset protokola, a uz njega je uvijek vidljiv gumb "Open in Quick Look". Je li WKWebView stvarno iscrtava PDF u iframeu još nije ručno provjereno; ako ne, Quick Look je zamjena.
-- **Full Disk Access**: za neke mape (Mail, Messages, Safari…) treba uključiti fxfm u System Settings → Privacy & Security → Full Disk Access. fxfm to objasni kad prvi put naiđe na zabranu.
-- **Tipke koje macOS zauzima**: Ctrl+strelice (Mission Control, prostori) i Ctrl+Space (izvor unosa) macOS presreće prije fxfm-a. Configuration → Keyboard upozori ako je takva tipka dodijeljena i nudi otvaranje System Settings → Keyboard → Keyboard Shortcuts.
-- Cmd se ne koristi za TC naredbe; iznimke su Cmd+Q i standardni Edit meni (Cmd+C/V/X/A u tekstualnim poljima).
+- **Trash (F8)**: fxfm moves items to the Trash via `NSFileManager`, not via Finder. It is faster and does not need Automation permission, but Finder's "Put Back" does not work for items deleted by fxfm.
+- **PDF in the F3 viewer**: the PDF is shown in an iframe via the asset protocol, with an "Open in Quick Look" button always visible next to it. Whether WKWebView really renders the PDF in the iframe has not yet been checked by hand; if not, Quick Look is the fallback.
+- **Full Disk Access**: for some folders (Mail, Messages, Safari…) you need to enable fxfm in System Settings → Privacy & Security → Full Disk Access. fxfm explains this the first time it hits a denial.
+- **Keys macOS takes**: Ctrl+arrows (Mission Control, Spaces) and Ctrl+Space (input source) are intercepted by macOS before fxfm. Configuration → Keyboard warns if such a key is assigned and offers to open System Settings → Keyboard → Keyboard Shortcuts.
+- Cmd is not used for TC commands; the exceptions are Cmd+Q and the standard Edit menu (Cmd+C/V/X/A in text fields).
 
-## Zadane tipke
+## Default keys
 
-Tablica se generira iz registra naredbi (`COMMANDS` u `crates/core/src/keymap.rs`); test `readme_key_table_matches_commands` pada ako zastari i ispiše novu. Tipke se mijenjaju u Configuration → Keyboard ("Reset to TC defaults" vraća ove).
+The table is generated from the command registry (`COMMANDS` in `crates/core/src/keymap.rs`); the test `readme_key_table_matches_commands` fails if it goes stale and prints the new one. Keys are changed in Configuration → Keyboard ("Reset to TC defaults" restores these).
 
 <!-- keys:start -->
 | Menu | Command | Keys |
@@ -159,4 +165,4 @@ Tablica se generira iz registra naredbi (`COMMANDS` u `crates/core/src/keymap.rs
 | Configuration | Options… | — |
 <!-- keys:end -->
 
-Fiksne tipke u panelu (ne remapiraju se): Up/Down, PageUp/PageDown, Home/End, **Left = prvi vidljivi red u prozoru**, **Right = zadnji vidljivi red u prozoru**; ako je kursor već tamo, sljedeći pritisak pomiče za cijeli prozor (prvi red prethodnog, odnosno zadnji red sljedećeg prozora), Enter.
+Fixed keys in a panel (not remappable): Up/Down, PageUp/PageDown, Home/End, **Left = first visible row in the window**, **Right = last visible row in the window**; if the cursor is already there, the next press moves by a whole window (the first row of the previous window, or the last row of the next one), Enter.

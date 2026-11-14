@@ -1,231 +1,231 @@
-# fxfm (fx file manager) – dizajn v1
+# fxfm (fx file manager) – design v1
 
-Datum: 2026-11-06
-Autor zahtjeva: Zvonimir Buzanić
-Projekt: `~/Documents/PVT/fxfm` (sestrinski projekt fxmp music playeru)
+Date: 2026-11-06
+Requested by: Zvonimir Bužanić
+Project: `~/Documents/PVT/fxfm` (sister project of the fxmp music player)
 
-## 1. Namjera i zašto
+## 1. Purpose and rationale
 
-Korisnik je godinama radio u Total Commanderu na Windowsima i prešao na Mac. Prelazak "nije bio lak". Na Macu nema file managera koji izgleda i ponaša se kao TC. fxfm je dvopanelni file manager za macOS koji **izgleda kao TC i ponaša se kao TC** (iste tipke, isti dijalozi, isti tok rada) te dodaje stvari koje korisnik svakodnevno treba:
+The owner worked in Total Commander on Windows for years and moved to the Mac. The move "was not easy". There is no file manager on the Mac that looks and behaves like TC. fxfm is a dual-panel file manager for macOS that **looks like TC and behaves like TC** (same keys, same dialogs, same workflow) and adds what the owner needs every day:
 
-- brzo kopiranje datoteka (php, shell skripte, zip/tar) na Linux servere u lokalnoj mreži, preko VPN-a ili na internetu, s vlastitim SSH ključevima po serveru
-- otvaranje i uređivanje sadržaja arhiva kao da su mape
+- fast copying of files (php, shell scripts, zip/tar) to Linux servers on the local network, over VPN or on the internet, with per-server SSH keys
+- opening and editing archive contents as if they were folders
 
-Uspjeh: korisnik otvori fxfm umjesto TC-a/Findera i radi "na slijepo" s mišićnom memorijom iz TC-a.
+Success: the owner opens fxfm instead of TC/Finder and works "blind" on TC muscle memory.
 
-## 2. Ciljevi v1
+## 2. v1 goals
 
-1. Glavni prozor u TC izgledu (vidi §4), dva panela, Tab prebacuje fokus između njih.
-2. Pregled diskova/particija: traka diskova i padajući izbornik diska.
-3. Osnovne TC operacije i prečaci (vidi §5), sve remapabilno.
-4. Ctrl+D hotlist lokacija (Change directory menu), kao u TC-u.
-5. Ctrl+F lista servera i spajanje: SFTP, SCP, FTP, FTPS, s ključevima po serveru.
-6. Arhive kao mape: zip, tar, tgz (tar.gz), gz, 7z. Čitanje i pisanje (kopiranje unutra/van, brisanje, rename, uređivanje datoteke unutar arhive).
-7. F3 ugrađeni preglednik, F4 vanjski editor po izboru korisnika.
-8. Portable ili sistemski način spremanja postavki, po izboru korisnika.
+1. Main window in the TC look (see §4), two panels, Tab switches focus between them.
+2. Disk/partition overview: a drive bar and a drive dropdown.
+3. Basic TC operations and shortcuts (see §5), all remappable.
+4. Ctrl+D location hotlist (Change directory menu), as in TC.
+5. Ctrl+F server list and connecting: SFTP, SCP, FTP, FTPS, with per-server keys.
+6. Archives as folders: zip, tar, tgz (tar.gz), gz, 7z. Read and write (copy in/out, delete, rename, edit a file inside an archive).
+7. F3 built-in viewer, F4 external editor of the user's choice.
+8. Portable or system settings storage, at the user's choice.
 
-## 3. Ne-ciljevi v1 (za kasnije verzije)
+## 3. v1 non-goals (for later versions)
 
-Tabovi (Ctrl+T), usporedba direktorija, sinkronizacija direktorija, multi-rename, pretraga (Alt+F7), pluginovi, thumbnail prikaz, rar.
+Tabs (Ctrl+T), directory compare, directory sync, multi-rename, search (Alt+F7), plugins, thumbnail view, rar.
 
-Korisnik planira postupno dodavati većinu TC funkcionalnosti. Prvi na redu nakon v1 su **pretraga (Alt+F7)** i **multi-rename (Ctrl+M)**, jer ih svakodnevno koristi. Arhitektura v1 zato mora omogućiti lako dodavanje novih naredbi: svaka naredba registrira se u središnji registar naredbi (ime, radnja, zadana tipka) koji pokreće meni, F-traku i remapiranje tipki. Alt+F7 i Ctrl+M se u v1 rezerviraju u registru.
+The owner plans to add most TC functionality gradually. First after v1 are **search (Alt+F7)** and **multi-rename (Ctrl+M)**, because they are used daily. The v1 architecture must therefore make it easy to add new commands: every command registers in a central command registry (name, action, default key) that drives the menu, the F-key bar and key remapping. Alt+F7 and Ctrl+M are reserved in the registry in v1.
 
-### Anti-ciljevi (ako se ovo dogodi, v1 je promašaj iako "radi")
+### Anti-goals (if any of these happen, v1 is a failure even though it "works")
 
-- Izgleda kao Finder ili generička Mac aplikacija, a ne kao TC.
-- Tipke se ne ponašaju kao u TC-u, ili F-tipke ne rade direktno (korisnik ima uključeno "Use F1, F2… as standard function keys", F-tipke dolaze bez Fn).
-- Prečaci rade na Cmd umjesto na Ctrl (TC koristi Ctrl i to se zadržava).
-- Postavke, ključevi i lozinke su prisilno zaključani na sustav (Keychain/Library) bez mogućnosti portable načina.
-- Uređivanje u arhivi ili na serveru tiho izgubi promjene.
+- It looks like Finder or a generic Mac app, not like TC.
+- Keys do not behave as in TC, or F-keys do not work directly (the owner has "Use F1, F2… as standard function keys" enabled, F-keys arrive without Fn).
+- Shortcuts use Cmd instead of Ctrl (TC uses Ctrl and that stays).
+- Settings, keys and passwords are forcibly locked to the system (Keychain/Library) with no portable mode.
+- Editing in an archive or on a server silently loses changes.
 
-## 4. Izgled (odobren mockup)
+## 4. Look (approved mockup)
 
-Reference u `tc-screenshots/` pored ovog dokumenta:
-- `fxfm-mockup-approved.html`: odobreni mockup fxfm-a
+References in `tc-screenshots/` next to this document:
+- `fxfm-mockup-approved.html`: the approved fxfm mockup
 
-Dijalozi (Ctrl+D, Ctrl+F) slijede raspored istoimenih dijaloga Total Commandera; snimke zaslona nisu dio repozitorija.
+Dialogs (Ctrl+D, Ctrl+F) follow the layout of the same-named Total Commander dialogs; screenshots are not part of the repository.
 
-Odozgo prema dolje, za svaki panel:
+Top to bottom, for each panel:
 
-- **Traka diskova**: gumbi s ikonom i imenom za `/` (Macintosh HD), `~` (home), svaki montirani volumen iz `/Volumes` (USB, DMG, SMB/AFP share) te svaka **aktivna** veza na server (☁️ ime). Aktivni disk je istaknut. Ažurira se automatski kad se volumen montira ili odmontira.
-- **Red s putanjom**: combo za izbor diska, `[ime volumena]  X k of Y k free` (format brojeva kao TC, točka kao separator tisućica), desno `/` (korijen) i `..` (nadmapa) kao klikabilni gumbi. Za remote se umjesto slobodnog prostora prikazuje `[sftp://user@host]`.
-- **Trenutna putanja** s filterom (`~/Documents/PVT/*.*`). Panel u fokusu ima istaknutu traku.
-- **Lista**: crna pozadina, veliki font (približno kao na TC snimci), ikona i ime. Mape u `[zagradama]`, `[..]` prvi. Kursor je sivi redak. Sortiranje: mape pa datoteke, abecedno. Klik na zaglavlje kolone nije nužan u v1 jer je prikaz "brief/full" kao na snimci (samo ime).
-- **Status linija** ispod panela: ime pod kursorom, `<DIR>` ili veličina, datum `dd.MM.yyyy HH:mm`, Unix prava (`drwxr-xr-x`).
-- Ispod oba panela opcionalni **naredbeni redak** (`putanja>`), koji naredbu izvršava u Terminal.app u trenutnoj mapi. Zatim **traka F-tipki** (F3 View, F4 Edit, F5 Copy, F6 Move, F7 NewFolder, F8 Delete, Alt+F4 Exit). Klik na gumb radi isto što i tipka.
+- **Drive bar**: buttons with icon and name for `/` (Macintosh HD), `~` (home), every mounted volume from `/Volumes` (USB, DMG, SMB/AFP share) and every **active** server connection (☁️ name). The active drive is highlighted. Updates automatically when a volume is mounted or unmounted.
+- **Path row**: combo for choosing the drive, `[volume name]  X k of Y k free` (number format as in TC, dot as thousands separator), and on the right `/` (root) and `..` (parent) as clickable buttons. For remote, `[sftp://user@host]` is shown instead of free space.
+- **Current path** with a filter (`~/Documents/PVT/*.*`). The focused panel has a highlighted bar.
+- **List**: black background, large font (approximately as in the TC screenshot), icon and name. Folders in `[brackets]`, `[..]` first. The cursor is a grey row. Sorting: folders then files, alphabetical. Clicking a column header is not required in v1 because the view is "brief/full" as in the screenshot (name only).
+- **Status line** below the panel: name under the cursor, `<DIR>` or size, date `dd.MM.yyyy HH:mm`, Unix permissions (`drwxr-xr-x`).
+- Below both panels an optional **command line** (`path>`), which runs the command in Terminal.app in the current folder. Then the **F-key bar** (F3 View, F4 Edit, F5 Copy, F6 Move, F7 NewFolder, F8 Delete, Alt+F4 Exit). Clicking a button does the same as the key.
 
-Boje (zadane, sve podesive u Configuration → Colors):
+Colors (defaults, all adjustable in Configuration → Colors):
 
-| tip | boja |
+| type | color |
 |---|---|
-| mape, obične datoteke | bijela |
-| skrivene (dotfiles, .DS_Store) | siva |
-| arhive (zip, tar, tgz, gz, 7z) | narančasto-crvena (#ff6a4d) |
-| video/audio | ljubičasto-plava |
-| označene (Insert/Space) | crvena |
+| folders, regular files | white |
+| hidden (dotfiles, .DS_Store) | grey |
+| archives (zip, tar, tgz, gz, 7z) | orange-red (#ff6a4d) |
+| video/audio | purple-blue |
+| marked (Insert/Space) | red |
 
-Glavni meni (Files, Mark, Commands, Net, Show, Configuration, Start, Help) nalazi se u **macOS gornjoj traci**, ne u prozoru. Naslov prozora: `korisnik – fxfm verzija`.
+The main menu (Files, Mark, Commands, Net, Show, Configuration, Start, Help) lives in the **macOS menu bar**, not in the window. Window title: `user – fxfm version`.
 
-**Početna mapa:** kod **prvog** pokretanja oba panela kreću iz korisnikovog home direktorija (`~`, gdje su Desktop, Documents, Downloads itd.). Nakon toga fxfm **pamti zadnje stanje i vraća ga pri svakom pokretanju**: putanje oba panela, aktivni panel i poziciju kursora.
+**Start folder:** on the **first** launch both panels start in the owner's home directory (`~`, where Desktop, Documents, Downloads etc. are). After that fxfm **remembers the last state and restores it on every launch**: the paths of both panels, the active panel and the cursor position.
 
-Pravila za vraćanje:
-- Ako zapamćena putanja više ne postoji (odmontiran USB, obrisana mapa), panel ide na najbližu postojeću nadmapu, a ako ni nje nema, na `~`.
-- Ako je panel bio na serveru ili u arhivi, panel se otvara na lokalnoj mapi iz koje se išlo (za server je to `~`). Moja odluka: fxfm se ne spaja automatski na server pri pokretanju.
+Restore rules:
+- If the remembered path no longer exists (unmounted USB, deleted folder), the panel goes to the nearest existing parent, and if there is none, to `~`.
+- If the panel was on a server or in an archive, it opens on the local folder it was entered from (for a server that is `~`). My decision: fxfm does not connect to a server automatically at startup.
 
-Uvijek se pamte veličina i pozicija prozora.
+Window size and position are always remembered.
 
-## 5. Tipke i operacije
+## 5. Keys and operations
 
-Sve tipke koriste fizički **Ctrl** (ne Cmd). Option na Macu služi kao Alt.
+All keys use the physical **Ctrl** (not Cmd). Option on the Mac serves as Alt.
 
-**Tipkovnica korisnika je Mac**: ugrađena MacBook tipkovnica ili Logitech MX Keys for Mac. Nema tipku Insert; numpad i Home/End/PgUp/PgDn postoje samo ponekad (na MacBooku su to Fn+strelice). Zadana mapa zato za svaku TC radnju koja ovisi o Insert/Num tipkama ima i **Mac alternativu**:
-- Space označava (Insert ostaje vezan ako ga tipkovnica ima)
-- Ctrl+= / Ctrl+− rade isto što Num + / Num −
-- Ctrl+8 radi isto što Num *
+**The owner's keyboard is a Mac**: the built-in MacBook keyboard or a Logitech MX Keys for Mac. There is no Insert key; numpad and Home/End/PgUp/PgDn exist only sometimes (on a MacBook they are Fn+arrows). The default map therefore has a **Mac alternative** for every TC action that depends on Insert/Num keys:
+- Space marks (Insert stays bound if the keyboard has it)
+- Ctrl+= / Ctrl+− do the same as Num + / Num −
+- Ctrl+8 does the same as Num *
 
-Num tipke ostaju dodatno vezane za tipkovnice s numpadom.
+Num keys stay additionally bound for keyboards with a numpad.
 
-**Konflikti sa sustavom**: macOS sam presreće neke Ctrl kombinacije (Ctrl+↑/↓ i Ctrl+←/→ za Mission Control, Ctrl+Space za promjenu jezika, eventualno Ctrl/Option+F-tipke). fxfm ih **ne preuzima nasilno** (nema CGEventTapa ni Accessibility dozvole). Kod prvog pokretanja, i u Configuration → Keyboard, prikazuje koje su zadane fxfm tipke zauzete u sustavu te nudi otvaranje System Settings → Keyboard Shortcuts ili remapiranje u fxfm-u. Za promjenu redoslijeda u hotlisti postoje i gumbi ↑/↓ te drag & drop.
+**System conflicts**: macOS itself intercepts some Ctrl combinations (Ctrl+↑/↓ and Ctrl+←/→ for Mission Control, Ctrl+Space for switching input language, possibly Ctrl/Option+F-keys). fxfm **does not forcibly take them over** (no CGEventTap and no Accessibility permission). On first launch, and in Configuration → Keyboard, it shows which default fxfm keys are taken by the system and offers to open System Settings → Keyboard Shortcuts or to remap in fxfm. For reordering in the hotlist there are also ↑/↓ buttons and drag & drop.
 
-| tipka | radnja |
+| key | action |
 |---|---|
-| Tab | prebacivanje fokusa na drugi panel |
-| ↑ ↓ PgUp PgDn Home End | kretanje kursora |
-| Enter | uđi u mapu ili arhivu; za datoteku je otvori zadanom macOS aplikacijom |
-| Backspace | nadmapa |
-| Ctrl+\\ | korijen |
-| Ctrl+PgUp | nadmapa (TC alternativa) |
-| Insert / Space | označi ili odznači (Space na mapi ujedno računa veličinu) |
-| Num + / Num − | označi ili odznači po masci (dijalog s `*.php` itd.) |
-| Num * | invertiraj oznake |
-| Ctrl+A | označi sve |
-| F2 | rename na mjestu (korisnikov zahtjev) |
-| Shift+F6 | rename na mjestu (TC default, ostaje i ovo) |
-| F3 | ugrađeni preglednik |
-| F4 | uredi u vanjskom editoru |
-| Shift+F4 | nova datoteka i otvori u editoru |
-| F5 | kopiraj u drugi panel (dijalog s odredištem, kao TC) |
-| F6 | premjesti u drugi panel |
-| F7 | nova mapa |
-| F8 / Delete | obriši (potvrda; lokalno ide u Trash, opcija za trajno brisanje sa Shift+F8) |
-| Alt+F1 / Alt+F2 | izbor diska za lijevi/desni panel |
+| Tab | switch focus to the other panel |
+| ↑ ↓ PgUp PgDn Home End | cursor movement |
+| Enter | enter a folder or archive; for a file, open it with the default macOS application |
+| Backspace | parent folder |
+| Ctrl+\\ | root |
+| Ctrl+PgUp | parent folder (TC alternative) |
+| Insert / Space | mark or unmark (Space on a folder also calculates its size) |
+| Num + / Num − | mark or unmark by mask (dialog with `*.php` etc.) |
+| Num * | invert marks |
+| Ctrl+A | mark all |
+| F2 | in-place rename (the owner's request) |
+| Shift+F6 | in-place rename (TC default, this stays too) |
+| F3 | built-in viewer |
+| F4 | edit in external editor |
+| Shift+F4 | new file and open in editor |
+| F5 | copy to the other panel (dialog with destination, as in TC) |
+| F6 | move to the other panel |
+| F7 | new folder |
+| F8 / Delete | delete (confirmation; locally goes to Trash, option for permanent delete with Shift+F8) |
+| Alt+F1 / Alt+F2 | drive selection for the left/right panel |
 | Ctrl+D | hotlist (§6) |
-| Ctrl+F | spajanje na server (§7) |
-| Ctrl+Shift+F | prekid veze |
-| Ctrl+R | osvježi panel |
-| Ctrl+U | zamijeni panele |
-| Alt+F4 | izlaz (uz Cmd+Q) |
+| Ctrl+F | connect to server (§7) |
+| Ctrl+Shift+F | disconnect |
+| Ctrl+R | refresh panel |
+| Ctrl+U | swap panels |
+| Alt+F4 | exit (besides Cmd+Q) |
 
-**Operacije F5/F6/F8** rade jednako za lokalno ↔ lokalno, lokalno ↔ server, server ↔ server (preko lokalnog privremenog spremnika), lokalno ↔ arhiva i arhiva ↔ server. Ako postoje označene datoteke, operacija radi nad njima; inače radi nad datotekom pod kursorom. Dugačke operacije prikazuju TC-ov progress dijalog (trenutna datoteka, ukupni napredak, Cancel) i ne blokiraju UI. Kod konflikta pita kao TC: Overwrite / Overwrite all / Skip / Skip all / Rename / Overwrite older.
+**F5/F6/F8 operations** work the same for local ↔ local, local ↔ server, server ↔ server (via a local temporary store), local ↔ archive and archive ↔ server. If there are marked files, the operation works on them; otherwise on the file under the cursor. Long operations show TC's progress dialog (current file, total progress, Cancel) and do not block the UI. On a conflict it asks as TC does: Overwrite / Overwrite all / Skip / Skip all / Rename / Overwrite older.
 
-**Remapiranje**: Configuration → Keyboard prikazuje popis svih naredbi s trenutnom kombinacijom, a korisnik pritisne novu kombinaciju. Postoje upozorenje na konflikt i gumb "Reset na TC zadane". Svaka tipka (uključujući F1–F12, Tab, Insert, Num tipke) može se dodijeliti bilo kojoj naredbi.
+**Remapping**: Configuration → Keyboard shows a list of all commands with their current combination, and the user presses a new combination. There is a conflict warning and a "Reset to TC defaults" button. Every key (including F1–F12, Tab, Insert, Num keys) can be assigned to any command.
 
-**F3 preglednik**: ugrađen prozor. Tekst s detekcijom kodiranja (UTF-8, Windows-1250 za hrvatske znakove), slike, PDF, a za ostalo hex. Esc ili F3 zatvara. Radi i za datoteke na serveru i u arhivi (prvo ih preuzme u privremenu mapu).
+**F3 viewer**: a built-in window. Text with encoding detection (UTF-8, Windows-1250 for Croatian characters), images, PDF, and hex for everything else. Esc or F3 closes it. Works for files on a server and in an archive too (it downloads them to a temporary folder first).
 
-**F4 editor**: Configuration → Editor ima putanju do aplikacije ili naredbu (npr. Visual Studio Code, Sublime, ili `nano` u Terminalu). Za lokalnu datoteku otvara direktno. Za datoteku sa servera ili iz arhive:
-1. preuzme je u privremenu mapu i otvori je u editoru;
-2. prati tu kopiju (editori poput VS Codea ne blokiraju dok se ne zatvore, pa se ne čeka zatvaranje procesa);
-3. kod svake promjene spremljene datoteke pita kao TC: "Datoteka je promijenjena. Učitati natrag na server/u arhivu?" (Da / Ne);
-4. privremene kopije čiste se pri zatvaranju veze ili izlasku.
+**F4 editor**: Configuration → Editor holds a path to an application or a command (e.g. Visual Studio Code, Sublime, or `nano` in Terminal). For a local file it opens directly. For a file from a server or an archive:
+1. it downloads it to a temporary folder and opens it in the editor;
+2. it watches that copy (editors like VS Code do not block until closed, so it does not wait for the process to exit);
+3. on every save of the file it asks as TC does: "The file has changed. Upload back to the server/archive?" (Yes / No);
+4. temporary copies are cleaned up when the connection is closed or on exit.
 
 ## 6. Ctrl+D hotlist ("Change directory menu")
 
-- Ctrl+D otvara popup meni na mjestu kursora: prvo "Add current dir" i "Configure…", pa korisnikove stavke i podmeniji. Stavke imaju TC-ovo `&` za tipku-akcelerator.
-- Configure otvara dijalog 1:1 kao TC (druga snimka): lista stavki, gumbi Add Item, Add submenu, Delete Item, Change Title, OK, Cancel, Help, polja **Command** (`cd /putanja`) s gumbom za izbor mape, **Target path** (ako je zadano, drugi panel ide tamo) te "Hide menu items starting with this character" (dvoklik skriva ili prikazuje stavku).
-- Promjena redoslijeda drag & dropom ili Ctrl+↑/↓.
-- Command može biti i remote: `cd sftp://web-1/var/www/html`, gdje je `web-1` ime iz liste servera. Odabir se spaja (ako već nije spojen) i otvara tu mapu.
+- Ctrl+D opens a popup menu at the cursor: first "Add current dir" and "Configure…", then the user's items and submenus. Items have TC's `&` for the accelerator key.
+- Configure opens a dialog 1:1 with TC (second screenshot): item list, buttons Add Item, Add submenu, Delete Item, Change Title, OK, Cancel, Help, fields **Command** (`cd /path`) with a folder-picker button, **Target path** (if set, the other panel goes there) and "Hide menu items starting with this character" (double-click hides or shows the item).
+- Reordering by drag & drop or Ctrl+↑/↓.
+- Command can also be remote: `cd sftp://web-1/var/www/html`, where `web-1` is a name from the server list. Selecting it connects (if not already connected) and opens that folder.
 
-## 7. Serveri (Ctrl+F)
+## 7. Servers (Ctrl+F)
 
-**Dijalog "Connect to server"** je 1:1 s TC-om (treća snimka): stablo s mapama i serverima, gumbi Connect, New connection…, New URL…, Duplicate entry…, New folder…, Edit…, Delete, Encrypt…, Cancel, Help. Dvoklik ili Enter spaja.
+The **"Connect to server" dialog** is 1:1 with TC (third screenshot): a tree with folders and servers, buttons Connect, New connection…, New URL…, Duplicate entry…, New folder…, Edit…, Delete, Encrypt…, Cancel, Help. Double-click or Enter connects.
 
-**Podaci po serveru**:
-- naziv
-- protokol: SFTP, SCP, FTP, FTPS (explicit TLS); SCP koristi SSH vezu, a lista mape preko SFTP-a ili `ls` ako server nema SFTP
+**Per-server data**:
+- name
+- protocol: SFTP, SCP, FTP, FTPS (explicit TLS); SCP uses an SSH connection, and lists folders via SFTP or `ls` if the server has no SFTP
 - host, port
-- korisnik
-- autentikacija: lozinka, privatni ključ ili ključ + passphrase
-  - ključ se može **odabrati s lokacije** na disku (putanja se pamti) ili **importati** (kopira se u `keys/` u fxfm podatkovnoj mapi i putuje s njom)
-  - podržani OpenSSH formati (RSA, ECDSA, Ed25519) i PEM
-- početni direktorij lokalno i na serveru
-- opcija "Dopusti zastarjele algoritme (ssh-rsa/SHA1)" za stare servere
-- FTP: pasivni ili aktivni način, kodiranje imena
-- opcija "Spremi lozinku"
+- user
+- authentication: password, private key, or key + passphrase
+  - a key can be **picked from a location** on disk (the path is remembered) or **imported** (copied into `keys/` in the fxfm data folder and travels with it)
+  - supported OpenSSH formats (RSA, ECDSA, Ed25519) and PEM
+- start directory locally and on the server
+- option "Allow legacy algorithms (ssh-rsa/SHA1)" for old servers
+- FTP: passive or active mode, name encoding
+- option "Save password"
 
-**Lozinka za ključ/server**: ako nije spremljena, pita kod spajanja.
+**Key/server password**: if not saved, it asks when connecting.
 
-**Host key**: kod prvog spajanja prikazuje se fingerprint i pitanje za prihvaćanje. Prihvaćeni ključevi spremaju se u fxfm `known_hosts` u podatkovnoj mapi. Kod promjene ključa slijedi glasno upozorenje.
+**Host key**: on first connection a fingerprint is shown with a question whether to accept it. Accepted keys are stored in fxfm's `known_hosts` in the data folder. If the key changes, a loud warning follows.
 
-Nakon spajanja server se pojavljuje kao "disk" u traci diskova i panel ga pregledava kao mapu. Ostaju dostupne sve operacije: F3, F4, F5, F6, F7, F8, F2, a za SFTP i promjena prava (Files → Change attributes, chmod). Više istovremenih veza je dozvoljeno. Prekid veze je Ctrl+Shift+F. Ako veza pukne, panel to jasno prikazuje i nudi ponovno spajanje.
+After connecting, the server appears as a "drive" in the drive bar and the panel browses it as a folder. All operations stay available: F3, F4, F5, F6, F7, F8, F2, and for SFTP also changing permissions (Files → Change attributes, chmod). Multiple simultaneous connections are allowed. Disconnect is Ctrl+Shift+F. If the connection drops, the panel shows this clearly and offers to reconnect.
 
-**New URL…** prima `sftp://user@host:port/path` ili `ftp://…` za brzo spajanje bez spremanja.
+**New URL…** accepts `sftp://user@host:port/path` or `ftp://…` for quick connecting without saving.
 
-## 8. Arhive
+## 8. Archives
 
-- Enter na `.zip`, `.tar`, `.tgz`/`.tar.gz`, `.gz`, `.7z` ulazi u arhivu kao u mapu. `[..]` u korijenu arhive vraća u mapu koja sadrži arhivu. Putanja se prikazuje kao `/put/do/arhiva.zip/unutarnja/mapa`.
-- Unutar arhive rade F3, F4 (s "upload back" tokom kao za server), F5 (van i unutra), F6, F7, F8 i F2.
-- `.gz` (bez tar-a) sadrži jednu datoteku. Prikazuje se kao arhiva s jednom datotekom.
-- Pisanje u arhivu radi preko nove privremene arhive koja **atomski zamjenjuje** original tek nakon uspjeha. Original se nikad ne smije pokvariti ako operacija ne uspije.
-- Arhive na serveru: Enter je preuzme u privremenu mapu i otvori. Promjene se nude za upload natrag kao kod F4.
-- Lozinkom zaštićeni zip: pita lozinku za čitanje. 7z s lozinkom i pisanje u kriptirane arhive nisu u v1 (libarchive ne čita kriptirani 7z; ako zatreba, to je zaseban backend kasnije).
-- Pakiranje novih arhiva (Alt+F5 u TC-u) nije u v1, osim ako je trivijalno uz istu biblioteku.
+- Enter on `.zip`, `.tar`, `.tgz`/`.tar.gz`, `.gz`, `.7z` enters the archive like a folder. `[..]` at the archive root returns to the folder containing the archive. The path is shown as `/path/to/archive.zip/inner/folder`.
+- Inside an archive, F3, F4 (with the "upload back" flow as for servers), F5 (out and in), F6, F7, F8 and F2 work.
+- `.gz` (without tar) contains a single file. It is shown as an archive with one file.
+- Writing to an archive goes through a new temporary archive that **atomically replaces** the original only after success. The original must never be corrupted if the operation fails.
+- Archives on a server: Enter downloads them to a temporary folder and opens them. Changes are offered for upload back as with F4.
+- Password-protected zip: asks for the password to read. 7z with a password and writing to encrypted archives are not in v1 (libarchive does not read encrypted 7z; if needed, that is a separate backend later).
+- Creating new archives (Alt+F5 in TC) is not in v1, unless trivial with the same library.
 
-## 9. Postavke i portable način
+## 9. Settings and portable mode
 
-Configuration → Options → **Način spremanja**:
+Configuration → Options → **Storage mode**:
 
-- **Portable**: sve u `fxfm-data/` pored `fxfm.app` (config, hotlist, serveri, keymap, boje, known_hosts, `keys/`). Lozinke i passphraseovi kriptiraju se **master lozinkom** (gumb Encrypt… u Ctrl+F dijalogu, kao TC). Master lozinka se traži jednom po pokretanju, kad zatreba. Bez master lozinke lozinke se ne spremaju.
-- **Sistemski**: postavke u `~/Library/Application Support/fxfm/`, lozinke u macOS Keychainu.
+- **Portable**: everything in `fxfm-data/` next to `fxfm.app` (config, hotlist, servers, keymap, colors, known_hosts, `keys/`). Passwords and passphrases are encrypted with a **master password** (the Encrypt… button in the Ctrl+F dialog, as in TC). The master password is asked once per launch, when needed. Without a master password, passwords are not saved.
+- **System**: settings in `~/Library/Application Support/fxfm/`, passwords in the macOS Keychain.
 
-Pravila:
-- Ako postoji `fxfm-data/` pored aplikacije i zapisiva je, koristi se portable. Inače se koristi sistemski način.
-- Prebacivanje načina migrira sve podatke (uključujući lozinke) i to jasno potvrđuje.
-- Formati su čitljivi tekst (JSON ili INI), tako da ih korisnik može ručno uređivati ili verzionirati.
+Rules:
+- If `fxfm-data/` exists next to the application and is writable, portable mode is used. Otherwise system mode is used.
+- Switching modes migrates all data (including passwords) and confirms this clearly.
+- Formats are human-readable text (JSON or INI), so the user can edit or version them by hand.
 
-## 10. Ograničenja
+## 10. Constraints
 
-- macOS 15 (Sequoia) ili noviji. Razvojni Mac ima macOS 15.7, Rust 1.99.1, tauri-cli 2.12, Node 26.
-- Aplikacija mora biti samostalna: sve biblioteke (SSH, FTP, arhive) **ugrađene u .app**. Bez Homebrewa ili drugih instalacija na ciljnom Macu, jer portable mora raditi kopiranjem mape.
-- Lokalni pristup cijelom disku traži Full Disk Access za neke mape. Pri prvom pokretanju aplikacija to objašnjava ako naiđe na zabranu.
-- Distribucija: osobna upotreba, build lokalno. Potpisivanje/notarizacija nisu potrebni u v1 (ad-hoc potpis).
-- **Nošenje na druge Macove** (USB, mrežna kopija, zip) je očekivano:
-  - Kopirana aplikacija dobije quarantine atribut, pa je Gatekeeper može blokirati, a App Translocation je pokreće s nasumične read-only putanje. Tada se `fxfm-data/` pored .app ne može pronaći.
-  - fxfm mora prepoznati translociranu putanju (`SecTranslocateIsTranslocatedURL` ili putanja pod `/private/var/folders/.../AppTranslocation/`). Tada prikazuje jasnu poruku s rješenjem: naredba `xattr -dr com.apple.quarantine <putanja>/fxfm.app` koju može kopirati ili izvršiti jednim klikom, nakon čega se aplikacija ponovno pokrene.
-  - fxfm ne smije tiho prijeći u sistemski način ni krenuti s praznim postavkama.
-  - Uz projekt ide kratki README "kako prenijeti na drugi Mac".
-- Git commitovi za ovaj projekt samo kao `zbuzanic@gmail.com` (isto pravilo kao za fxmp).
+- macOS 15 (Sequoia) or newer. The development Mac has macOS 15.7, Rust 1.99.1, tauri-cli 2.12, Node 26.
+- The application must be self-contained: all libraries (SSH, FTP, archives) **embedded in the .app**. No Homebrew or other installs on the target Mac, because portable must work by copying a folder.
+- Local access to the whole disk requires Full Disk Access for some folders. On first launch the application explains this if it hits a denial.
+- Distribution: personal use, local build. Signing/notarization are not needed in v1 (ad-hoc signature).
+- **Carrying to other Macs** (USB, network copy, zip) is expected:
+  - A copied application gets the quarantine attribute, so Gatekeeper may block it, and App Translocation runs it from a random read-only path. Then `fxfm-data/` next to the .app cannot be found.
+  - fxfm must recognize a translocated path (`SecTranslocateIsTranslocatedURL` or a path under `/private/var/folders/.../AppTranslocation/`). It then shows a clear message with the fix: the command `xattr -dr com.apple.quarantine <path>/fxfm.app`, which can be copied or run with one click, after which the application restarts.
+  - fxfm must not silently fall back to system mode or start with empty settings.
+  - A short README "how to move to another Mac" ships with the project.
+- Git commits for this project only as `zbuzanic@gmail.com` (same rule as for fxmp).
 
-## 10a. Platforma i Linux
+## 10a. Platform and Linux
 
-fxfm je **macOS-first** projekt na **Rust + Tauri 2**, po uzoru na korisnikov fxmp (`~/Documents/PVT/fxmp`): Cargo workspace s `crates/core` + `src-tauri`, UI u čistom JS/HTML/CSS bez bundlera (`ui/`), Rust verzija pinana u `rust-toolchain.toml`. Odluku je donio korisnik ("ako je Rust bolji, vozi Rust"), jer tako i Linux build dolazi gotovo besplatno.
+fxfm is a **macOS-first** project on **Rust + Tauri 2**, modeled on the owner's fxmp (`~/Documents/PVT/fxmp`): a Cargo workspace with `crates/core` + `src-tauri`, UI in plain JS/HTML/CSS without a bundler (`ui/`), Rust version pinned in `rust-toolchain.toml`. The owner made this decision ("if Rust is better, go Rust"), because it also brings a Linux build almost for free.
 
-- **fxfm-core** (`crates/core`): sva logika, i to VFS (lokalno, arhiva, SFTP/SCP/FTP), operacije s progressom i konfliktima, registar naredbi i keymap, konfiguracija, kriptiranje lozinki, hotlista i lista servera. Bez ovisnosti o Tauriju. Mora se buildati na macOS-u i Linuxu.
-- **src-tauri**: tanak sloj koji naredbe izlaže UI-ju, plus macOS specifičnosti (meni u gornjoj traci, Keychain preko `keyring`, Trash, Terminal.app).
-- **ui/**: TC izgled, crtanje panela, tipkovnica.
-- Linux build nije cilj v1, ali kod ne smije imati macOS-only pretpostavke izvan `cfg(target_os = "macos")` blokova.
+- **fxfm-core** (`crates/core`): all the logic, namely the VFS (local, archive, SFTP/SCP/FTP), operations with progress and conflicts, command registry and keymap, configuration, password encryption, hotlist and server list. No dependency on Tauri. Must build on macOS and Linux.
+- **src-tauri**: a thin layer that exposes commands to the UI, plus macOS specifics (menu bar, Keychain via `keyring`, Trash, Terminal.app).
+- **ui/**: TC look, panel drawing, keyboard.
+- A Linux build is not a v1 goal, but the code must not have macOS-only assumptions outside `cfg(target_os = "macos")` blocks.
 
-## 11. Odluke koje je donio Claude (korisnik ih nije eksplicitno birao)
+## 11. Decisions made by Claude (not explicitly chosen by the owner)
 
-- Meni u macOS gornjoj traci.
-- Unix prava umjesto Windows atributa u status liniji.
-- Zadane boje iz §4.
-- F8 lokalno briše u Trash (Shift+F8 trajno).
-- Server ↔ server kopiranje ide preko lokalnog privremenog spremnika.
-- Remote stavke u hotlisti (`cd sftp://ime/putanja`).
-- Mac alternative za Insert/Num tipke (Space, Ctrl+=, Ctrl+−, Ctrl+8) i bez preuzimanja sistemskih prečaca (§5).
-- 7z s lozinkom nije u v1.
-- Podjela na fxfm-core (prenosiv na Linux) i Tauri UI (§10a).
-- **Universal build (arm64 + x86_64)**, jer korisnik možda nosi fxfm na druge Macove i ne zna se jesu li svi Apple Silicon. Sve C biblioteke grade se kao universal.
-- Nema importa iz Total Commandera (korisnik eksplicitno ne treba).
-- Server ili arhiva se ne vraćaju automatski pri pokretanju (panel ide na lokalnu mapu), a nepostojeća putanja pada na najbližu nadmapu.
+- Menu in the macOS menu bar.
+- Unix permissions instead of Windows attributes in the status line.
+- Default colors from §4.
+- F8 deletes to Trash locally (Shift+F8 permanent).
+- Server ↔ server copying goes through a local temporary store.
+- Remote items in the hotlist (`cd sftp://name/path`).
+- Mac alternatives for Insert/Num keys (Space, Ctrl+=, Ctrl+−, Ctrl+8) and no takeover of system shortcuts (§5).
+- 7z with a password is not in v1.
+- Split into fxfm-core (portable to Linux) and Tauri UI (§10a).
+- **Universal build (arm64 + x86_64)**, because the owner may carry fxfm to other Macs and it is not known whether all are Apple Silicon. All C libraries are built as universal.
+- No import from Total Commander (the owner explicitly does not need it).
+- A server or archive is not restored automatically at launch (the panel goes to a local folder), and a nonexistent path falls back to the nearest parent.
 
-## 12. Prepušteno builderu
+## 12. Left to the builder
 
-- Izbor crateova. Prednost imaju čisti Rust crateovi ili zreli bindingi koji se statički linkaju u bundle:
-  - SFTP/SCP: npr. `ssh2` s vendored OpenSSL-om ili `russh`
-  - FTP/FTPS: npr. `suppaftp`
-  - arhive: `zip`, `tar`, `flate2`, `sevenz-rust2`
-- Arhitektura VFS sloja (zajednički trait za lokalno, arhivu i remote je očekivan).
-- Format konfiguracijskih datoteka, kriptografija za master lozinku (standardni KDF + AEAD).
-- Ikone datoteka.
-- Organizacija koda i testova (po uzoru na fxmp).
+- Choice of crates. Pure Rust crates or mature bindings that link statically into the bundle are preferred:
+  - SFTP/SCP: e.g. `ssh2` with vendored OpenSSL or `russh`
+  - FTP/FTPS: e.g. `suppaftp`
+  - archives: `zip`, `tar`, `flate2`, `sevenz-rust2`
+- Architecture of the VFS layer (a common trait for local, archive and remote is expected).
+- Config file format, cryptography for the master password (standard KDF + AEAD).
+- File icons.
+- Code and test organization (modeled on fxmp).

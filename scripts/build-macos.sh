@@ -6,6 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 KC="$HOME/.fxfm-signing/fxfm-signing.keychain-db"
 security unlock-keychain -p "$(cat "$HOME/.fxfm-signing/keychain-pass")" "$KC"
+export APPLE_SIGNING_IDENTITY="fxfm local signing"
 cargo tauri build --target universal-apple-darwin
 APP=target/universal-apple-darwin/release/bundle/macos/fxfm.app
 codesign --verify --strict "$APP"
