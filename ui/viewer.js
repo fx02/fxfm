@@ -1,10 +1,13 @@
 // F3 viewer window: text / image / PDF / hex.
-import { formatViewStatus, hexLines, groupThousands } from "./lib.mjs";
+import { formatViewStatus, hexLines, groupThousands, modifierMap, tcModifiers } from "./lib.mjs";
 
 const T = window.__TAURI__;
 const invoke = T.core.invoke;
 const win = T.window.getCurrentWindow();
-const path = new URLSearchParams(location.search).get("path") ?? "";
+const query = new URLSearchParams(location.search);
+const path = query.get("path") ?? "";
+/** Which Mac keys act as TC's Alt and Ctrl, as of opening (`open_viewer` passes them). */
+const mods = modifierMap({ modifiers: { alt: query.get("alt"), ctrl: query.get("ctrl") } });
 
 const bodyEl = document.getElementById("vbody");
 const statusEl = document.getElementById("vstatus");
@@ -102,14 +105,15 @@ document.addEventListener("keydown", (e) => {
     }
     return;
   }
-  const close = e.key === "Escape" || e.code === "F3" || (e.ctrlKey && e.code === "KeyW");
+  const m = tcModifiers(e, mods);
+  const close = e.key === "Escape" || e.code === "F3" || (m.ctrl && e.code === "KeyW");
   if (close) {
     e.preventDefault();
     win.close();
-  } else if (e.ctrlKey && e.code === "KeyF") {
+  } else if (m.ctrl && e.code === "KeyF") {
     e.preventDefault();
     if (isText) openFind();
-  } else if (isText && !e.ctrlKey && !e.metaKey && !e.altKey && ENCODINGS.has(e.key)) {
+  } else if (isText && !m.any && ENCODINGS.has(e.key)) {
     e.preventDefault();
     load(invoke("view_text_as", { path, encoding: ENCODINGS.get(e.key) }));
   }

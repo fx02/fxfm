@@ -147,7 +147,11 @@ html, body {
 .r.arc { color: var(--c-archive); }
 .r.med { color: var(--c-media); }
 .r.mark { color: var(--c-marked); font-weight: 600; }
-.r.sel { background: var(--c-cursor); }
+/* Cursor row: filled with an accent bar in the active panel, only outlined in the other one,
+   so the active side is obvious at a glance (also after the window regains focus). */
+.pane.active .r.sel { background: var(--c-cursor); box-shadow: inset 4px 0 0 var(--active); }
+.pane:not(.active) .r.sel { background: transparent; outline: 1px dashed #8a8a8a; outline-offset: -1px; }
+.pane.active .list { box-shadow: inset 0 2px 0 var(--active); }
 .r.droptarget { outline: 2px solid var(--active); outline-offset: -2px; }
 .rows { -webkit-user-drag: none; }
 .pane.droptarget { outline: 2px solid var(--active); outline-offset: 1px; }
@@ -410,6 +414,9 @@ body.viewer {
 
 /* Configuration → Keyboard / Options. */
 .dialog.keycfg { width: 640px; max-width: 94vw; }
+.dialog.keycfg .mods { margin-bottom: 8px; }
+.dialog.keycfg .mods .line { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+.dialog.keycfg .mods .line span { width: 11em; }
 .dialog.optcfg { width: 600px; max-width: 94vw; }
 .keyscroll {
   max-height: 60vh;
@@ -459,6 +466,12 @@ table.keys td button { min-width: 0; padding: 0 8px; }
 .dialog .check { display: flex; align-items: center; gap: 4px; }
 .dialog .check input[type="checkbox"] { width: auto; margin: 0; }
 .dialog.srvcfg { width: 600px; }
+.dialog.pack { width: 520px; max-width: 94vw; }
+.dialog.pack .line { display: flex; align-items: center; gap: 6px; margin: 6px 0 0; }
+.dialog.pack .line span { width: 9em; flex: none; }
+.dialog.pack .line input, .dialog.pack .line select { flex: 1; min-width: 0; width: auto; }
+.dialog.pack .pw[hidden] { display: none; }
+.dialog.pack .pw .note { margin: 4px 0 0; font-size: 0.9em; }
 .srvlist { height: 300px; }
 .srow .twisty { display: inline-block; width: 1.2em; text-align: center; }
 .dialog.srvask { width: 380px; }
@@ -479,3 +492,5 @@ table.keys td button { min-width: 0; padding: 0 8px; }
 .rwx { display: grid; grid-template-columns: 110px repeat(3, 70px); gap: 4px 0; align-items: center; }
 .rwx .head { text-align: center; color: #555; }
 .dialog .rwx input[type="checkbox"] { width: auto; margin: 0 auto; }
+
+.boot-error { position: fixed; inset: 0; z-index: 1000; margin: 0; padding: 16px; background: #fff; color: #a00; font: 13px/1.4 ui-monospace, monospace; white-space: pre-wrap; overflow: auto; }

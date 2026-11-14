@@ -1,6 +1,6 @@
 # fxfm
 
-fxfm is a Total Commander-style dual-panel file manager for macOS (Rust + Tauri 2). The keys are TC's (F3–F8, Tab, Ctrl+D…, always the physical **Ctrl**, Option is Alt), and the menu lives in the macOS menu bar (Files, Mark, Commands, Net, Show, Configuration, Start, Help). It works with local disks, archives (as folders) and servers (SFTP, SCP, FTP, FTPS).
+fxfm is a Total Commander-style dual-panel file manager for macOS (Rust + Tauri 2). The keys are TC's (F3–F8, Tab, Ctrl+D…; by default TC's Ctrl is the Mac **Control** key and TC's Alt is **Option**, and Configuration → Keyboard can make Command either of them, see "Alt and Ctrl keys"), and the menu lives in the macOS menu bar (Files, Mark, Commands, Net, Show, Configuration, Start, Help). It works with local disks, archives (as folders) and servers (SFTP, SCP, FTP, FTPS).
 
 Requires macOS 15 (Sequoia) or later.
 
@@ -22,7 +22,7 @@ cargo tauri build --target universal-apple-darwin
 Output (universal, runs on Apple Silicon and Intel Macs):
 
 - app: `target/universal-apple-darwin/release/bundle/macos/fxfm.app`
-- disk image: `target/universal-apple-darwin/release/bundle/dmg/fxfm_0.1.0_universal.dmg`
+- disk image: `target/universal-apple-darwin/release/bundle/dmg/fxfm_<version>_universal.dmg`
 
 If the `.dmg` step crashes with "Finder is busy" (locked screen, SSH), run the build with `CI=true`: this skips Finder's DMG layout customization.
 
@@ -85,6 +85,21 @@ Archives open as folders. Supported formats: `.zip`, `.tar`, `.tgz` / `.tar.gz`,
 - **Refusals**: encrypted archives are not modified; encrypted 7z cannot be read; 7z with unsafe entry names is not overwritten; a tar in which a hard link points to an entry being deleted or renamed is not modified; `.gz` has its own limitation (a single file).
 - **Temporary files**: `~/Library/Caches/fxfm/tmp/<pid>/`. They are deleted on exit, except for unuploaded changes.
 
+## Pack files (Alt+F5)
+
+**Alt+F5** (Option+F5 with the default keys; Files → Pack files…) packs the marked entries of the active panel, or the entry under the cursor, into a **zip**. Folders go in with everything below them (empty folders and hidden files too); symbolic links are stored as links, and modification times and Unix permissions are kept. Names are stored as UTF-8.
+
+- **Name and place**: one entry gives its name without the last extension (`report.pdf` → `report.zip`, folder `site` → `site.zip`, `.config` → `.config.zip`); several entries give the name of their folder (`web.zip`), or `archive.zip` at the root. Like in TC, the archive goes to the other panel's folder when that is a local folder, otherwise to the active panel's folder. The dialog shows the full path and lets you change it.
+- **Password**: *Encrypt with a password* asks for the password twice and the method: **AES-256** (default, secure) or **ZipCrypto** (weak, but opens everywhere). Finder's Archive Utility cannot open AES-256 zips; fxfm, Keka and 7-Zip can. The password is not saved or logged, and is cleared from fxfm's memory (the Rust side) when the job ends.
+- **Times**: entries carry the local time in the zip's DOS field plus the UTC time in the Info-ZIP extended timestamp, so Finder, `unzip`, 7-Zip, Keka and fxfm show the same times. fxfm reads that timestamp when present, else the DOS field as local time (also for zips from other tools).
+- **Not into itself**: an archive cannot be packed onto its own name, nor into a folder being packed ("Cannot pack an archive into itself").
+- **Writing**: the archive is written to a hidden `.<name>.fxfm-<pid>-<n>.part` next to the target and renamed into place at the end; Cancel or an error removes the `.part`. An existing archive of the same name is only replaced after "`<name>` already exists." → **Overwrite**. Unreadable files ask Retry / Skip / Skip all / Cancel, as in a copy.
+- **For now**: only zip, only a new archive (not adding to an existing one), and only local files: in an archive or on a server fxfm says "Packing works with local files for now."
+
+## Alt and Ctrl keys
+
+Configuration → Keyboard chooses which Mac key acts as TC's **Alt** (default **Option**) and which as TC's **Ctrl** (default **Control**); either can be Option, Control or Command, but not the same key for both. The key table and `keymap.json` stay in TC terms (`Alt+F5`, `Ctrl+D`), so changing the keys does not change the bindings; the menus, Configuration → Keyboard and the F-key bar show the Mac keys in use (`⌥F5`, or `⌘F5` with Command as Alt). A Mac key chosen for Alt or Ctrl no longer gives `Cmd+` combos, and an unchosen Control or Option key gives no command. Command+Q and Command+H (Quit and Hide in the fxfm menu, also Option+Command+H) stay with macOS whatever is chosen, and in text fields Command+A, C, V, X and Z keep editing the text. **Fn** cannot be chosen: WebKit does not tell the page whether Fn is held (and on many keyboards Fn is needed for the F-keys themselves). The F3 viewer takes the keys in use when it opens.
+
 ## Servers
 
 **Ctrl+F** (Net → Connect to server) opens the server list: a tree of folders and servers, with the buttons *New connection…* and *New URL…*. Protocols: **SFTP**, **SCP** (default port 22), **FTP** and **FTPS** (21). *New URL…* connects once, without saving, e.g. `sftp://user@host:2222/var/www`; FTP without a user logs in as anonymous.
@@ -120,12 +135,12 @@ The output device is chosen in Options → Audio → *Output device* (default *S
 - **Trash (F8)**: fxfm moves items to the Trash via `NSFileManager`, not via Finder. It is faster and does not need Automation permission, but Finder's "Put Back" does not work for items deleted by fxfm.
 - **PDF in the F3 viewer**: the PDF is shown in an iframe via the asset protocol, with an "Open in Quick Look" button always visible next to it. Whether WKWebView really renders the PDF in the iframe has not yet been checked by hand; if not, Quick Look is the fallback.
 - **Full Disk Access**: for some folders (Mail, Messages, Safari…) you need to enable fxfm in System Settings → Privacy & Security → Full Disk Access. fxfm explains this the first time it hits a denial.
-- **Keys macOS takes**: Ctrl+arrows (Mission Control, Spaces) and Ctrl+Space (input source) are intercepted by macOS before fxfm. Configuration → Keyboard warns if such a key is assigned and offers to open System Settings → Keyboard → Keyboard Shortcuts.
-- Cmd is not used for TC commands; the exceptions are Cmd+Q and the standard Edit menu (Cmd+C/V/X/A in text fields).
+- **Keys macOS takes**: Control+arrows (Mission Control, Spaces) and Control+Space (input source) are intercepted by macOS before fxfm. Configuration → Keyboard warns if a binding lands on such keys with the Alt/Ctrl keys in use and offers to open System Settings → Keyboard → Keyboard Shortcuts.
+- With the default keys Command is not used for TC commands; the exceptions are Cmd+Q and the standard Edit menu (Cmd+C/V/X/A in text fields). See "Alt and Ctrl keys" for Command as Alt or Ctrl.
 
 ## Default keys
 
-The table is generated from the command registry (`COMMANDS` in `crates/core/src/keymap.rs`); the test `readme_key_table_matches_commands` fails if it goes stale and prints the new one. Keys are changed in Configuration → Keyboard ("Reset to TC defaults" restores these).
+The table is generated from the command registry (`COMMANDS` in `crates/core/src/keymap.rs`); the test `readme_key_table_matches_commands` fails if it goes stale and prints the new one. Keys are changed in Configuration → Keyboard ("Reset to TC defaults" restores these). The table is in TC terms: Alt and Ctrl are the Mac keys chosen for them (by default Option and Control). When fxfm gains a command, its default keys are added to an existing `keymap.json` once at startup, unless another command already uses them (`keymapCommands` in `settings.json` records which commands the keymap has seen, so a key you removed is not added back).
 
 <!-- keys:start -->
 | Menu | Command | Keys |
@@ -135,6 +150,7 @@ The table is generated from the command registry (`COMMANDS` in `crates/core/src
 | Files | Edit new file | `Shift+F4` |
 | Files | Copy | `F5` |
 | Files | Move | `F6` |
+| Files | Pack files… | `Alt+F5` |
 | Files | Rename | `F2`, `Shift+F6` |
 | Files | New folder | `F7` |
 | Files | Delete | `F8`, `Delete` |

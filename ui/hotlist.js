@@ -2,6 +2,7 @@
 
 import {
   addCurrent,
+  comboLabel,
   dragStarted,
   flattenNodes,
   isRemote,
@@ -15,13 +16,14 @@ import {
   relocateNode,
   remoteRoot,
   selectedPosition,
+  tcModifiers,
   toggleHidden,
   visibleNodes,
 } from "./lib.mjs";
 import { dialog, popModal, pushModal } from "./dialogs.js";
 import { connectFlow } from "./servers.js";
 
-/** {invoke, hotlist(), setHotlist(h), home, active(), other(), status(text)} from app.js. */
+/** {invoke, hotlist(), setHotlist(h), home, active(), other(), status(text), mods()} from app.js. */
 let ctx = null;
 
 export function initHotlist(c) {
@@ -191,7 +193,7 @@ export function showHotlist() {
       return;
     }
     if (e.key === "Tab") return e.preventDefault();
-    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (tcModifiers(e, ctx.mods()).any) return;
     if (e.key === "ArrowDown") step(lv, 1);
     else if (e.key === "ArrowUp") step(lv, -1);
     else if (e.key === "Home") select(lv, lv.entries.findIndex((x) => !x.sep));
@@ -279,7 +281,7 @@ export function configureHotlist() {
   const close = () => popModal(modal);
   const up = mkBtn("↑", () => move(-1));
   const down = mkBtn("↓", () => move(1));
-  up.title = down.title = "Move item (Ctrl+↑ / Ctrl+↓)";
+  up.title = down.title = `Move item (${comboLabel("Ctrl+Up", ctx.mods())} / ${comboLabel("Ctrl+Down", ctx.mods())})`;
   up.classList.add("mv");
   down.classList.add("mv");
   head.insertBefore(up, count);
@@ -491,7 +493,7 @@ export function configureHotlist() {
       let i = items.indexOf(document.activeElement);
       i = e.shiftKey ? (i <= 0 ? items.length - 1 : i - 1) : (i + 1) % items.length;
       items[i].focus();
-    } else if (e.ctrlKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+    } else if (tcModifiers(e, ctx.mods()).ctrl && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
       e.preventDefault();
       move(e.key === "ArrowUp" ? -1 : 1);
     } else if (document.activeElement === list && (e.key === "ArrowUp" || e.key === "ArrowDown")) {

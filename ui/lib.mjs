@@ -33,17 +33,129 @@ function keyFromCode(code) {
   return Object.hasOwn(NAMED, code) ? NAMED[code] : null;
 }
 
-/** Canonical combo string ("Ctrl+Shift+F6") for a keydown event, or null. */
-export function comboFromEvent(e) {
+/** Which Mac key acts as TC's Alt and Ctrl (settings `modifiers`); the TC default. */
+export const DEFAULT_MODIFIERS = Object.freeze({ alt: "option", ctrl: "control" });
+
+/** Mac keys that can act as Alt or Ctrl, with their names. Fn is not offered: WebKit never reports it. */
+export const MAC_KEYS = [
+  ["option", "Option"],
+  ["control", "Control"],
+  ["command", "Command"],
+];
+
+const MAC_KEY_IDS = MAC_KEYS.map(([id]) => id);
+
+/** The Alt/Ctrl mapping of `settings`; unknown or doubled keys give the default. */
+export function modifierMap(settings) {
+  const m = settings?.modifiers ?? {};
+  const pick = (v, def) => (MAC_KEY_IDS.includes(v) ? v : def);
+  const alt = pick(m.alt, DEFAULT_MODIFIERS.alt);
+  const ctrl = pick(m.ctrl, DEFAULT_MODIFIERS.ctrl);
+  return alt === ctrl ? { ...DEFAULT_MODIFIERS } : { alt, ctrl };
+}
+
+/** Why the chosen Alt and Ctrl keys cannot be saved, or null. */
+export function modifierChoiceError(alt, ctrl) {
+  if (alt !== ctrl) return null;
+  const name = MAC_KEYS.find(([id]) => id === alt)?.[1] ?? alt;
+  return `Alt and Ctrl need different keys: ${name} is chosen for both.`;
+}
+
+/**
+ * The TC modifiers of a key event under `map`: {ctrl, alt, shift, cmd, stray, any}. `cmd` is
+ * the Command key when it is neither Alt nor Ctrl; `stray` is a held Control or Option that is
+ * neither (it makes no TC combo); `any` is any of Control, Option or Command held.
+ */
+export function tcModifiers(e, map = DEFAULT_MODIFIERS) {
+  const held = { control: Boolean(e.ctrlKey), option: Boolean(e.altKey), command: Boolean(e.metaKey) };
+  const mapped = (k) => k === map.alt || k === map.ctrl;
+  return {
+    ctrl: held[map.ctrl] ?? false,
+    alt: held[map.alt] ?? false,
+    shift: Boolean(e.shiftKey),
+    cmd: held.command && !mapped("command"),
+    stray: (held.control && !mapped("control")) || (held.option && !mapped("option")),
+    any: held.control || held.option || held.command,
+  };
+}
+
+/**
+ * Command+these stay with the native menu (fxfm › Quit, Hide; Option+Command+H Hide Others)
+ * even when Command is Alt or Ctrl. The menu has no Close or Minimize item.
+ */
+const MAC_OWNED = new Set(["Q", "H"]);
+
+/**
+ * Canonical TC combo string ("Ctrl+Shift+F6") for a keydown event under the Alt/Ctrl `map`,
+ * or null (a modifier on its own, an unknown key, a Control/Option that is neither Alt nor
+ * Ctrl, or a Command shortcut macOS owns while Command is Alt or Ctrl).
+ */
+export function comboFromEvent(e, map = DEFAULT_MODIFIERS) {
+  return keyCombo(e, map).combo;
+}
+
+/** {combo} for a key event, or {combo: null, why} with "stray" / "macOwned" / "noKey". */
+function keyCombo(e, map) {
   const key = keyFromCode(e.code);
-  if (key === null) return null;
+  if (key === null) return { combo: null, why: "noKey" };
+  const m = tcModifiers(e, map);
+  if (m.stray) return { combo: null, why: "stray", key };
+  const commandMapped = map.alt === "command" || map.ctrl === "command";
+  if (e.metaKey && commandMapped && MAC_OWNED.has(key)) return { combo: null, why: "macOwned", key };
+  return { combo: (m.ctrl ? "Ctrl+" : "") + (m.alt ? "Alt+" : "") + (m.shift ? "Shift+" : "") + (m.cmd ? "Cmd+" : "") + key };
+}
+
+/**
+ * Configuration → Keyboard, "Add key": why a real key (not a lone modifier) gives no combo,
+ * or null when it gives one or is no key at all.
+ */
+export function captureRefusal(e, map = DEFAULT_MODIFIERS) {
+  const r = keyCombo(e, map);
+  if (r.why === "macOwned") {
+    const physical = (e.ctrlKey ? "⌃" : "") + (e.altKey ? "⌥" : "") + (e.shiftKey ? "⇧" : "") + "⌘";
+    return `${physical}${r.key} is reserved by macOS.`;
+  }
+  if (r.why === "stray") {
+    const name = e.ctrlKey && map.alt !== "control" && map.ctrl !== "control" ? "Control" : "Option";
+    return `${name} is neither Alt nor Ctrl now; choose the Alt and Ctrl keys above.`;
+  }
+  return null;
+}
+
+/** Splits a canonical combo into {ctrl, alt, shift, cmd, key}. */
+function splitCombo(combo) {
+  const parts = combo.split("+");
+  // "Ctrl++" does not occur (the key is "=" / "-" / NumAdd), but a trailing "+" would be the key.
+  const key = parts.pop() || "+";
+  const has = (m) => parts.includes(m);
+  return { ctrl: has("Ctrl"), alt: has("Alt"), shift: has("Shift"), cmd: has("Cmd"), key };
+}
+
+/**
+ * The physical keys of a TC combo under `map`, written like a combo with Ctrl = Control,
+ * Alt = Option, Cmd = Command (what macOS's reserved shortcuts are listed in).
+ */
+export function physicalCombo(combo, map = DEFAULT_MODIFIERS) {
+  const c = splitCombo(combo);
+  const held = new Set();
+  if (c.ctrl) held.add(map.ctrl);
+  if (c.alt) held.add(map.alt);
+  if (c.cmd) held.add("command");
   return (
-    (e.ctrlKey ? "Ctrl+" : "") +
-    (e.altKey ? "Alt+" : "") +
-    (e.shiftKey ? "Shift+" : "") +
-    (e.metaKey ? "Cmd+" : "") +
-    key
+    (held.has("control") ? "Ctrl+" : "") +
+    (held.has("option") ? "Alt+" : "") +
+    (c.shift ? "Shift+" : "") +
+    (held.has("command") ? "Cmd+" : "") +
+    c.key
   );
+}
+
+const ARROWS = { Up: "↑", Down: "↓", Left: "←", Right: "→" };
+
+/** Label of a TC combo with the Mac keys in use, as macOS menus write it: "⌥F5", "⌃⇧F". */
+export function comboLabel(combo, map = DEFAULT_MODIFIERS) {
+  const p = splitCombo(physicalCombo(combo, map));
+  return (p.ctrl ? "⌃" : "") + (p.alt ? "⌥" : "") + (p.shift ? "⇧" : "") + (p.cmd ? "⌘" : "") + (ARROWS[p.key] ?? p.key);
 }
 
 /**
@@ -584,7 +696,7 @@ export function pickerStart(command, home, activeLocation) {
   return loc && !isRemote(loc) ? loc : activeLocation;
 }
 
-/** What macOS does with each reserved combo (keymap SYSTEM_RESERVED). */
+/** What macOS does with each reserved combo (keymap SYSTEM_RESERVED, physical keys: Ctrl = Control, Alt = Option). */
 const SYSTEM_USES = {
   "Ctrl+Up": "Mission Control",
   "Ctrl+Down": "Application windows",
@@ -594,10 +706,10 @@ const SYSTEM_USES = {
   "Ctrl+Alt+Space": "Select the next input source",
 };
 
-/** Warning for a binding macOS takes before fxfm sees it. */
-export function conflictMessage(combo) {
-  const use = SYSTEM_USES[combo] ?? "a system shortcut";
-  return `macOS uses ${combo} for ${use}. Turn it off in System Settings → Keyboard → Keyboard Shortcuts or choose another key.`;
+/** Warning for a binding (TC combo) macOS takes before fxfm sees it, with the keys in use under `map`. */
+export function conflictMessage(combo, map = DEFAULT_MODIFIERS) {
+  const use = SYSTEM_USES[physicalCombo(combo, map)] ?? "a system shortcut";
+  return `macOS uses ${comboLabel(combo, map)} for ${use}. Turn it off in System Settings → Keyboard → Keyboard Shortcuts or choose another key.`;
 }
 
 /**
@@ -1199,4 +1311,70 @@ export function secretChanges(before, entry, secret) {
     }
   }
   return out;
+}
+
+// ---------------------------------------------------------------- pack files (Alt+F5)
+
+/** Refusal for packing from or into archives and servers (backend: jobs.rs PACK_LOCAL_ONLY). */
+export const PACK_LOCAL_ONLY = "Packing works with local files for now.";
+
+/** A plain local folder: not on a server, not inside an archive (by name, like `archiveOf`). */
+export function isLocalFolder(location) {
+  return !parseRemote(location) && !archiveOf(location);
+}
+
+/**
+ * Default archive name: one file -> its name without the last extension, one folder -> its
+ * name (a leading dot is kept: ".config" -> ".config.zip"); several entries -> the name of
+ * the folder they are in, "archive" at the root.
+ */
+export function packArchiveName(entries, folderPath) {
+  if (entries.length === 1) {
+    const { name, isDir } = entries[0];
+    const dot = name.lastIndexOf(".");
+    return `${!isDir && dot > 0 ? name.slice(0, dot) : name}.zip`;
+  }
+  return `${lastComponent(folderPath) || "archive"}.zip`;
+}
+
+/** Folder the archive goes to (as in TC): the other panel's when it is a local folder. */
+export function packTargetDir(activeLocation, otherLocation) {
+  return isLocalFolder(otherLocation) ? otherLocation : activeLocation;
+}
+
+/** The Pack files dialog's first line. */
+export function packDialogText(entries) {
+  return entries.length === 1
+    ? `Pack "${entries[0].name}" to the archive:`
+    : `Pack ${entries.length} file(s) to the archive:`;
+}
+
+/** Text cursor of the target field: before ".zip" (at the end without one). */
+export function packCursor(target) {
+  const at = target.toLowerCase().endsWith(".zip") ? target.length - 4 : target.length;
+  return { start: at, end: at };
+}
+
+/** Why the Pack files dialog cannot be accepted yet, or null. */
+export function packFormError({ target, encrypt, password, repeat }) {
+  if (!target.trim()) return "Enter the archive name.";
+  if (encrypt && !password) return "Enter a password.";
+  if (encrypt && password !== repeat) return "The passwords do not match.";
+  return null;
+}
+
+/** Status line after packing. */
+export function packedText(summary, target) {
+  return `Packed ${summary.done} file(s) into ${lastComponent(target)}`;
+}
+
+const TEXT_EDIT_CODES = new Set(["KeyA", "KeyC", "KeyV", "KeyX", "KeyZ"]);
+
+/**
+ * Command+A/C/V/X/Z in a text field while Command acts as Alt or Ctrl: left to the field
+ * (select all, copy, paste, cut, undo) instead of becoming a TC command.
+ */
+export function textEditKey(e, map = DEFAULT_MODIFIERS) {
+  const commandMapped = map.alt === "command" || map.ctrl === "command";
+  return Boolean(e.metaKey) && commandMapped && TEXT_EDIT_CODES.has(e.code);
 }

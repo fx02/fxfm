@@ -8,6 +8,7 @@ import {
   CHMOD_ONLY_REMOTE,
   chmodStart,
   chmodSummary,
+  comboLabel,
   connectionLost,
   dragStarted,
   duplicateName,
@@ -35,6 +36,7 @@ import {
   secretChanges,
   serverNames,
   storageMasterPrompt,
+  tcModifiers,
   treeRows,
   urlDisplayName,
   validateServer,
@@ -42,7 +44,7 @@ import {
 } from "./lib.mjs";
 import { dialog, popModal, pushModal } from "./dialogs.js";
 
-/** {invoke, home, active(), other(), panels(), status(text)} from app.js. */
+/** {invoke, home, active(), other(), panels(), status(text), mods()} from app.js. */
 let ctx = null;
 
 export function initServers(c) {
@@ -923,9 +925,10 @@ async function editServer(initial, { otherNames, save }) {
 
 // ---------------------------------------------------------------- Connect to server dialog
 
-const HELP = [
+/** The dialog's help text; the reorder keys are shown as the Mac keys in use (`mods`). */
+const help = (mods) => [
   "Enter or double click: connect to the selected server. Esc: close.",
-  "↑/↓: move the selection. ←/→: close or open a folder. Ctrl+↑/↓ or dragging with the mouse: change the order. Delete: delete the entry.",
+  `↑/↓: move the selection. ←/→: close or open a folder. ${comboLabel("Ctrl+Up", mods)}/${comboLabel("Ctrl+Down", mods)} or dragging with the mouse: change the order. Delete: delete the entry.`,
   "New URL…: connect once without saving it, e.g. sftp://user@host:2222/var/www (also scp://, ftp:// and ftps://). Without a user name FTP logs in as anonymous.",
   "Saved passwords are kept in the macOS Keychain (system mode) or, in portable mode, encrypted with a master password (Encrypt…).",
 ];
@@ -1254,7 +1257,7 @@ export async function showConnect() {
     if (loc) close();
   });
 
-  const help = () => dialog({ title: "Help", text: HELP, buttons: OK });
+  const showHelp = () => dialog({ title: "Help", text: help(ctx.mods()), buttons: OK });
 
   // Reordering by mouse, not HTML5 drag & drop: the webview's native drag-drop handler
   // takes the drag events, so HTML5 `drop` never fires (same as the hotlist dialog).
@@ -1306,7 +1309,7 @@ export async function showConnect() {
     mkBtn(null, "Encrypt…", guarded(encryptDialog)),
     el("div", "gap"),
     mkBtn(null, "Cancel", close),
-    mkBtn(null, "Help", help),
+    mkBtn(null, "Help", showHelp),
   );
   const left = el("div", "hotleft");
   left.append(el("div", "hothead", "Servers:"), list);
@@ -1327,7 +1330,7 @@ export async function showConnect() {
     } else if (e.key === "Tab") {
       e.preventDefault();
       cycleFocus(box, e);
-    } else if (e.ctrlKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+    } else if (tcModifiers(e, ctx.mods()).ctrl && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
       e.preventDefault();
       guarded(() => move(e.key === "ArrowUp" ? -1 : 1))();
     } else if (onList && (e.key === "ArrowUp" || e.key === "ArrowDown")) {

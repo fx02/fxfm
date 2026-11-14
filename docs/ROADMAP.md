@@ -1,6 +1,7 @@
 # fxfm roadmap
 
 ## Next
+- **App icon**: smaller, regular-weight (not bold) "fxfm" text, so the play triangle sits closer to the middle (`src-tauri/icons/gen_app_icon.py`).
 - **Pretraga (Alt+F7)**: fxfm has its **own file index**, not Spotlight (`mdfind`). Spotlight skips hidden files and dotfiles, network drives and archive contents. To settle before planning: which folders get indexed, where the index is stored (in portable mode it travels with `fxfm-data/`, so it can grow), background refresh (FSEvents).
 - **Multi-rename (Ctrl+M)**.
 
@@ -21,7 +22,17 @@
 
 ## Archives (after plan 2)
 - F4 upload back does not work for an archive located in a folder whose name looks like an archive (e.g. `backup.zip/real.tar`); the copy is preserved. Fix: remember the archive's real path when opening it and compare against that on upload.
-- Creating new archives (Alt+F5), nested archives, tar.bz2/tar.xz, per-file (rather than per-item) conflicts when copying into an archive.
+- Nested archives, tar.bz2/tar.xz, per-file (rather than per-item) conflicts when copying into an archive.
+
+## Pack files (Alt+F5)
+- Other formats: gz, tar, tgz, 7z (the dialog's format list has only ZIP for now).
+- Adding to an existing archive (today an existing target can only be overwritten).
+- Packing from archives and servers, and into a folder on a server.
+- The password is wiped on the Rust side; the JavaScript strings it passed through cannot be wiped and live until garbage collection.
+
+## Keyboard
+- **Fn as Alt or Ctrl** is not offered: WebKit's `KeyboardEvent.getModifierState("Fn")` is always false (Source/WebCore/dom/UIEventWithKeyState.cpp lists Fn as a FIXME), and macOS sets its "function" flag on every arrow, F-key and Home/End event anyway. It would need a native NSEvent monitor that tracks the Fn key itself and hands its state to the webview before the keydown, plus an answer for keyboards where the F-keys need Fn.
+- Viewer windows take the Alt/Ctrl keys in use when they open; a change applies to viewers opened after it.
 
 ## Drag & drop
 - Dragging from archives and servers into other applications (Finder…) is not supported yet: it works only between panels. Fix: `NSFilePromiseProvider` (the file is extracted/downloaded only when the application receives it).

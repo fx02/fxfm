@@ -460,16 +460,18 @@ test("pickerStart: local cd target, else the active location", () => {
   assert.equal(lib.pickerStart("", "/Users/x", "/tmp"), "/tmp");
 });
 
-test("conflictMessage names the macOS feature", () => {
+test("conflictMessage names the macOS feature with the physical keys", () => {
   assert.equal(
     lib.conflictMessage("Ctrl+Up"),
-    "macOS uses Ctrl+Up for Mission Control. Turn it off in System Settings → Keyboard → Keyboard Shortcuts or choose another key.",
+    "macOS uses ⌃↑ for Mission Control. Turn it off in System Settings → Keyboard → Keyboard Shortcuts or choose another key.",
   );
+  // Control as TC Alt: TC Alt+Up is the reserved Control+Up.
+  assert.match(lib.conflictMessage("Alt+Up", { alt: "control", ctrl: "option" }), /^macOS uses ⌃↑ for Mission Control\./);
 });
 
 test("conflictMessage falls back for unknown combos", () => {
-  assert.match(lib.conflictMessage("Ctrl+Space"), /^macOS uses Ctrl\+Space for Select the previous input source\./);
-  assert.match(lib.conflictMessage("Ctrl+F12"), /^macOS uses Ctrl\+F12 for a system shortcut\./);
+  assert.match(lib.conflictMessage("Ctrl+Space"), /^macOS uses ⌃Space for Select the previous input source\./);
+  assert.match(lib.conflictMessage("Ctrl+F12"), /^macOS uses ⌃F12 for a system shortcut\./);
 });
 
 test("keyRows: registry order, menu › title, sorted keys, unknown ids ignored", () => {
@@ -1193,4 +1195,153 @@ test("playerStrip shows a playing note in the codec line", () => {
   const p = { state: "playing", name: "a.wav", position: 1, duration: 2, info };
   assert.equal(lib.playerStrip(p).codec, "PCM 16-bit, 8000 Hz, mono");
   assert.equal(lib.playerStrip({ ...p, message: note }).codec, note);
+});
+
+test("packArchiveName: one entry, several entries, root", () => {
+  const f = (name) => ({ name, isDir: false });
+  const d = (name) => ({ name, isDir: true });
+  assert.equal(lib.packArchiveName([f("report.pdf")], "/Users/x"), "report.zip");
+  assert.equal(lib.packArchiveName([f("archive.tar.gz")], "/Users/x"), "archive.tar.zip");
+  assert.equal(lib.packArchiveName([f("README")], "/Users/x"), "README.zip");
+  assert.equal(lib.packArchiveName([f(".config")], "/Users/x"), ".config.zip");
+  assert.equal(lib.packArchiveName([f(".bash.rc")], "/Users/x"), ".bash.zip");
+  assert.equal(lib.packArchiveName([d("site")], "/Users/x"), "site.zip");
+  assert.equal(lib.packArchiveName([d("v1.2")], "/Users/x"), "v1.2.zip");
+  const three = [f("a.txt"), d("b"), f("c.md")];
+  assert.equal(lib.packArchiveName(three, "/Users/x/Projects/web"), "web.zip");
+  assert.equal(lib.packArchiveName(three, "/Users/x/Projects/web/"), "web.zip");
+  assert.equal(lib.packArchiveName(three, "/"), "archive.zip");
+});
+
+test("packTargetDir: the other panel when it is a local folder, else the active one", () => {
+  assert.equal(lib.packTargetDir("/a", "/b"), "/b");
+  assert.equal(lib.packTargetDir("/a", "sftp://web/var"), "/a");
+  assert.equal(lib.packTargetDir("/a", "/b/x.zip/inner"), "/a");
+  assert.equal(lib.isLocalFolder("/b"), true);
+  assert.equal(lib.isLocalFolder("/b/x.tar"), false);
+  assert.equal(lib.isLocalFolder("ftp://h/"), false);
+});
+
+test("packDialogText and the cursor before .zip", () => {
+  assert.equal(lib.packDialogText([{ name: "site" }]), 'Pack "site" to the archive:');
+  assert.equal(lib.packDialogText([{ name: "a" }, { name: "b" }]), "Pack 2 file(s) to the archive:");
+  assert.deepEqual(lib.packCursor("/b/site.zip"), { start: 7, end: 7 });
+  assert.deepEqual(lib.packCursor("/b/site"), { start: 7, end: 7 });
+});
+
+test("packFormError", () => {
+  const ok = { target: "/b/a.zip", encrypt: false, password: "", repeat: "" };
+  assert.equal(lib.packFormError(ok), null);
+  assert.equal(lib.packFormError({ ...ok, target: "  " }), "Enter the archive name.");
+  assert.equal(lib.packFormError({ ...ok, encrypt: true }), "Enter a password.");
+  assert.equal(lib.packFormError({ ...ok, encrypt: true, password: "x", repeat: "y" }), "The passwords do not match.");
+  assert.equal(lib.packFormError({ ...ok, encrypt: true, password: "x", repeat: "x" }), null);
+});
+
+test("packedText", () => {
+  assert.equal(lib.packedText({ done: 3 }, "/b/web.zip"), "Packed 3 file(s) into web.zip");
+});
+
+// ---------------------------------------------------------------- modifier mapping
+
+const ev = (code, mods = {}) => ({ code, key: "", ctrlKey: false, altKey: false, shiftKey: false, metaKey: false, ...mods });
+const CMD_CTRL = { alt: "option", ctrl: "command" };
+const SWAPPED = { alt: "control", ctrl: "option" };
+
+test("modifierMap: defaults, saved choice, unusable values", () => {
+  assert.deepEqual(lib.modifierMap({}), { alt: "option", ctrl: "control" });
+  assert.deepEqual(lib.modifierMap(null), { alt: "option", ctrl: "control" });
+  assert.deepEqual(lib.modifierMap({ modifiers: { alt: "option", ctrl: "command" } }), CMD_CTRL);
+  assert.deepEqual(lib.modifierMap({ modifiers: { alt: "fn", ctrl: "command" } }), CMD_CTRL);
+  assert.deepEqual(lib.modifierMap({ modifiers: { alt: "command", ctrl: "command" } }), { alt: "option", ctrl: "control" });
+});
+
+test("comboFromEvent with the default map is the physical TC mapping", () => {
+  assert.equal(lib.comboFromEvent(ev("F5", { altKey: true })), "Alt+F5");
+  assert.equal(lib.comboFromEvent(ev("KeyD", { ctrlKey: true }), lib.DEFAULT_MODIFIERS), "Ctrl+D");
+  assert.equal(lib.comboFromEvent(ev("KeyD", { metaKey: true })), "Cmd+D");
+  assert.equal(lib.comboFromEvent(ev("KeyQ", { metaKey: true })), "Cmd+Q");
+});
+
+test("comboFromEvent: Command as Ctrl", () => {
+  assert.equal(lib.comboFromEvent(ev("KeyD", { metaKey: true }), CMD_CTRL), "Ctrl+D");
+  assert.equal(lib.comboFromEvent(ev("F5", { altKey: true }), CMD_CTRL), "Alt+F5");
+  // Command no longer gives Cmd+, and the unmapped Control gives no command at all.
+  assert.equal(lib.comboFromEvent(ev("KeyD", { ctrlKey: true }), CMD_CTRL), null);
+  assert.equal(lib.comboFromEvent(ev("F5"), CMD_CTRL), "F5");
+  assert.equal(lib.comboFromEvent(ev("F6", { shiftKey: true }), CMD_CTRL), "Shift+F6");
+  // Keys the native menu owns stay with it (Quit, Hide, Hide Others) ...
+  for (const code of ["KeyQ", "KeyH"]) {
+    assert.equal(lib.comboFromEvent(ev(code, { metaKey: true }), CMD_CTRL), null, code);
+  }
+  assert.equal(lib.comboFromEvent(ev("KeyH", { metaKey: true, altKey: true }), CMD_CTRL), null);
+  // ... the rest are TC keys (the menu has no Close or Minimize).
+  assert.equal(lib.comboFromEvent(ev("KeyW", { metaKey: true }), CMD_CTRL), "Ctrl+W");
+  assert.equal(lib.comboFromEvent(ev("KeyM", { metaKey: true }), CMD_CTRL), "Ctrl+M");
+  assert.equal(lib.comboFromEvent(ev("KeyW", { metaKey: true }), { alt: "command", ctrl: "control" }), "Alt+W");
+});
+
+test("captureRefusal explains keys that give no combo", () => {
+  assert.equal(lib.captureRefusal(ev("KeyQ", { metaKey: true }), CMD_CTRL), "⌘Q is reserved by macOS.");
+  assert.equal(lib.captureRefusal(ev("KeyH", { metaKey: true, altKey: true }), CMD_CTRL), "⌥⌘H is reserved by macOS.");
+  assert.match(lib.captureRefusal(ev("KeyD", { ctrlKey: true }), CMD_CTRL), /^Control is neither Alt nor Ctrl/);
+  assert.match(lib.captureRefusal(ev("KeyD", { altKey: true }), { alt: "command", ctrl: "control" }), /^Option is neither/);
+  assert.equal(lib.captureRefusal(ev("KeyD", { metaKey: true }), CMD_CTRL), null);
+  assert.equal(lib.captureRefusal(ev("ShiftLeft", { shiftKey: true }), CMD_CTRL), null);
+  assert.equal(lib.captureRefusal(ev("KeyQ", { metaKey: true })), null);
+});
+
+test("comboFromEvent: Control as Alt and Option as Ctrl (swapped)", () => {
+  assert.equal(lib.comboFromEvent(ev("F5", { ctrlKey: true }), SWAPPED), "Alt+F5");
+  assert.equal(lib.comboFromEvent(ev("KeyD", { altKey: true }), SWAPPED), "Ctrl+D");
+  assert.equal(lib.comboFromEvent(ev("Space", { altKey: true, ctrlKey: true }), SWAPPED), "Ctrl+Alt+Space");
+  // The unmapped Command still gives Cmd+.
+  assert.equal(lib.comboFromEvent(ev("KeyD", { metaKey: true }), SWAPPED), "Cmd+D");
+  assert.equal(lib.comboFromEvent(ev("KeyQ", { metaKey: true }), SWAPPED), "Cmd+Q");
+});
+
+test("comboFromEvent: Command as Alt", () => {
+  const cmdAlt = { alt: "command", ctrl: "control" };
+  assert.equal(lib.comboFromEvent(ev("F5", { metaKey: true }), cmdAlt), "Alt+F5");
+  assert.equal(lib.comboFromEvent(ev("F5", { altKey: true }), cmdAlt), null);
+  assert.equal(lib.comboFromEvent(ev("KeyD", { ctrlKey: true }), cmdAlt), "Ctrl+D");
+});
+
+test("tcModifiers", () => {
+  assert.deepEqual(lib.tcModifiers(ev("KeyW", { metaKey: true }), CMD_CTRL), {
+    ctrl: true, alt: false, shift: false, cmd: false, stray: false, any: true,
+  });
+  assert.deepEqual(lib.tcModifiers(ev("KeyW", { ctrlKey: true }), CMD_CTRL), {
+    ctrl: false, alt: false, shift: false, cmd: false, stray: true, any: true,
+  });
+  assert.equal(lib.tcModifiers(ev("KeyW"), lib.DEFAULT_MODIFIERS).any, false);
+  assert.equal(lib.tcModifiers(ev("KeyW", { shiftKey: true }), lib.DEFAULT_MODIFIERS).any, false);
+});
+
+test("comboLabel and physicalCombo show the keys in use", () => {
+  assert.equal(lib.comboLabel("Alt+F5"), "⌥F5");
+  assert.equal(lib.comboLabel("Alt+F5", { alt: "command", ctrl: "control" }), "⌘F5");
+  assert.equal(lib.comboLabel("Ctrl+Shift+F"), "⌃⇧F");
+  assert.equal(lib.comboLabel("Ctrl+D", CMD_CTRL), "⌘D");
+  assert.equal(lib.comboLabel("Ctrl+Alt+Space", SWAPPED), "⌃⌥Space");
+  assert.equal(lib.comboLabel("Ctrl+Down"), "⌃↓");
+  assert.equal(lib.comboLabel("F3"), "F3");
+  assert.equal(lib.comboLabel("Cmd+Q"), "⌘Q");
+  assert.equal(lib.physicalCombo("Ctrl+D", SWAPPED), "Alt+D");
+  assert.equal(lib.physicalCombo("Alt+Up", SWAPPED), "Ctrl+Up");
+  assert.equal(lib.physicalCombo("Ctrl+Shift+F", CMD_CTRL), "Shift+Cmd+F");
+});
+
+test("modifierChoiceError refuses one key for both", () => {
+  assert.equal(lib.modifierChoiceError("option", "control"), null);
+  assert.equal(lib.modifierChoiceError("command", "command"), "Alt and Ctrl need different keys: Command is chosen for both.");
+});
+
+test("textEditKey: Command+A/C/V/X/Z stay with a text field when Command is Alt or Ctrl", () => {
+  assert.equal(lib.textEditKey(ev("KeyA", { metaKey: true }), CMD_CTRL), true);
+  assert.equal(lib.textEditKey(ev("KeyZ", { metaKey: true, shiftKey: true }), CMD_CTRL), true);
+  assert.equal(lib.textEditKey(ev("KeyD", { metaKey: true }), CMD_CTRL), false);
+  assert.equal(lib.textEditKey(ev("KeyA", { ctrlKey: true }), CMD_CTRL), false);
+  // With Command unmapped Cmd+A is not a TC combo anyway (Cmd+A).
+  assert.equal(lib.textEditKey(ev("KeyA", { metaKey: true }), lib.DEFAULT_MODIFIERS), false);
 });

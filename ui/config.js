@@ -1,12 +1,21 @@
 // Configuration → Keyboard and Configuration → Options dialogs.
 
-import { comboFromEvent, conflictMessage, keyRows, outputOptions } from "./lib.mjs";
+import {
+  captureRefusal,
+  comboFromEvent,
+  comboLabel,
+  conflictMessage,
+  keyRows,
+  MAC_KEYS,
+  modifierChoiceError,
+  outputOptions,
+} from "./lib.mjs";
 import { dialog, popModal, pushModal } from "./dialogs.js";
 import { moveStorage } from "./servers.js";
 
 /**
  * {invoke, commands(), keymap(), setKeymap(map), conflicts(), setConflicts(list), settings(),
- *  applySettings(s), storage(), setStorage(info), defaultColors, status(text)} from app.js.
+ *  mods(), applySettings(s), storage(), setStorage(info), defaultColors, status(text)} from app.js.
  */
 let ctx = null;
 
@@ -64,7 +73,7 @@ function openKeyboardSettings() {
 function conflictBanner(conflicts) {
   if (!conflicts.length) return null;
   const box = el("div", "warn");
-  for (const [combo] of conflicts) box.append(el("p", null, conflictMessage(combo)));
+  for (const [combo] of conflicts) box.append(el("p", null, conflictMessage(combo, ctx.mods())));
   box.append(button("Open Keyboard Shortcuts", openKeyboardSettings));
   return box;
 }
@@ -78,7 +87,7 @@ export async function firstRunConflictHint() {
   ctx.invoke("save_settings", { settings: s }).catch((e) => console.error("fxfm: save_settings", e));
   const r = await dialog({
     title: "Keyboard",
-    text: conflicts.map(([combo]) => conflictMessage(combo)),
+    text: conflicts.map(([combo]) => conflictMessage(combo, ctx.mods())),
     buttons: [
       { label: "Open Keyboard Shortcuts", value: "open", default: true },
       { label: "OK", value: null },
@@ -110,10 +119,15 @@ function captureKey(label) {
       e.preventDefault();
       if (e.repeat) return; // the held key that opened this dialog
       if (e.key === "Escape") return finish(null);
-      const combo = comboFromEvent(e);
-      if (!combo) return; // a modifier on its own
-      if (e.metaKey) {
-        note.textContent = "Cmd shortcuts belong to macOS; use Ctrl or Option.";
+      const combo = comboFromEvent(e, ctx.mods());
+      if (!combo) {
+        // A modifier on its own waits; a key that gives no combo says why.
+        const why = captureRefusal(e, ctx.mods());
+        if (why) note.textContent = why;
+        return;
+      }
+      if (combo.includes("Cmd+")) {
+        note.textContent = "Command shortcuts belong to macOS; use the keys chosen for Alt and Ctrl.";
         return;
       }
       finish(combo);
@@ -136,7 +150,48 @@ export function configureKeyboard() {
   table.tHead.append(head);
   const scroller = el("div", "keyscroll");
   scroller.append(table);
-  body.append(bannerSlot, scroller);
+
+  // Which Mac keys act as TC's Alt and Ctrl; saved at once when the two differ.
+  const keySelect = (value) => {
+    const sel = el("select");
+    for (const [id, name] of MAC_KEYS) {
+      const o = el("option", null, name);
+      o.value = id;
+      sel.append(o);
+    }
+    sel.value = value;
+    return sel;
+  };
+  const current = ctx.mods();
+  const altSel = keySelect(current.alt);
+  const ctrlSel = keySelect(current.ctrl);
+  const modError = el("p", "error");
+  modError.hidden = true;
+  const modLine = (label, sel) => {
+    const l = el("label", "line");
+    l.append(el("span", null, label), sel);
+    return l;
+  };
+  const modBox = el("div", "mods");
+  modBox.append(modLine("Alt key (TC Alt)", altSel), modLine("Ctrl key (TC Ctrl)", ctrlSel), modError);
+  const saveMods = async () => {
+    const problem = modifierChoiceError(altSel.value, ctrlSel.value);
+    modError.textContent = problem ? `${problem} Not saved.` : "";
+    modError.hidden = !problem;
+    if (problem) return;
+    const settings = { ...structuredClone(ctx.settings()), modifiers: { alt: altSel.value, ctrl: ctrlSel.value } };
+    try {
+      const conflicts = await ctx.invoke("save_settings", { settings });
+      ctx.applySettings(settings);
+      ctx.setConflicts(conflicts);
+    } catch (e) {
+      await message("Error", `Cannot save the keys: ${e}`);
+    }
+    render();
+  };
+  altSel.addEventListener("change", saveMods);
+  ctrlSel.addEventListener("change", saveMods);
+  body.append(modBox, bannerSlot, scroller);
 
   const titleOf = (id) => {
     const c = ctx.commands().find((x) => x.id === id);
@@ -166,7 +221,7 @@ export function configureKeyboard() {
     const owner = ctx.keymap()[combo];
     if (owner === r.id) return;
     if (owner) {
-      const ok = await dialog({ title: "Keyboard", text: `${combo} is used by ${titleOf(owner)}. Reassign?`, buttons: YES_NO });
+      const ok = await dialog({ title: "Keyboard", text: `${comboLabel(combo, ctx.mods())} is used by ${titleOf(owner)}. Reassign?`, buttons: YES_NO });
       if (ok !== "yes") return;
     }
     await save({ ...ctx.keymap(), [combo]: r.id });
@@ -193,9 +248,10 @@ export function configureKeyboard() {
       const tr = el("tr");
       const keys = el("td", "chips");
       for (const combo of r.keys) {
-        const chip = el("span", "chip", combo);
+        const label = comboLabel(combo, ctx.mods());
+        const chip = el("span", "chip", label);
         const x = el("button", "x", "×");
-        x.title = `Remove ${combo}`;
+        x.title = `Remove ${label}`;
         x.addEventListener("click", () => remove(combo));
         chip.append(x);
         keys.append(chip);

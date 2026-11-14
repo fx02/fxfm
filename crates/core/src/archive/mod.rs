@@ -1,9 +1,11 @@
 //! Archives as folders: location parsing, index and listing.
 
+pub mod pack;
 pub mod read;
 #[cfg(test)]
 pub(crate) mod testutil;
 pub mod write;
+pub(crate) mod ziptime;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

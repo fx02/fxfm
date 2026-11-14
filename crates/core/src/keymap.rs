@@ -1,5 +1,6 @@
 //! Command registry and Total-Commander-style keymap.
 
+use crate::config::{MacKey, Modifiers, Settings, SETTINGS_FILE};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -8,7 +9,8 @@ use std::str::FromStr;
 
 pub const KEYMAP_FILE: &str = "keymap.json";
 
-/// Combos macOS reserves for itself (Mission Control, Spotlight, ...).
+/// Combos macOS reserves for itself (Mission Control, Spotlight, ...), in physical keys:
+/// `Ctrl` = Control, `Alt` = Option (see [`KeyCombo::physical`]).
 pub const SYSTEM_RESERVED: &[&str] = &[
     "Ctrl+Up",
     "Ctrl+Down",
@@ -119,6 +121,54 @@ impl fmt::Display for KeyCombo {
     }
 }
 
+impl KeyCombo {
+    /// The physical keys of this TC combo under `m`, written with `ctrl` = Control,
+    /// `alt` = Option and `cmd` = Command.
+    pub fn physical(&self, m: &Modifiers) -> KeyCombo {
+        let mut p = KeyCombo {
+            ctrl: false,
+            alt: false,
+            shift: self.shift,
+            cmd: false,
+            key: self.key.clone(),
+        };
+        let held = [
+            (self.ctrl, m.ctrl),
+            (self.alt, m.alt),
+            (self.cmd, MacKey::Command),
+        ];
+        for (on, key) in held {
+            if on {
+                match key {
+                    MacKey::Control => p.ctrl = true,
+                    MacKey::Option => p.alt = true,
+                    MacKey::Command => p.cmd = true,
+                }
+            }
+        }
+        p
+    }
+
+    /// The label macOS menus use for the physical keys: `⌃⌥⇧⌘` then the key (`⌥F5`).
+    pub fn label(&self, m: &Modifiers) -> String {
+        let p = self.physical(m);
+        let mut out = String::new();
+        for (on, sym) in [(p.ctrl, '⌃'), (p.alt, '⌥'), (p.shift, '⇧'), (p.cmd, '⌘')] {
+            if on {
+                out.push(sym);
+            }
+        }
+        out.push_str(match p.key.as_str() {
+            "Up" => "↑",
+            "Down" => "↓",
+            "Left" => "←",
+            "Right" => "→",
+            k => k,
+        });
+        out
+    }
+}
+
 #[derive(Serialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandDef {
@@ -163,6 +213,13 @@ pub static COMMANDS: &[CommandDef] = &[
         menu: "Files",
         title: "Move",
         defaults: &["F6"],
+        available: true,
+    },
+    CommandDef {
+        id: "cm_packfiles",
+        menu: "Files",
+        title: "Pack files…",
+        defaults: &["Alt+F5"],
         available: true,
     },
     CommandDef {
@@ -430,14 +487,70 @@ impl Keymap {
         Keymap { bindings }
     }
 
-    /// `(combo, command)` pairs bound to a combo macOS reserves.
-    pub fn system_conflicts(&self) -> Vec<(String, String)> {
+    /// Binds the default keys of commands that are new since the keymap was saved, unless
+    /// another command has the key. `known`: the command ids of that time; None (a keymap
+    /// from before they were recorded) counts the commands without any key as new. Returns
+    /// whether anything was added.
+    pub fn add_new_defaults(&mut self, known: Option<&[String]>) -> bool {
+        let mut changed = false;
+        for c in COMMANDS {
+            let new = match known {
+                Some(ids) => !ids.iter().any(|id| id == c.id),
+                None => self.combos_for(c.id).is_empty(),
+            };
+            if !new {
+                continue;
+            }
+            for d in c.defaults {
+                let combo: KeyCombo = d.parse().expect("default combo parses");
+                if self.resolve(&combo).is_none() {
+                    self.bind(&combo, c.id);
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
+    /// `(combo, command)` pairs whose physical keys under `m` are a combo macOS reserves.
+    pub fn system_conflicts(&self, m: &Modifiers) -> Vec<(String, String)> {
         self.bindings
             .iter()
-            .filter(|(k, _)| SYSTEM_RESERVED.contains(&k.as_str()))
+            .filter(|(k, _)| {
+                k.parse::<KeyCombo>()
+                    .is_ok_and(|c| SYSTEM_RESERVED.contains(&c.physical(m).to_string().as_str()))
+            })
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     }
+}
+
+/// Every command id, as recorded in `Settings::keymap_commands`.
+pub fn command_ids() -> Vec<String> {
+    COMMANDS.iter().map(|c| c.id.to_string()).collect()
+}
+
+/// Loads `keymap.json` from `dir`. When it exists, commands added since it was saved get
+/// their free default keys (see [`Keymap::add_new_defaults`]); then the keymap (if changed)
+/// and `settings.keymap_commands` are saved, so each new command is added only once.
+pub fn load_migrating(dir: &Path, settings: &mut Settings) -> Keymap {
+    let mut keymap = Keymap::load_or_default(dir);
+    if !dir.join(KEYMAP_FILE).exists() {
+        return keymap;
+    }
+    if keymap.add_new_defaults(settings.keymap_commands.as_deref()) {
+        if let Err(e) = crate::storage::save_json(dir, KEYMAP_FILE, &keymap) {
+            log::warn!("keymap: saving new default keys: {e}");
+        }
+    }
+    let ids = command_ids();
+    if settings.keymap_commands.as_ref() != Some(&ids) {
+        settings.keymap_commands = Some(ids);
+        if let Err(e) = crate::storage::save_json(dir, SETTINGS_FILE, &*settings) {
+            log::warn!("keymap: saving the command list: {e}");
+        }
+    }
+    keymap
 }
 
 #[cfg(test)]
@@ -521,15 +634,47 @@ mod tests {
         assert_eq!(k.bindings.len(), 2);
     }
 
+    fn mods(alt: MacKey, ctrl: MacKey) -> Modifiers {
+        Modifiers { alt, ctrl }
+    }
+
     #[test]
     fn system_conflicts_lists_reserved() {
+        let def = Modifiers::default();
         let mut k = Keymap::defaults();
-        assert!(k.system_conflicts().is_empty());
+        assert!(k.system_conflicts(&def).is_empty());
         k.bind(&c("Ctrl+Up"), "cm_parent");
         assert_eq!(
-            k.system_conflicts(),
+            k.system_conflicts(&def),
             vec![("Ctrl+Up".to_string(), "cm_parent".to_string())]
         );
+        // Command as Ctrl: TC Ctrl+Up is Cmd+Up, which macOS leaves alone ...
+        let cmd = mods(MacKey::Option, MacKey::Command);
+        assert!(k.system_conflicts(&cmd).is_empty());
+        // ... and Control as Alt makes TC Alt+Up the reserved Control+Up.
+        k.bind(&c("Alt+Up"), "cm_root");
+        let swapped = mods(MacKey::Control, MacKey::Option);
+        assert_eq!(
+            k.system_conflicts(&swapped),
+            vec![("Alt+Up".to_string(), "cm_root".to_string())]
+        );
+    }
+
+    #[test]
+    fn physical_keys_and_labels_follow_the_mapping() {
+        let def = Modifiers::default();
+        assert_eq!(c("Alt+F5").label(&def), "⌥F5");
+        assert_eq!(c("Ctrl+Shift+F").label(&def), "⌃⇧F");
+        assert_eq!(c("Ctrl+Up").label(&def), "⌃↑");
+        assert_eq!(c("F3").label(&def), "F3");
+        assert_eq!(c("Cmd+Q").label(&def), "⌘Q");
+        let cmd_alt = mods(MacKey::Command, MacKey::Control);
+        assert_eq!(c("Alt+F5").label(&cmd_alt), "⌘F5");
+        assert_eq!(c("Alt+F5").physical(&cmd_alt).to_string(), "Cmd+F5");
+        let swapped = mods(MacKey::Control, MacKey::Option);
+        assert_eq!(c("Ctrl+Alt+Space").label(&swapped), "⌃⌥Space");
+        assert_eq!(c("Ctrl+D").label(&swapped), "⌥D");
+        assert_eq!(c("Ctrl+D").physical(&swapped).to_string(), "Alt+D");
     }
 
     /// The README key table is generated from COMMANDS; this keeps it current.
@@ -553,15 +698,19 @@ mod tests {
             };
             table.push_str(&format!("| {} | {title} | {keys} |\n", c.menu));
         }
-        let readme = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md"))
-            .expect("README.md at the repository root");
+        let readme =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md"))
+                .expect("README.md at the repository root");
         let start = "<!-- keys:start -->\n";
         let current = readme
             .split_once(start)
             .and_then(|(_, rest)| rest.split_once("<!-- keys:end -->"))
             .map(|(t, _)| t)
             .expect("README key table markers");
-        assert_eq!(current, table, "README key table is stale; replace it with:\n{table}");
+        assert_eq!(
+            current, table,
+            "README key table is stale; replace it with:\n{table}"
+        );
     }
 
     #[test]
@@ -576,6 +725,86 @@ mod tests {
         let k = Keymap::defaults();
         assert_eq!(k.resolve(&c("Ctrl+F")), Some("cm_connect"));
         assert_eq!(k.resolve(&c("Ctrl+Shift+F")), Some("cm_disconnect"));
+    }
+
+    #[test]
+    fn pack_files_is_alt_f5() {
+        let def = COMMANDS.iter().find(|c| c.id == "cm_packfiles").unwrap();
+        assert_eq!((def.menu, def.title), ("Files", "Pack files…"));
+        assert_eq!(def.defaults, ["Alt+F5"]);
+        assert!(def.available);
+        assert_eq!(
+            Keymap::defaults().resolve(&c("Option+F5")),
+            Some("cm_packfiles")
+        );
+    }
+
+    /// A keymap.json from before Pack files: the defaults without Alt+F5.
+    fn old_keymap(dir: &Path) {
+        let mut k = Keymap::defaults();
+        k.unbind(&c("Alt+F5"));
+        crate::storage::save_json(dir, KEYMAP_FILE, &k).unwrap();
+    }
+
+    #[test]
+    fn old_keymap_gets_new_default_keys_once() {
+        let dir = tempfile::tempdir().unwrap();
+        old_keymap(dir.path());
+        let mut s = Settings::default();
+        let k = load_migrating(dir.path(), &mut s);
+        assert_eq!(k.resolve(&c("Alt+F5")), Some("cm_packfiles"));
+        assert_eq!(s.keymap_commands, Some(command_ids()));
+        // Both files were written; keymap.json is still a plain map.
+        let saved: Settings = crate::storage::load_json(dir.path(), SETTINGS_FILE);
+        assert_eq!(saved.keymap_commands, Some(command_ids()));
+        let raw = std::fs::read_to_string(dir.path().join(KEYMAP_FILE)).unwrap();
+        let map: BTreeMap<String, String> = serde_json::from_str(&raw).unwrap();
+        assert_eq!(map.get("Alt+F5").map(String::as_str), Some("cm_packfiles"));
+
+        // The user removes Alt+F5 afterwards: it stays removed.
+        let mut k = k;
+        k.unbind(&c("Alt+F5"));
+        crate::storage::save_json(dir.path(), KEYMAP_FILE, &k).unwrap();
+        let mut s: Settings = crate::storage::load_json(dir.path(), SETTINGS_FILE);
+        let k = load_migrating(dir.path(), &mut s);
+        assert_eq!(k.resolve(&c("Alt+F5")), None);
+        assert!(k.combos_for("cm_packfiles").is_empty());
+    }
+
+    #[test]
+    fn new_defaults_never_take_a_used_key() {
+        let mut k = Keymap::defaults();
+        k.unbind(&c("Alt+F5"));
+        k.bind(&c("Alt+F5"), "cm_view");
+        let mut known = command_ids();
+        known.retain(|id| id != "cm_packfiles");
+        assert!(!k.add_new_defaults(Some(&known)));
+        assert_eq!(k.resolve(&c("Alt+F5")), Some("cm_view"));
+        assert!(k.combos_for("cm_packfiles").is_empty());
+        // The same with no recorded list.
+        assert!(!k.add_new_defaults(None));
+        assert_eq!(k.resolve(&c("Alt+F5")), Some("cm_view"));
+    }
+
+    #[test]
+    fn new_defaults_with_a_list_add_only_unlisted_commands() {
+        let mut k = Keymap::defaults();
+        k.unbind(&c("Alt+F5"));
+        k.unbind(&c("F3")); // cm_view: known, deliberately unbound
+        let mut known = command_ids();
+        known.retain(|id| id != "cm_packfiles");
+        assert!(k.add_new_defaults(Some(&known)));
+        assert_eq!(k.resolve(&c("Alt+F5")), Some("cm_packfiles"));
+        assert_eq!(k.resolve(&c("F3")), None);
+    }
+
+    #[test]
+    fn no_keymap_file_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Settings::default();
+        assert_eq!(load_migrating(dir.path(), &mut s), Keymap::defaults());
+        assert_eq!(s.keymap_commands, None);
+        assert!(!dir.path().join(SETTINGS_FILE).exists());
     }
 
     #[test]

@@ -45,6 +45,49 @@ impl Default for Colors {
     }
 }
 
+/// A physical Mac modifier key that can act as TC's Alt or Ctrl. Fn is not offered: WebKit
+/// does not report it to the page (`getModifierState("Fn")` is always false).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum MacKey {
+    Option,
+    Control,
+    Command,
+}
+
+/// Which Mac keys act as TC's Alt and Ctrl. Saved as `{"alt": "option", "ctrl": "control"}`;
+/// a missing, unknown or doubled key gives the defaults (Option = Alt, Control = Ctrl).
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Modifiers {
+    pub alt: MacKey,
+    pub ctrl: MacKey,
+}
+
+impl Default for Modifiers {
+    fn default() -> Self {
+        Self {
+            alt: MacKey::Option,
+            ctrl: MacKey::Control,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Modifiers {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = serde_json::Value::deserialize(d)?;
+        let key = |name: &str| {
+            raw.get(name)
+                .and_then(|v| serde_json::from_value::<MacKey>(v.clone()).ok())
+        };
+        let def = Modifiers::default();
+        let m = Modifiers {
+            alt: key("alt").unwrap_or(def.alt),
+            ctrl: key("ctrl").unwrap_or(def.ctrl),
+        };
+        Ok(if m.alt == m.ctrl { def } else { m })
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
@@ -57,6 +100,11 @@ pub struct Settings {
     pub conflict_hint_shown: bool,
     /// Output device of the F3 audio player, by name; None = the system default.
     pub audio_output: Option<String>,
+    /// Which Mac keys act as TC's Alt and Ctrl.
+    pub modifiers: Modifiers,
+    /// Command ids that existed when `keymap.json` was last saved or migrated; commands not
+    /// in it get their free default keys at startup. None: a keymap from before this field.
+    pub keymap_commands: Option<Vec<String>>,
 }
 
 impl Default for Settings {
@@ -69,6 +117,8 @@ impl Default for Settings {
             fda_hint_shown: false,
             conflict_hint_shown: false,
             audio_output: None,
+            modifiers: Modifiers::default(),
+            keymap_commands: None,
         }
     }
 }
@@ -270,5 +320,55 @@ mod tests {
         assert_eq!(s.audio_output, None);
         assert_eq!(s.font_size, 15);
         assert!(!s.show_command_line);
+    }
+
+    #[test]
+    fn old_settings_without_modifiers_load_with_defaults() {
+        let old = r#"{"editor":{"kind":"system"},"fontSize":15}"#;
+        let s: Settings = serde_json::from_str(old).unwrap();
+        assert_eq!(s.modifiers, Modifiers::default());
+        assert_eq!(
+            (s.modifiers.alt, s.modifiers.ctrl),
+            (MacKey::Option, MacKey::Control)
+        );
+        assert_eq!(s.font_size, 15);
+    }
+
+    #[test]
+    fn modifiers_json_shape_and_fallbacks() {
+        let s = Settings {
+            modifiers: Modifiers {
+                alt: MacKey::Option,
+                ctrl: MacKey::Command,
+            },
+            ..Settings::default()
+        };
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(
+            json["modifiers"],
+            serde_json::json!({"alt": "option", "ctrl": "command"})
+        );
+        let back: Settings = serde_json::from_value(json).unwrap();
+        assert_eq!(back, s);
+        let parse = |m: &str| -> Modifiers {
+            serde_json::from_str::<Settings>(&format!(r#"{{"modifiers":{m},"fontSize":14}}"#))
+                .unwrap()
+                .modifiers
+        };
+        // Unknown keys (Fn is not supported) and doubled keys fall back, the rest survives.
+        assert_eq!(
+            parse(r#"{"alt":"fn","ctrl":"command"}"#).ctrl,
+            MacKey::Command
+        );
+        assert_eq!(
+            parse(r#"{"alt":"fn","ctrl":"command"}"#).alt,
+            MacKey::Option
+        );
+        assert_eq!(
+            parse(r#"{"alt":"command","ctrl":"command"}"#),
+            Modifiers::default()
+        );
+        assert_eq!(parse(r#"{"ctrl":"option"}"#), Modifiers::default());
+        assert_eq!(parse("7"), Modifiers::default());
     }
 }

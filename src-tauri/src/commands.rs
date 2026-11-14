@@ -11,7 +11,7 @@ use fxfm_core::config::{
     restore_path, Colors, PanelState, SessionState, Settings, Side, SESSION_FILE, SETTINGS_FILE,
 };
 use fxfm_core::hotlist::{Hotlist, HOTLIST_FILE};
-use fxfm_core::keymap::{KeyCombo, Keymap, COMMANDS, KEYMAP_FILE};
+use fxfm_core::keymap::{command_ids, KeyCombo, Keymap, COMMANDS, KEYMAP_FILE};
 use fxfm_core::listing::{Entry, ListError};
 use fxfm_core::ops::{ConflictAnswer, ErrorAnswer};
 use fxfm_core::remote::parse_remote;
@@ -153,12 +153,16 @@ fn build_bootstrap(state: &AppState) -> Bootstrap {
     session.left = Some(restore_panel(session.left.take(), home));
     session.right = Some(restore_panel(session.right.take(), home));
     let keymap = lock(&state.keymap).clone();
+    // Locked once, outside the struct literal: a guard taken in a field expression lives
+    // until the end of the whole literal, so locking the same mutex twice in it deadlocks.
+    let settings = lock(&state.settings).clone();
+    let system_conflicts = keymap.system_conflicts(&settings.modifiers);
     Bootstrap {
         home: path_string(home),
         user: std::env::var("USER").unwrap_or_else(|_| "user".into()),
         version: fxfm_core::version().to_string(),
         session,
-        settings: lock(&state.settings).clone(),
+        settings,
         keymap: keymap_bindings(&keymap),
         commands: COMMANDS
             .iter()
@@ -171,7 +175,7 @@ fn build_bootstrap(state: &AppState) -> Bootstrap {
             .collect(),
         hotlist: lock(&state.hotlist).clone(),
         storage: storage_info(state, &data),
-        system_conflicts: keymap.system_conflicts(),
+        system_conflicts,
         translocated: state.translocated,
         original_app: state
             .translocated
@@ -281,15 +285,33 @@ pub fn flush_session(state: &AppState) {
     }
 }
 
+/// Saves the settings; returns the system conflicts of the keymap under the (maybe changed)
+/// Alt/Ctrl mapping. A changed mapping rebuilds the menu (its titles show the keys).
 #[tauri::command]
-pub async fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
+pub async fn save_settings(
+    app: AppHandle,
+    mut settings: Settings,
+) -> Result<Vec<(String, String)>, String> {
     blocking(move || {
         let state = app.state::<AppState>();
-        let data = lock(&state.data);
-        storage::save_json(&data.dir, SETTINGS_FILE, &settings).map_err(|e| e.to_string())?;
-        state.audio.set_output(settings.audio_output.clone());
-        *lock(&state.settings) = settings;
-        Ok(())
+        let mods = settings.modifiers;
+        let changed = {
+            // Held while saving, as before: a storage move waits for it.
+            let data = lock(&state.data);
+            let mut cur = lock(&state.settings);
+            // The backend keeps this list; the UI's copy may be older.
+            settings.keymap_commands = cur.keymap_commands.clone();
+            storage::save_json(&data.dir, SETTINGS_FILE, &settings).map_err(|e| e.to_string())?;
+            state.audio.set_output(settings.audio_output.clone());
+            let changed = cur.modifiers != mods;
+            *cur = settings;
+            changed
+        };
+        let keymap = lock(&state.keymap).clone();
+        if changed {
+            menu::refresh(&app, &keymap, &mods);
+        }
+        Ok(keymap.system_conflicts(&mods))
     })
     .await?
 }
@@ -304,6 +326,20 @@ pub async fn save_hotlist(app: AppHandle, hotlist: Hotlist) -> Result<(), String
         Ok(())
     })
     .await?
+}
+
+/// Records that the saved keymap knows every current command (`Settings::keymap_commands`),
+/// so a key the user removed is not added back as a new default at the next start.
+fn record_keymap_commands(state: &AppState, dir: &Path) {
+    let ids = command_ids();
+    let mut settings = lock(&state.settings);
+    if settings.keymap_commands.as_ref() == Some(&ids) {
+        return;
+    }
+    settings.keymap_commands = Some(ids);
+    if let Err(e) = storage::save_json(dir, SETTINGS_FILE, &*settings) {
+        eprintln!("fxfm: saving settings: {e}");
+    }
 }
 
 /// Replaces all bindings (unparsable combos and unknown commands are dropped);
@@ -326,9 +362,11 @@ pub async fn save_keymap(
         let state = app.state::<AppState>();
         let dir = lock(&state.data).dir.clone();
         storage::save_json(&dir, KEYMAP_FILE, &keymap).map_err(|e| e.to_string())?;
+        record_keymap_commands(&state, &dir);
+        let mods = lock(&state.settings).modifiers;
         // Menu titles show the keys; built on the main thread, so no lock is held.
-        menu::refresh(&app, &keymap);
-        let conflicts = keymap.system_conflicts();
+        menu::refresh(&app, &keymap, &mods);
+        let conflicts = keymap.system_conflicts(&mods);
         *lock(&state.keymap) = keymap;
         Ok(conflicts)
     })
@@ -342,8 +380,10 @@ pub async fn reset_keymap(app: AppHandle) -> Result<BTreeMap<String, String>, St
         let state = app.state::<AppState>();
         let dir = lock(&state.data).dir.clone();
         storage::save_json(&dir, KEYMAP_FILE, &keymap).map_err(|e| e.to_string())?;
+        record_keymap_commands(&state, &dir);
         let out = keymap_bindings(&keymap);
-        menu::refresh(&app, &keymap);
+        let mods = lock(&state.settings).modifiers;
+        menu::refresh(&app, &keymap, &mods);
         *lock(&state.keymap) = keymap;
         Ok(out)
     })
@@ -542,7 +582,15 @@ pub async fn open_viewer(
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.clone())
     };
-    let url = format!("viewer.html?path={}", url_encode(&path_string(&local)));
+    // The viewer maps Alt/Ctrl like the main window (as of opening).
+    let mods = serde_json::to_value(lock(&state.settings).modifiers).map_err(|e| e.to_string())?;
+    let key = |k: &str| mods[k].as_str().unwrap_or_default().to_string();
+    let url = format!(
+        "viewer.html?path={}&alt={}&ctrl={}",
+        url_encode(&path_string(&local)),
+        key("alt"),
+        key("ctrl")
+    );
     WebviewWindowBuilder::new(&app, format!("viewer-{n}"), WebviewUrl::App(url.into()))
         .title(title)
         .inner_size(1000.0, 700.0)

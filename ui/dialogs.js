@@ -1,4 +1,4 @@
-// Modal dialogs and the TC file operations behind them (F5/F6/F7/F8, rename, masks).
+// Modal dialogs and the TC file operations behind them (F5/F6/F7/F8, Alt+F5, rename, masks).
 
 import {
   archiveOf,
@@ -7,6 +7,7 @@ import {
   editTexts,
   firstComponent,
   formatDate,
+  isLocalFolder,
   formatK,
   groupThousands,
   jobErrorBox,
@@ -18,6 +19,13 @@ import {
   newNameError,
   operationPaths,
   operationSources,
+  PACK_LOCAL_ONLY,
+  packArchiveName,
+  packCursor,
+  packDialogText,
+  packedText,
+  packFormError,
+  packTargetDir,
   parentLocation,
   parseRemote,
   passwordArchive,
@@ -93,7 +101,7 @@ export function handleModalKey(e) {
 
 /** Keeps Tab / Shift+Tab inside `root`. */
 function cycleFocus(root, e) {
-  const items = [...root.querySelectorAll("button:not(:disabled), input")];
+  const items = [...root.querySelectorAll("button:not(:disabled), input:not(:disabled), select:not(:disabled)")];
   if (!items.length) return;
   let i = items.indexOf(document.activeElement);
   i = e.shiftKey ? (i <= 0 ? items.length - 1 : i - 1) : (i + 1) % items.length;
@@ -254,7 +262,7 @@ function route(type, payload) {
   }
 }
 
-const TITLES = { copy: "Copying", move: "Moving", delete: "Deleting", upload: "Uploading" };
+const TITLES = { copy: "Copying", move: "Moving", delete: "Deleting", upload: "Uploading", pack: "Packing" };
 
 /** One background job: progress dialog (after 300 ms), conflict and error questions. */
 class Job {
@@ -483,14 +491,21 @@ const YES_NO = [
   { label: "No", value: null },
 ];
 
+const OVERWRITE_CANCEL = [
+  { label: "Overwrite", value: "overwrite", default: true },
+  { label: "Cancel", value: null },
+];
+
 /**
  * Runs `req`, then refreshes both panels; the source panel's marks (if a panel
- * is given) are cleared only when the job ran to the end.
+ * is given) are cleared only when the job ran to the end. Resolves with the last
+ * job's `job://done` payload, or null when no job ran.
  */
 async function runJob(req, source) {
+  // A pack target is never a server (the backend refuses it), so it connects nothing.
   const servers = jobServers([...(req.sources ?? req.paths ?? []), req.dest, req.cwd]);
   const connected = await connectServers(servers);
-  if (!connected) return;
+  if (!connected) return null;
   const job = new Job(req);
   const done = await job.run();
   if (jobSucceeded(done)) source?.clearMarks();
@@ -498,6 +513,17 @@ async function runJob(req, source) {
   const err = done.error;
   // Password needed (or wrong): ask and run the same request again.
   if (err && passwordArchive(err.message) && (await askPassword(err))) return runJob(req, source);
+  // Packing never replaces an archive without asking.
+  if (err?.kind === "exists" && req.kind === "pack") {
+    const r = await dialog({ title: "Pack files", text: `"${lastComponent(req.target)}" already exists.`, buttons: OVERWRITE_CANCEL });
+    if (r !== "overwrite") return done;
+    const again = { ...req, overwrite: true };
+    try {
+      return await runJob(again, source);
+    } finally {
+      again.password = null;
+    }
+  }
   // A lost connection on servers that were all connected gets no box here:
   // `connections://changed` (sent after job://done) names the dead server(s) exactly, and app.js
   // opens their "connection lost" dialog.
@@ -506,8 +532,9 @@ async function runJob(req, source) {
   }
   if (job.followUp) {
     const r = await dialog({ title: "Delete", text: permanentConfirmText(job.followUp.paths), buttons: YES_NO });
-    if (r === "yes") await runJob(job.followUp, source);
+    if (r === "yes") return runJob(job.followUp, source);
   }
+  return done;
 }
 
 // ---------------------------------------------------------------- upload back (F4 in archives)
@@ -601,6 +628,142 @@ export async function copyMoveTo(kind, { paths, cwd, dest, source = null, switch
   const target = r?.text.trim();
   if (!target) return;
   await runJob({ kind: r.value === "switch" ? otherKind : kind, sources: paths, dest: target, cwd }, source);
+}
+
+/**
+ * The Pack files dialog. Resolves with {target, password (or null), encryption} or null.
+ * Enter = OK (unless Cancel has focus), Escape = Cancel.
+ */
+function packDialog(sources, initial) {
+  return new Promise((resolve) => {
+    const { backdrop, box, body, row } = frame("Pack files");
+    box.classList.add("pack");
+    const target = el("input");
+    target.type = "text";
+    target.spellcheck = false;
+    target.value = initial;
+    const line = (label, field) => {
+      const l = el("label", "line");
+      l.append(el("span", null, label), field);
+      return l;
+    };
+    const format = el("select");
+    const zipOpt = el("option", null, "ZIP");
+    zipOpt.value = "zip";
+    format.append(zipOpt);
+    const encrypt = el("input");
+    encrypt.type = "checkbox";
+    const encryptLabel = el("label", "check gap");
+    encryptLabel.append(encrypt, " Encrypt with a password");
+    const password = el("input");
+    const repeat = el("input");
+    for (const f of [password, repeat]) {
+      f.type = "password";
+      f.autocomplete = "off";
+      f.spellcheck = false;
+    }
+    const method = el("select");
+    for (const [value, label] of [
+      ["aes256", "AES-256 (secure)"],
+      ["zipCrypto", "ZipCrypto (opens everywhere, weak)"],
+    ]) {
+      const o = el("option", null, label);
+      o.value = value;
+      method.append(o);
+    }
+    const pwBox = el("div", "pw");
+    pwBox.append(
+      line("Password", password),
+      line("Repeat password", repeat),
+      line("Encryption", method),
+      el("p", "note", "AES-256 zips do not open with a double-click in Finder; use fxfm, Keka or 7-Zip."),
+    );
+    const error = el("p", "error");
+    error.hidden = true;
+    const showPw = () => {
+      pwBox.hidden = !encrypt.checked;
+      for (const f of [password, repeat, method]) f.disabled = !encrypt.checked;
+    };
+    encrypt.addEventListener("change", showPw);
+    showPw();
+    body.append(el("p", null, packDialogText(sources)), target, line("Format", format), encryptLabel, pwBox, error);
+
+    const modal = { el: backdrop };
+    let open = true;
+    const finish = (value) => {
+      if (!open) return;
+      open = false;
+      popModal(modal);
+      // The fields are gone with the dialog; the value object is all that holds the password.
+      password.value = "";
+      repeat.value = "";
+      resolve(value);
+    };
+    const accept = () => {
+      const problem = packFormError({ target: target.value, encrypt: encrypt.checked, password: password.value, repeat: repeat.value });
+      if (problem) {
+        error.textContent = problem;
+        error.hidden = false;
+        (problem.includes("password") ? password : target).focus();
+        return;
+      }
+      finish({
+        target: target.value.trim(),
+        password: encrypt.checked ? password.value : null,
+        encryption: method.value,
+      });
+    };
+    const okBtn = el("button", null, "OK");
+    okBtn.addEventListener("click", accept);
+    const cancelBtn = el("button", null, "Cancel");
+    cancelBtn.addEventListener("click", () => finish(null));
+    row.append(okBtn, cancelBtn);
+    modal.onKey = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        finish(null);
+      } else if (e.key === "Tab") {
+        e.preventDefault();
+        cycleFocus(box, e);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        if (document.activeElement === cancelBtn) finish(null);
+        else accept();
+      }
+    };
+    pushModal(modal);
+    target.focus();
+    const at = packCursor(target.value);
+    target.setSelectionRange(at.start, at.end);
+  });
+}
+
+/** Alt+F5: packs the marked entries (or the one under the cursor) into a zip. */
+export async function packFiles() {
+  const src = ctx.active();
+  const sources = sourcesOf(src);
+  if (!sources.length) return;
+  if (!isLocalFolder(src.location)) {
+    await message("Pack files", PACK_LOCAL_ONLY);
+    return;
+  }
+  // Snapshot before awaiting: a refresh may move the panel while the dialog is open.
+  const { cwd, paths } = operationPaths(src.location, sources);
+  const dir = packTargetDir(src.location, ctx.other().location);
+  const r = await packDialog(sources, joinLocation(dir, packArchiveName(sources, src.location)));
+  if (!r) return;
+  const req = { kind: "pack", sources: paths, cwd, target: r.target, password: r.password, encryption: r.encryption };
+  r.password = null;
+  const done = await runJob(req, src);
+  req.password = null;
+  if (!done?.summary || done.summary.cancelled || done.error) return;
+  // The cursor goes to the new archive in the panel showing its folder (the target panel first).
+  const target = r.target.startsWith("/") ? r.target : joinLocation(cwd, r.target);
+  const folder = parentLocation(target);
+  const name = lastComponent(target);
+  const panel = [ctx.other(), src].find((p) => p.location === folder);
+  if (panel) await panel.go(folder, name, { refresh: true });
+  src.setMessage(packedText(done.summary, target));
 }
 
 /** F8 (Trash) / Shift+F8 (permanent). */

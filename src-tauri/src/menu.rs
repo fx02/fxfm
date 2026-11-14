@@ -1,9 +1,11 @@
 //! Native menu bar built from the command registry.
 //!
 //! Command items have no native accelerator: the menu would take the key
-//! before the webview sees it. The bound key is shown in the title instead,
-//! and a click emits `menu://command {id}` to the main window.
+//! before the webview sees it. The bound key is shown in the title instead, with
+//! the physical Mac keys of the Alt/Ctrl mapping (`⌥F5`), and a click emits
+//! `menu://command {id}` to the main window.
 
+use fxfm_core::config::Modifiers;
 use fxfm_core::keymap::{KeyCombo, Keymap, COMMANDS};
 use serde::Serialize;
 use tauri::menu::{Menu, MenuBuilder, MenuEvent, MenuItemBuilder, SubmenuBuilder};
@@ -29,23 +31,20 @@ pub fn menu_title_with_key<S: AsRef<str>>(title: &str, keys: &[S]) -> String {
     }
 }
 
-/// Keys bound to `cmd`, its still-bound defaults first (in registry order).
-fn display_keys(keymap: &Keymap, cmd: &str, defaults: &[&str]) -> Vec<String> {
-    let mut bound: Vec<String> = keymap
-        .combos_for(cmd)
-        .iter()
-        .map(|c| c.to_string())
-        .collect();
-    let canonical: Vec<String> = defaults
-        .iter()
-        .filter_map(|d| d.parse::<KeyCombo>().ok())
-        .map(|c| c.to_string())
-        .collect();
+/// Labels of the keys bound to `cmd` (physical keys under `mods`), its still-bound defaults
+/// first (in registry order).
+fn display_keys(keymap: &Keymap, cmd: &str, defaults: &[&str], mods: &Modifiers) -> Vec<String> {
+    let mut bound = keymap.combos_for(cmd);
+    let canonical: Vec<KeyCombo> = defaults.iter().filter_map(|d| d.parse().ok()).collect();
     bound.sort_by_key(|k| canonical.iter().position(|d| d == k).unwrap_or(usize::MAX));
-    bound
+    bound.iter().map(|c| c.label(mods)).collect()
 }
 
-pub fn build<R: Runtime>(app: &AppHandle<R>, keymap: &Keymap) -> tauri::Result<Menu<R>> {
+pub fn build<R: Runtime>(
+    app: &AppHandle<R>,
+    keymap: &Keymap,
+    mods: &Modifiers,
+) -> tauri::Result<Menu<R>> {
     let app_menu = SubmenuBuilder::new(app, "fxfm")
         .about(None)
         .separator()
@@ -71,7 +70,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, keymap: &Keymap) -> tauri::Result<M
         let mut sub = SubmenuBuilder::new(app, *name);
         let mut empty = true;
         for c in COMMANDS.iter().filter(|c| c.menu == *name) {
-            let keys = display_keys(keymap, c.id, c.defaults);
+            let keys = display_keys(keymap, c.id, c.defaults, mods);
             let item = MenuItemBuilder::with_id(c.id, menu_title_with_key(c.title, &keys))
                 .enabled(c.available)
                 .build(app)?;
@@ -87,9 +86,9 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, keymap: &Keymap) -> tauri::Result<M
     menu.build()
 }
 
-/// Rebuilds the menu bar after the keymap changed (titles show the keys).
-pub fn refresh<R: Runtime>(app: &AppHandle<R>, keymap: &Keymap) {
-    if let Err(e) = build(app, keymap).and_then(|m| app.set_menu(m)) {
+/// Rebuilds the menu bar after the keymap or the Alt/Ctrl mapping changed (titles show the keys).
+pub fn refresh<R: Runtime>(app: &AppHandle<R>, keymap: &Keymap, mods: &Modifiers) {
+    if let Err(e) = build(app, keymap, mods).and_then(|m| app.set_menu(m)) {
         eprintln!("fxfm: menu: {e}");
     }
 }
@@ -120,18 +119,47 @@ mod tests {
 
     #[test]
     fn display_keys_prefer_defaults() {
+        let def = Modifiers::default();
         let k = Keymap::defaults();
-        assert_eq!(display_keys(&k, "cm_delete", &["F8", "Delete"]), ["F8", "Delete"]);
+        assert_eq!(
+            display_keys(&k, "cm_delete", &["F8", "Delete"], &def),
+            ["F8", "Delete"]
+        );
         let mut k = Keymap::defaults();
         k.unbind(&"F5".parse().unwrap());
         k.bind(&"Ctrl+K".parse().unwrap(), "cm_copy");
-        assert_eq!(display_keys(&k, "cm_copy", &["F5"]), ["Ctrl+K"]);
+        assert_eq!(display_keys(&k, "cm_copy", &["F5"], &def), ["⌃K"]);
+    }
+
+    #[test]
+    fn display_keys_show_the_physical_keys() {
+        use fxfm_core::config::MacKey;
+        let k = Keymap::defaults();
+        let def = Modifiers::default();
+        assert_eq!(display_keys(&k, "cm_packfiles", &["Alt+F5"], &def), ["⌥F5"]);
+        let cmd = Modifiers {
+            alt: MacKey::Command,
+            ctrl: MacKey::Control,
+        };
+        assert_eq!(display_keys(&k, "cm_packfiles", &["Alt+F5"], &cmd), ["⌘F5"]);
+        assert_eq!(
+            menu_title_with_key(
+                "Pack files…",
+                &display_keys(&k, "cm_packfiles", &["Alt+F5"], &cmd)
+            ),
+            "Pack files…\t⌘F5"
+        );
     }
 
     #[test]
     fn every_command_menu_is_in_the_bar() {
         for c in COMMANDS {
-            assert!(MENUS.contains(&c.menu), "{} in unknown menu {}", c.id, c.menu);
+            assert!(
+                MENUS.contains(&c.menu),
+                "{} in unknown menu {}",
+                c.id,
+                c.menu
+            );
         }
     }
 }

@@ -88,13 +88,16 @@ pub struct OpSummary {
 
 /// Errors that refuse an operation before it starts. Errors on individual
 /// items go through [`OpObserver::error`] instead. Serialized as
-/// `{"kind": "intoItself"|"sameLocation"|"io"|"cancelled", "message": <Display>}`.
+/// `{"kind": "intoItself"|"sameLocation"|"exists"|"io"|"cancelled", "message": <Display>}`.
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum OpError {
     #[error("cannot copy or move '{0}' into itself")]
     IntoItself(String),
     #[error("'{0}' is already in the target location")]
     SameLocation(String),
+    /// The target of an operation that never replaces without asking (packing) exists.
+    #[error("'{0}' already exists")]
+    Exists(String),
     #[error("{0}")]
     Io(String),
     #[error("operation cancelled")]
@@ -107,6 +110,7 @@ impl Serialize for OpError {
             OpError::IntoItself(_) => "intoItself",
             OpError::SameLocation(_) => "sameLocation",
             OpError::Io(_) => "io",
+            OpError::Exists(_) => "exists",
             OpError::Cancelled => "cancelled",
         };
         let mut st = s.serialize_struct("OpError", 2)?;
@@ -441,7 +445,7 @@ fn prepare_dest(dest: &Dest) -> Result<(), OpError> {
 }
 
 /// Rename that fails with `AlreadyExists` instead of replacing `to`.
-fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+pub(crate) fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         use std::ffi::CString;

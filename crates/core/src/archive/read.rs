@@ -92,25 +92,6 @@ pub(crate) fn zip_err(e: zip::result::ZipError, path: &Path) -> ArchiveError {
     }
 }
 
-/// Days since 1970-01-01 for a proleptic Gregorian date.
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
-
-fn zip_mtime(t: Option<zip::DateTime>) -> i64 {
-    t.map_or(0, |t| {
-        days_from_civil(t.year().into(), t.month().into(), t.day().into()) * 86_400
-            + i64::from(t.hour()) * 3600
-            + i64::from(t.minute()) * 60
-            + i64::from(t.second())
-    })
-}
-
 fn read_zip(path: &Path) -> Result<Vec<IndexEntry>, ArchiveError> {
     let f = File::open(path).map_err(|e| io_err(&e, path))?;
     let mut z = zip::ZipArchive::new(BufReader::new(f)).map_err(|e| zip_err(e, path))?;
@@ -122,7 +103,7 @@ fn read_zip(path: &Path) -> Result<Vec<IndexEntry>, ArchiveError> {
             Err(_) => String::from_utf8_lossy(e.name_raw()).into_owned(),
         };
         let is_dir = e.is_dir() || name.ends_with('/');
-        let mtime = zip_mtime(e.last_modified());
+        let mtime = super::ziptime::entry_mtime(&e);
         push(
             &mut raw,
             &name,
@@ -732,7 +713,7 @@ fn extract_zip(
             z.by_index(p.index)
         }
         .map_err(|e| zip_err(e, path))?;
-        let mtime = zip_mtime(e.last_modified());
+        let mtime = super::ziptime::entry_mtime(&e);
         let mode = e.unix_mode();
         sink.entry(&p.rel, p.kind, mode, mtime, &mut e)?;
     }

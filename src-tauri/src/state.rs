@@ -79,7 +79,9 @@ impl AppState {
             }),
             temp_root.clone(),
         );
-        let settings: Settings = storage::load_json(&data.dir, SETTINGS_FILE);
+        let mut settings: Settings = storage::load_json(&data.dir, SETTINGS_FILE);
+        // Commands added since keymap.json was saved get their free default keys.
+        let keymap = fxfm_core::keymap::load_migrating(&data.dir, &mut settings);
         let audio = audio::app_player(handle.clone());
         audio.set_output(settings.audio_output.clone());
         AppState {
@@ -88,7 +90,7 @@ impl AppState {
             app_folder,
             system_dir,
             settings: Mutex::new(settings),
-            keymap: Mutex::new(Keymap::load_or_default(&data.dir)),
+            keymap: Mutex::new(keymap),
             hotlist: Mutex::new(storage::load_json(&data.dir, HOTLIST_FILE)),
             remote: Connector::load(crate::keychain::system_store(), &data.dir),
             data: Mutex::new(data),

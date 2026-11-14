@@ -1,19 +1,20 @@
-//! Background file operations (copy/move/delete/upload), one thread per job.
+//! Background file operations (copy/move/delete/upload/pack), one thread per job.
 //!
 //! Events: `job://progress {job, progress}`, `job://conflict {job, info}`,
 //! `job://error {job, path, msg}`, `job://done {job, summary | error}`, and
 //! `connections://changed {lost}` after `job://done` when a connection died.
 
+use fxfm_core::archive::pack::{pack_zip, PackOptions, Secret, ZipEncryption};
 use fxfm_core::ops::{
     ConflictAnswer, ConflictInfo, ErrorAnswer, OpError, OpObserver, OpSummary, Progress,
 };
-use fxfm_core::vfs::{self, Ctx};
+use fxfm_core::vfs::{self, Ctx, Loc};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::any::Any;
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -49,6 +50,59 @@ pub enum JobRequest {
         local: String,
         target: String,
     },
+    /// Packs local `sources` (named relative to `cwd`) into the zip `target`. The password
+    /// travels only in this request and is wiped when the request is dropped.
+    Pack {
+        sources: Vec<String>,
+        cwd: String,
+        target: String,
+        #[serde(default)]
+        password: Option<Secret>,
+        #[serde(default)]
+        encryption: ZipEncryption,
+        #[serde(default)]
+        overwrite: bool,
+    },
+}
+
+/// Refusal for packing anything that is not a local file or folder.
+pub const PACK_LOCAL_ONLY: &str = "Packing works with local files for now.";
+
+/// The local path of `loc` when it is a local item (an archive file itself counts, its
+/// inside does not).
+fn local_item(loc: &str) -> Option<PathBuf> {
+    match vfs::parse(loc) {
+        Loc::Local(p) => Some(p),
+        Loc::Archive(a) if a.inner.is_empty() => Some(a.archive),
+        _ => None,
+    }
+}
+
+/// Checks that everything is local and packs. A relative `target` is taken in `cwd`.
+fn pack(
+    sources: &[String],
+    cwd: &str,
+    target: &str,
+    opts: &PackOptions,
+    obs: &dyn OpObserver,
+) -> Result<OpSummary, OpError> {
+    let local_only = || OpError::Io(PACK_LOCAL_ONLY.into());
+    let base = local_item(cwd).ok_or_else(local_only)?;
+    if target.contains("://") {
+        return Err(local_only());
+    }
+    let target = base.join(target);
+    // The folder must be a real folder, not the inside of an archive.
+    let dir = target.parent().ok_or_else(local_only)?;
+    if !matches!(vfs::parse(&dir.to_string_lossy()), Loc::Local(_)) {
+        return Err(local_only());
+    }
+    let paths = sources
+        .iter()
+        .map(|s| local_item(s))
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(local_only)?;
+    pack_zip(&paths, &base, &target, opts, obs)
 }
 
 /// A reply from the UI to a waiting job.
@@ -260,6 +314,21 @@ pub fn run_job(ctx: &Ctx, req: &JobRequest, obs: &dyn OpObserver) -> Result<OpSu
                 &cwd,
                 &OverwriteObserver(obs),
             )
+        }
+        JobRequest::Pack {
+            sources,
+            cwd,
+            target,
+            password,
+            encryption,
+            overwrite,
+        } => {
+            let opts = PackOptions {
+                password: password.as_ref().map(|p| p.0.clone()),
+                encryption: *encryption,
+                overwrite: *overwrite,
+            };
+            pack(sources, cwd, target, &opts, obs)
         }
     }
 }
@@ -550,6 +619,117 @@ mod tests {
                 target: "/t/a.zip/x".into()
             }
         );
+    }
+
+    #[test]
+    fn job_request_pack_serde_hides_the_password() {
+        let r: JobRequest = serde_json::from_str(
+            r#"{"kind":"pack","sources":["/t/a"],"cwd":"/t","target":"/t/a.zip","password":"hunter2","encryption":"zipCrypto","overwrite":true}"#,
+        )
+        .unwrap();
+        let JobRequest::Pack {
+            password,
+            encryption,
+            overwrite,
+            ..
+        } = &r
+        else {
+            panic!("{r:?}");
+        };
+        assert_eq!(password.as_ref().unwrap().0.as_str(), "hunter2");
+        assert_eq!((*encryption, *overwrite), (ZipEncryption::ZipCrypto, true));
+        assert!(!format!("{r:?}").contains("hunter2"));
+        // Without a password, encryption and overwrite: no encryption, never overwrite.
+        let r: JobRequest = serde_json::from_str(
+            r#"{"kind":"pack","sources":["/t/a"],"cwd":"/t","target":"/t/a.zip"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            r,
+            JobRequest::Pack {
+                password: None,
+                encryption: ZipEncryption::Aes256,
+                overwrite: false,
+                ..
+            }
+        ));
+    }
+
+    fn pack_req(sources: Vec<String>, cwd: String, target: String) -> JobRequest {
+        JobRequest::Pack {
+            sources,
+            cwd,
+            target,
+            password: None,
+            encryption: ZipEncryption::Aes256,
+            overwrite: false,
+        }
+    }
+
+    #[test]
+    fn pack_job_packs_local_items_including_an_archive_file() {
+        let t = tempfile::tempdir().unwrap();
+        let ctx = Ctx::new(t.path().join("tmp-root"));
+        let tar_path = t.path().join("a.tar");
+        make_tar(&tar_path, &[("x.txt", b"hello")]);
+        std::fs::write(t.path().join("b.txt"), b"bee").unwrap();
+        // A relative target is taken in cwd.
+        let req = pack_req(
+            vec![s(&tar_path), s(&t.path().join("b.txt"))],
+            s(t.path()),
+            "out.zip".into(),
+        );
+        let r = run_job(&ctx, &req, &probe(ConflictAnswer::Cancel)).unwrap();
+        assert_eq!(r.done, 2);
+        // Read back through the zip reader behind fxfm's archive listing.
+        let idx = fxfm_core::archive::read::read_index(
+            &t.path().join("out.zip"),
+            fxfm_core::archive::ArchiveKind::Zip,
+        )
+        .unwrap();
+        let mut names: Vec<_> = idx.entries.iter().map(|e| e.path.as_str()).collect();
+        names.sort();
+        assert_eq!(names, ["a.tar", "b.txt"]);
+        // Packing again into the same name is refused until the UI says overwrite.
+        let e = run_job(&ctx, &req, &probe(ConflictAnswer::Cancel)).unwrap_err();
+        assert_eq!(e, OpError::Exists(s(&t.path().join("out.zip"))));
+    }
+
+    #[test]
+    fn pack_job_refuses_archives_and_servers() {
+        let t = tempfile::tempdir().unwrap();
+        let ctx = Ctx::new(t.path().join("tmp-root"));
+        let tar_path = t.path().join("a.tar");
+        make_tar(&tar_path, &[("x.txt", b"hello")]);
+        let local = s(&t.path().join("b.txt"));
+        std::fs::write(&local, b"bee").unwrap();
+        let refused = OpError::Io(PACK_LOCAL_ONLY.into());
+        for req in [
+            // a source inside an archive
+            pack_req(
+                vec![format!("{}/x.txt", s(&tar_path))],
+                s(&tar_path),
+                s(&t.path().join("o.zip")),
+            ),
+            // a source on a server
+            pack_req(
+                vec!["sftp://web/x".into()],
+                "sftp://web/".into(),
+                s(&t.path().join("o.zip")),
+            ),
+            // a target inside an archive
+            pack_req(
+                vec![local.clone()],
+                s(t.path()),
+                format!("{}/o.zip", s(&tar_path)),
+            ),
+            // a target on a server
+            pack_req(vec![local.clone()], s(t.path()), "sftp://web/o.zip".into()),
+        ] {
+            let e = run_job(&ctx, &req, &probe(ConflictAnswer::Cancel)).unwrap_err();
+            assert_eq!(e, refused, "{req:?}");
+        }
+        assert!(!t.path().join("o.zip").exists());
     }
 
     /// Answers conflicts with `answer`; counts them.

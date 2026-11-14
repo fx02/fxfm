@@ -6,12 +6,14 @@ import {
   audioF3Action,
   cmdlineKeyGoesToPanel,
   comboFromEvent,
+  comboLabel,
   displayLocation,
   discardPendingConfirm,
   escapeStopsAudio,
   isAudioName,
   joinLocation,
   lastComponent,
+  modifierMap,
   passwordArchive,
   pendingEditsDialog as pendingEditsSpec,
   playerStrip,
@@ -20,6 +22,7 @@ import {
   remoteArchives,
   remoteLinkIsFolder,
   seekSeconds,
+  textEditKey,
 } from "./lib.mjs";
 import {
   copyMove,
@@ -32,6 +35,7 @@ import {
   initDialogs,
   makeDir,
   markByMask,
+  packFiles,
   popModal,
   pushModal,
   askPassword,
@@ -54,7 +58,12 @@ import {
 import { Panel, VOLUME_ICON, volumeFor } from "./panel.js";
 
 const T = window.__TAURI__;
-const invoke = T.core.invoke;
+const invoke = (cmd, args) => {
+  const pending = (window.__fxfmPending ??= new Map());
+  const id = Symbol(cmd);
+  pending.set(id, cmd);
+  return T.core.invoke(cmd, args).finally(() => pending.delete(id));
+};
 const win = T.window.getCurrentWindow();
 
 const app = {
@@ -74,6 +83,8 @@ const app = {
 };
 
 const other = (side) => (side === "left" ? "right" : "left");
+/** Which Mac keys act as TC's Alt and Ctrl (Configuration → Keyboard). */
+const keyMods = () => modifierMap(app.settings);
 const activePanel = () => app.panels[app.activeSide];
 
 /** Message in the active panel's status line (until the cursor moves). */
@@ -154,6 +165,7 @@ export const handlers = {
   cm_unmark_mask: () => markByMask(false),
   cm_copy: () => copyMove("copy"),
   cm_move: () => copyMove("move"),
+  cm_packfiles: () => packFiles(),
   cm_delete: () => deleteItems(true),
   cm_delete_permanent: () => deleteItems(false),
   cm_mkdir: () => makeDir(),
@@ -336,9 +348,12 @@ function onKeyDown(e) {
     return;
   }
   if (handleModalKey(e)) return;
+  const mods = keyMods();
   const t = e.target;
   if (t instanceof HTMLElement && t.matches("input, textarea, select")) {
-    if (e.key === "Escape") {
+    if (textEditKey(e, mods)) {
+      // Command+A/C/V/X/Z edit the text even while Command is Alt or Ctrl.
+    } else if (e.key === "Escape") {
       // Back to the panels (they take keys whenever no field has focus).
       e.preventDefault();
       t.blur();
@@ -346,9 +361,9 @@ function onKeyDown(e) {
       e.preventDefault();
       // TC: after running, keys go to the panels again.
       if (runCommandLine()) t.blur();
-    } else if (t === cmdInput() && cmdlineKeyGoesToPanel(comboFromEvent(e))) {
+    } else if (t === cmdInput() && cmdlineKeyGoesToPanel(comboFromEvent(e, mods))) {
       // TC: F-keys, Ctrl/Alt commands and Up/Down keep working while typing.
-      const combo = comboFromEvent(e);
+      const combo = comboFromEvent(e, mods);
       const id = app.keymap[combo];
       if (id) {
         e.preventDefault();
@@ -357,7 +372,7 @@ function onKeyDown(e) {
       } else if (activePanel().handleKey(combo)) {
         e.preventDefault();
       }
-    } else if (app.keymap[comboFromEvent(e)] === "cm_switch_panel") {
+    } else if (app.keymap[comboFromEvent(e, mods)] === "cm_switch_panel") {
       // TC: Tab switches panels even from the command line.
       e.preventDefault();
       t.blur();
@@ -365,7 +380,7 @@ function onKeyDown(e) {
     }
     return;
   }
-  const combo = comboFromEvent(e);
+  const combo = comboFromEvent(e, mods);
   if (!combo) return;
   if (combo === "Escape" && escapeStopsAudio({ player, escapeBound: !!app.keymap[combo], commandText: cmdInput().value })) {
     e.preventDefault();
@@ -568,6 +583,10 @@ function applySettings(s) {
   st.setProperty("--row-h", `${rowH}px`);
   for (const p of Object.values(app.panels)) p.setRowHeight(rowH);
   document.getElementById("cmdline").classList.toggle("off", !s.showCommandLine);
+  // F-key bar entries with a modifier show the Mac keys in use.
+  for (const b of document.querySelectorAll("#fkeys [data-combo]")) {
+    b.textContent = `${comboLabel(b.dataset.combo, modifierMap(s))} ${b.dataset.label}`;
+  }
 }
 
 function updatePrompt() {
@@ -707,6 +726,7 @@ async function main() {
     active: activePanel,
     other: () => app.panels[other(app.activeSide)],
     status,
+    mods: keyMods,
   });
   initServers({
     invoke,
@@ -715,6 +735,7 @@ async function main() {
     other: () => app.panels[other(app.activeSide)],
     panels: () => Object.values(app.panels),
     status,
+    mods: keyMods,
   });
   initConfig({
     invoke,
@@ -728,6 +749,7 @@ async function main() {
       app.boot.systemConflicts = c;
     },
     settings: () => app.settings,
+    mods: keyMods,
     applySettings,
     storage: () => app.boot.storage,
     setStorage: (s) => {
@@ -779,6 +801,7 @@ async function main() {
   });
 
   await win.show();
+  window.__fxfmBooted = true;
   if (boot.pendingEdits?.length) {
     await pendingEditsDialog(boot.pendingEdits).catch((e) => console.error("fxfm: pending edits", e));
   }

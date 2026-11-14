@@ -1,6 +1,6 @@
 [package]
 name = "fxfm-core"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 
 [dependencies]
@@ -15,7 +15,8 @@ filetime = "0.2"
 trash = "5"
 encoding_rs = "0.8"
 rand = "0.8"
-zip = { version = "9", default-features = false, features = ["deflate", "deflate64", "aes-crypto", "time"] }
+# Exact: packing with ZipCrypto uses `zip::unstable` (may change in patch releases).
+zip = { version = "=9.4.1", default-features = false, features = ["deflate", "deflate64", "aes-crypto", "time"] }
 tar = "0.4"
 flate2 = "1"
 sevenz-rust2 = { version = "0.25", default-features = false, features = ["compress", "bzip2", "ppmd", "util"] }

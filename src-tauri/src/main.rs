@@ -28,7 +28,8 @@ fn main() {
             let home = state.home.clone();
             volwatch::start(app.handle().clone(), home);
             let keymap = state::lock(&app.state::<state::AppState>().keymap).clone();
-            app.set_menu(menu::build(app.handle(), &keymap)?)?;
+            let mods = state::lock(&app.state::<state::AppState>().settings).modifiers;
+            app.set_menu(menu::build(app.handle(), &keymap, &mods)?)?;
             Ok(())
         })
         .on_menu_event(menu::on_event)
