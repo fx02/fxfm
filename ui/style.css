@@ -1,0 +1,481 @@
+:root {
+  --c-normal: #ffffff;
+  --c-hidden: #9a9a9a;
+  --c-archive: #ff6a4d;
+  --c-media: #8a8aff;
+  --c-marked: #ff4d4d;
+  --c-background: #000000;
+  --c-cursor: #555555;
+  --font-size: 17px;
+  --row-h: 25px;
+  --chrome: #f0f0f0;
+  --chrome-font: calc(var(--font-size) * 0.88);
+  --active: #2f6fd0;
+}
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--chrome);
+  color: #000;
+  font-family: -apple-system, "Segoe UI", sans-serif;
+  font-size: var(--chrome-font);
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+#main {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.panes {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+}
+
+.pane {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.drives {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 3px 2px;
+}
+
+.drive {
+  padding: 1px 7px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+.drive:hover { border-color: #bbb; }
+.drive.on { background: #cfe3fb; border-color: #8ab4e8; }
+
+.pathrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 2px 3px;
+  white-space: nowrap;
+}
+
+.combo {
+  border: 1px solid #aaa;
+  background: #fff;
+  padding: 0 18px 0 6px;
+  position: relative;
+}
+
+.combo::after {
+  content: "⌄";
+  position: absolute;
+  right: 4px;
+  top: -3px;
+}
+
+.pathrow .free {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tool { padding: 0 4px; border: 1px solid transparent; }
+.tool:hover { border-color: #bbb; }
+
+.cur {
+  background: #fff;
+  font-size: calc(var(--font-size) * 0.82);
+  padding: 1px 6px;
+  border: 1px solid #999;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cur.active { background: var(--active); color: #fff; }
+
+.list {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: var(--c-background);
+  font-size: var(--font-size);
+  line-height: var(--row-h);
+}
+
+.spacer { width: 1px; }
+
+.rows {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  will-change: transform;
+}
+
+.r {
+  height: var(--row-h);
+  padding: 0 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--c-normal);
+}
+
+.r i {
+  font-style: normal;
+  display: inline-block;
+  width: 1.3em;
+}
+
+.r.hid { color: var(--c-hidden); }
+.r.arc { color: var(--c-archive); }
+.r.med { color: var(--c-media); }
+.r.mark { color: var(--c-marked); font-weight: 600; }
+.r.sel { background: var(--c-cursor); }
+.r.droptarget { outline: 2px solid var(--active); outline-offset: -2px; }
+.rows { -webkit-user-drag: none; }
+.pane.droptarget { outline: 2px solid var(--active); outline-offset: 1px; }
+body.dragging, body.dragging * { cursor: copy !important; }
+
+.status {
+  display: flex;
+  gap: 20px;
+  padding: 3px 6px;
+  white-space: nowrap;
+  min-height: 1.3em;
+}
+
+.status .n {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cmd {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px;
+}
+
+.cmd.off { display: none; }
+.cmd .prompt { white-space: nowrap; }
+.cmd input { flex: 1; font-size: var(--chrome-font); }
+
+/* F3 audio: one thin row above the function keys while playing or after an error. */
+.player {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 1px 6px;
+  border-top: 1px solid #bbb;
+  white-space: nowrap;
+  font-size: calc(var(--chrome-font) * 0.92);
+}
+.player.off { display: none; }
+.player.error { color: #b00000; }
+.player .name { overflow: hidden; text-overflow: ellipsis; min-width: 4em; flex: 0 1 auto; }
+.player .clock { font-variant-numeric: tabular-nums; }
+.player .codec { color: #555; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
+.player .bar { flex: 1 1 8em; height: 4px; background: #d0d0d0; cursor: pointer; padding: 3px 0; background-clip: content-box; }
+.player .bar.off { visibility: hidden; }
+.player .bar > div { height: 100%; width: 0; background: var(--active); }
+.player .close { cursor: pointer; padding: 0 4px; }
+.player .close:hover { background: #d0d0d0; }
+
+.fkeys {
+  display: flex;
+  background: #e6e6e6;
+  border-top: 1px solid #bbb;
+}
+
+.fkeys div {
+  flex: 1;
+  text-align: center;
+  padding: 5px 0;
+  border-right: 1px solid #bbb;
+}
+
+.fkeys div:last-child { border-right: none; }
+.fkeys div:active { background: #d0d0d0; }
+
+/* Modal dialogs and popups (TC grey palette). */
+.backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.15);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+}
+
+.backdrop.clear { background: transparent; display: block; }
+
+.dialog {
+  background: #f0f0f0;
+  border: 1px solid #888;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+  min-width: 360px;
+  max-width: 560px;
+}
+
+.dialog .title {
+  background: #fff;
+  padding: 6px 10px;
+  border-bottom: 1px solid #ccc;
+}
+
+.dialog .body { padding: 12px; user-select: text; -webkit-user-select: text; }
+.dialog .body p { margin: 0 0 8px; }
+.dialog .body input { width: 100%; box-sizing: border-box; font-size: var(--chrome-font); }
+
+.dialog .buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0 12px 12px;
+}
+
+.dialog button {
+  font: inherit;
+  min-width: 80px;
+  padding: 3px 10px;
+  background: #e1e1e1;
+  border: 1px solid #adadad;
+}
+
+.dialog button:focus { outline: 1px dotted #000; border-color: #0078d7; }
+
+.popup {
+  position: absolute;
+  background: #fff;
+  border: 1px solid #888;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+  padding: 2px 0;
+  min-width: 200px;
+}
+
+.popup .item { padding: 2px 12px; white-space: nowrap; }
+.popup .item.sel { background: var(--active); color: #fff; }
+
+.dialog .buttons { flex-wrap: wrap; }
+.dialog .body p { overflow-wrap: anywhere; }
+
+/* Progress dialog: current file, file-count bar, byte bar. */
+.dialog.progress { width: 480px; }
+.dialog.progress .body p { margin: 0 0 4px; }
+.dialog.progress .current { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.bar {
+  height: 14px;
+  margin-bottom: 10px;
+  background: #fff;
+  border: 1px solid #adadad;
+}
+
+.bar .fill { height: 100%; width: 0; background: #06b025; }
+
+/* Inline rename (F2) over the cursor row. */
+.list input.rename {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 1;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0 6px 0 calc(6px + 1.3em);
+  border: 1px solid var(--active);
+  font: inherit;
+  font-size: var(--font-size);
+  background: #fff;
+  color: #000;
+  outline: none;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* F3 viewer window */
+body.viewer {
+  display: flex;
+  flex-direction: column;
+  background: #000;
+  color: #fff;
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: auto;
+}
+#vbody {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  position: relative;
+}
+.vtext {
+  margin: 0;
+  padding: 6px 10px;
+  flex: 1;
+  font-family: Menlo, Monaco, monospace;
+  font-size: 14px;
+  line-height: 1.35;
+  white-space: pre;
+  color: #fff;
+  background: #000;
+}
+.vimage {
+  max-width: 100%;
+  max-height: 100%;
+  margin: auto;
+  object-fit: contain;
+}
+.vpdf {
+  flex: 1;
+  border: 0;
+  background: #fff;
+}
+#vfind {
+  background: var(--chrome);
+  padding: 4px 8px;
+}
+#vfind[hidden] { display: none; }
+#vfindinput { width: 260px; }
+#vstatus {
+  background: var(--chrome);
+  color: #000;
+  padding: 3px 10px;
+  font-size: var(--chrome-font);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.vbar {
+  position: absolute;
+  top: 8px;
+  right: 24px;
+  z-index: 1;
+}
+
+/* Hotlist popup (Ctrl+D). */
+.popup .sep { border-top: 1px solid #c8c8c8; margin: 2px 0; }
+.popup .item .arrow { float: right; margin-left: 24px; }
+.popup .item u { text-decoration: underline; }
+
+/* Hotlist configure dialog ("Change directory menu"). */
+.dialog.hotcfg { width: 760px; max-width: 94vw; }
+.hotmain { display: flex; gap: 8px; padding: 8px; }
+.hotleft { flex: 1; min-width: 0; }
+.hothead { display: flex; align-items: center; gap: 4px; margin-bottom: 2px; }
+.hothead > span:first-child { flex: 1; }
+.hothead .mv { min-width: 0; padding: 0 6px; }
+.hothead .count { min-width: 2ch; text-align: right; }
+.hotlist {
+  height: 250px;
+  overflow-y: auto;
+  background: #fff;
+  border: 1px solid #808080;
+  margin-bottom: 8px;
+}
+.hotlist:focus { outline: 1px dotted #000; }
+.hrow { padding: 1px 4px; white-space: pre; cursor: default; }
+.hrow.sel { background: var(--active); color: #fff; }
+.hrow.dropover { outline: 1px dashed #000; outline-offset: -1px; }
+.hotfield { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.hotfield > label:first-child { width: 90px; }
+.hotfield input[type="text"] { flex: 1; min-width: 0; font-size: var(--chrome-font); }
+.hotfield .browse { min-width: 0; padding: 1px 8px; }
+.hotfield.hide label { flex: none; }
+.hotfield.hide .hidechar { flex: none; width: 2.2ch; text-align: center; }
+.hotnote { margin-top: 2px; }
+.hotbtns { display: flex; flex-direction: column; gap: 6px; width: 130px; padding-top: 18px; }
+.hotbtns button { width: 100%; }
+.hotbtns .gap { height: 24px; }
+.hotbtns .def { border-color: #0078d7; }
+
+/* Configuration → Keyboard / Options. */
+.dialog.keycfg { width: 640px; max-width: 94vw; }
+.dialog.optcfg { width: 600px; max-width: 94vw; }
+.keyscroll {
+  max-height: 60vh;
+  overflow-y: auto;
+  background: #fff;
+  border: 1px solid #808080;
+}
+table.keys { width: 100%; border-collapse: collapse; }
+table.keys th { position: sticky; top: 0; background: #e6e6e6; text-align: left; padding: 2px 6px; font-weight: normal; }
+table.keys td { padding: 2px 6px; border-top: 1px solid #eee; vertical-align: middle; }
+table.keys td:last-child { text-align: right; white-space: nowrap; }
+table.keys td button { min-width: 0; padding: 0 8px; }
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin: 1px 4px 1px 0;
+  padding: 0 0 0 6px;
+  background: #e8eef8;
+  border: 1px solid #a8b8d8;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.chip button.x { min-width: 0; padding: 0 5px; border: 0; background: transparent; }
+.warn { background: #fff4b8; border: 1px solid #d8c060; padding: 8px; margin-bottom: 8px; }
+.warn p { margin: 0 0 6px; }
+.dialog.capture .keyname { font-weight: bold; }
+.dialog .note { color: #555; }
+.dialog fieldset { border: 1px solid #c8c8c8; margin: 0 0 8px; padding: 4px 8px 8px; }
+.dialog fieldset .line { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+.dialog fieldset .line input[type="text"] { flex: 1; min-width: 0; width: auto; }
+.dialog fieldset .line select { flex: 1; min-width: 0; }
+.dialog fieldset .opt { display: flex; align-items: center; gap: 4px; margin: 3px 0; }
+.dialog fieldset .opt input[type="number"] { width: 5em; }
+.dialog fieldset .path { margin: 4px 0; overflow-wrap: anywhere; }
+.dialog .colors { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; margin-bottom: 6px; }
+.dialog .colors .color { display: flex; align-items: center; gap: 6px; }
+.dialog .colors input[type="color"] { width: 36px; height: 22px; padding: 0; }
+.dialog fieldset input[type="radio"],
+.dialog fieldset input[type="checkbox"] { width: auto; margin: 0; }
+
+/* Connect to server (Ctrl+F), connection editor, password prompts. */
+.dialog.danger .title { color: #c00000; font-weight: bold; }
+.dialog .error { color: #c00000; }
+.dialog .error[hidden] { display: none; }
+.dialog .body p.gap, .dialog .body label.gap { margin-top: 8px; }
+.dialog .check { display: flex; align-items: center; gap: 4px; }
+.dialog .check input[type="checkbox"] { width: auto; margin: 0; }
+.dialog.srvcfg { width: 600px; }
+.srvlist { height: 300px; }
+.srow .twisty { display: inline-block; width: 1.2em; text-align: center; }
+.dialog.srvask { width: 380px; }
+.dialog.srvedit { width: 520px; }
+.srvfield { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.srvfield[hidden] { display: none; }
+.srvfield > label:first-child { width: 110px; flex: none; }
+.dialog .srvfield input[type="text"],
+.dialog .srvfield input[type="password"] { flex: 1; min-width: 0; width: auto; }
+.dialog .srvfield input.port { width: 7em; flex: none; }
+.dialog .srvfield .check { flex: none; }
+.dialog .srvfield .browse { min-width: 0; padding: 1px 8px; }
+.dialog.busy { min-width: 280px; }
+
+/* Change attributes (cm_chmod). */
+.dialog.chmod { width: 380px; }
+.dialog .srvfield input.octal { width: 6em; flex: none; font-family: monospace; }
+.rwx { display: grid; grid-template-columns: 110px repeat(3, 70px); gap: 4px 0; align-items: center; }
+.rwx .head { text-align: center; color: #555; }
+.dialog .rwx input[type="checkbox"] { width: auto; margin: 0 auto; }

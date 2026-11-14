@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fxfm</title>
+<link rel="stylesheet" href="style.css">
+<script type="module" src="app.js"></script>
+</head>
+<body>
+<div id="main">
+  <div class="panes">
+    <div id="left"></div>
+    <div id="right"></div>
+  </div>
+  <div class="cmd" id="cmdline"><span class="prompt" id="prompt"></span><input id="cmdinput" type="text" spellcheck="false" autocomplete="off" aria-label="Command line"></div>
+  <div class="player off" id="player" aria-live="polite">
+    <span class="name"></span><span class="clock"></span><span class="codec"></span>
+    <div class="bar" title="Click to seek"><div></div></div>
+    <span class="close" title="Stop">×</span>
+  </div>
+  <div class="fkeys" id="fkeys">
+    <div data-cmd="cm_view">F3 View</div>
+    <div data-cmd="cm_edit">F4 Edit</div>
+    <div data-cmd="cm_copy">F5 Copy</div>
+    <div data-cmd="cm_move">F6 Move</div>
+    <div data-cmd="cm_mkdir">F7 NewFolder</div>
+    <div data-cmd="cm_delete">F8 Delete</div>
+    <div data-cmd="cm_exit">Alt+F4 Exit</div>
+  </div>
+</div>
+</body>
+</html>

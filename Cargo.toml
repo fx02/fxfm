@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "src-tauri"]
+
+# Smallest build: symbols stripped, whole-program optimisation, one codegen unit.
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "unwind"
+opt-level = 3

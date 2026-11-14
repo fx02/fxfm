@@ -1,0 +1,1358 @@
+// Ctrl+F "Connect to server": the server tree, the connection editor and the connect flow.
+//
+// Passwords and passphrases live only in <input type="password"> values and in locals of the
+// flow that sends them; they are never logged, never put into other DOM, and the inputs are
+// emptied when their dialog closes.
+
+import {
+  CHMOD_ONLY_REMOTE,
+  chmodStart,
+  chmodSummary,
+  connectionLost,
+  dragStarted,
+  duplicateName,
+  fieldsFor,
+  flattenNodes,
+  folderKey,
+  hostKeyText,
+  lostToShow,
+  masterPartial,
+  modeBits,
+  modeOctal,
+  moveNode,
+  newServerEntry,
+  onRoot,
+  operationPaths,
+  operationSources,
+  parentList,
+  parseModeOctal,
+  parseRemote,
+  portAfterProtocolChange,
+  relocateNode,
+  remoteArchiveOf,
+  remoteArchives,
+  remoteRoot,
+  secretChanges,
+  serverNames,
+  storageMasterPrompt,
+  treeRows,
+  urlDisplayName,
+  validateServer,
+  withModeBit,
+} from "./lib.mjs";
+import { dialog, popModal, pushModal } from "./dialogs.js";
+
+/** {invoke, home, active(), other(), panels(), status(text)} from app.js. */
+let ctx = null;
+
+export function initServers(c) {
+  ctx = c;
+}
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+const errText = (e) => String(e?.message ?? e);
+const OK = [{ label: "OK", value: "ok", default: true }];
+const OK_CANCEL = [
+  { label: "OK", value: "ok", default: true },
+  { label: "Cancel", value: null },
+];
+
+function message(title, text) {
+  return dialog({ title, text: String(text).split("\n"), buttons: OK });
+}
+
+function passwordInput() {
+  const i = el("input");
+  i.type = "password";
+  i.autocomplete = "off";
+  i.spellcheck = false;
+  return i;
+}
+
+function checkbox(label) {
+  const box = el("input");
+  box.type = "checkbox";
+  const l = el("label", "check");
+  l.append(box, ` ${label}`);
+  return { box, label: l };
+}
+
+/** Focusable, visible controls of `root` in Tab order. */
+function focusables(root) {
+  return [...root.querySelectorAll("button:not(:disabled), input:not(:disabled), select:not(:disabled), .hotlist")].filter(
+    (x) => x.offsetParent !== null,
+  );
+}
+
+function cycleFocus(root, e) {
+  const items = focusables(root);
+  if (!items.length) return;
+  let i = items.indexOf(document.activeElement);
+  i = e.shiftKey ? (i <= 0 ? items.length - 1 : i - 1) : (i + 1) % items.length;
+  items[i].focus();
+}
+
+/**
+ * Modal form. `build(body)` fills the body and returns the control to focus first.
+ * buttons: [{label, value, default?, submit?}]. A `submit` button first runs `submit()`, which
+ * returns an error text (shown in the form, which stays open) or null. Resolves with the
+ * button's value; Escape gives null. Password inputs are emptied when the form closes.
+ */
+function form({ title, cls, build, buttons, submit, danger = false }) {
+  return new Promise((resolve) => {
+    const backdrop = el("div", "backdrop");
+    const box = el("div", `dialog${cls ? ` ${cls}` : ""}`);
+    if (danger) box.classList.add("danger");
+    const body = el("div", "body");
+    const row = el("div", "buttons");
+    box.append(el("div", "title", title), body, row);
+    backdrop.append(box);
+    const first = build(body);
+    const err = el("p", "error");
+    err.hidden = true;
+    body.append(err);
+
+    const modal = { el: backdrop };
+    let open = true;
+    let running = false;
+    const finish = (value) => {
+      if (!open) return;
+      open = false;
+      for (const i of box.querySelectorAll('input[type="password"]')) i.value = "";
+      popModal(modal);
+      resolve(value);
+    };
+    const press = async (b) => {
+      if (running || !open) return;
+      if (b.submit && submit) {
+        running = true;
+        let problem = null;
+        try {
+          problem = await submit();
+        } catch (e) {
+          problem = errText(e);
+        } finally {
+          running = false;
+        }
+        if (problem) {
+          err.textContent = problem;
+          err.hidden = false;
+          return;
+        }
+      }
+      finish(b.value);
+    };
+    let def = null;
+    for (const b of buttons) {
+      const btn = el("button", null, b.label);
+      btn.type = "button";
+      btn.addEventListener("click", () => press(b));
+      if (b.default) def = btn;
+      row.append(btn);
+    }
+    modal.onKey = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        if (!running) finish(null);
+      } else if (e.key === "Tab") {
+        e.preventDefault();
+        cycleFocus(box, e);
+      } else if (e.key === "Enter" && !e.isComposing) {
+        e.preventDefault();
+        const f = document.activeElement;
+        (f?.tagName === "BUTTON" && box.contains(f) ? f : def)?.click();
+      }
+    };
+    pushModal(modal);
+    (first ?? def)?.focus();
+  });
+}
+
+/** "Connecting to X…" over everything while `connect` runs (it gives up after 15 s). */
+function busyNote(text) {
+  const backdrop = el("div", "backdrop");
+  const box = el("div", "dialog busy");
+  const body = el("div", "body");
+  body.append(el("p", null, text));
+  box.append(el("div", "title", "Connect"), body);
+  backdrop.append(box);
+  const modal = { el: backdrop, onKey: (e) => e.preventDefault() };
+  // Fast answers (a known host, an open session) do not flash a dialog.
+  const timer = setTimeout(() => pushModal(modal), 250);
+  return () => {
+    clearTimeout(timer);
+    popModal(modal);
+  };
+}
+
+// ---------------------------------------------------------------- master password
+
+/**
+ * Asks for the master password and unlocks the vault (`create`: sets a new one, asked twice).
+ * True when the vault is unlocked afterwards.
+ */
+async function askMaster(create) {
+  let pw;
+  let again;
+  const r = await form({
+    title: "Master password",
+    cls: "srvask",
+    build: (body) => {
+      pw = passwordInput();
+      if (create) {
+        again = passwordInput();
+        body.append(
+          el("p", null, "Saved passwords are encrypted with a master password. Choose one:"),
+          pw,
+          el("p", "gap", "Repeat it:"),
+          again,
+        );
+      } else {
+        body.append(el("p", null, "Enter the master password to use the saved passwords:"), pw);
+      }
+      return pw;
+    },
+    buttons: [
+      { label: "OK", value: "ok", default: true, submit: true },
+      { label: "Cancel", value: null },
+    ],
+    submit: async () => {
+      if (!pw.value) return "The master password cannot be empty";
+      if (create && pw.value !== again.value) return "The passwords do not match";
+      try {
+        if (create) await ctx.invoke("master_set", { old: null, new: pw.value });
+        else await ctx.invoke("master_unlock", { password: pw.value });
+      } catch (e) {
+        if (!masterPartial(errText(e))) return errText(e);
+        // Unlocked anyway; some queued passwords stay queued.
+        await message("Master password", errText(e));
+      }
+      return null;
+    },
+  });
+  return r === "ok";
+}
+
+/** Encrypt…: sets or changes the master password (portable mode only). */
+async function encryptDialog() {
+  const st = await ctx.invoke("master_status");
+  if (st.mode !== "portable") {
+    await message("Encrypt", "In system mode passwords are stored in the macOS Keychain.");
+    return;
+  }
+  let old = null;
+  let pw;
+  let again;
+  const r = await form({
+    title: "Master password",
+    cls: "srvask",
+    build: (body) => {
+      pw = passwordInput();
+      again = passwordInput();
+      if (st.exists) {
+        old = passwordInput();
+        body.append(el("p", null, "Current master password:"), old);
+      } else {
+        body.append(el("p", null, "Saved passwords are encrypted with a master password."));
+      }
+      body.append(el("p", "gap", "New master password:"), pw, el("p", "gap", "Repeat the new master password:"), again);
+      return old ?? pw;
+    },
+    buttons: [
+      { label: "OK", value: "ok", default: true, submit: true },
+      { label: "Cancel", value: null },
+    ],
+    submit: async () => {
+      if (old && !old.value) return "Enter the current master password";
+      if (!pw.value) return "The master password cannot be empty";
+      if (pw.value !== again.value) return "The passwords do not match";
+      try {
+        await ctx.invoke("master_set", { old: old ? old.value : null, new: pw.value });
+      } catch (e) {
+        if (!masterPartial(errText(e))) return errText(e);
+        await message("Master password", errText(e));
+      }
+      return null;
+    },
+  });
+  if (r === "ok") ctx.status("Master password set");
+}
+
+/**
+ * Options → Storage: moves the data folder and the saved passwords to `mode` with
+ * `set_storage_mode`, first asking for the master password the switch needs
+ * (`storageMasterPrompt`): a new one (twice) for Portable, the current one for System when the
+ * password file is locked. Resolves with the backend's StorageChange ({...StorageInfo,
+ * movedSecrets, message}), or null when the prompt was cancelled (nothing changed). Without a
+ * prompt an error is thrown; with one it is shown in the prompt, which stays open to retry.
+ * The typed password lives only in the input (emptied on close) and the one invoke call.
+ */
+export async function moveStorage(mode) {
+  const st = await ctx.invoke("master_status");
+  const need = storageMasterPrompt(st.mode, mode, st);
+  if (need === "none") return ctx.invoke("set_storage_mode", { mode, master: null });
+  let change = null;
+  let pw;
+  let again;
+  const r = await form({
+    title: "Master password",
+    cls: "srvask",
+    build: (body) => {
+      pw = passwordInput();
+      if (need === "new") {
+        again = passwordInput();
+        body.append(
+          el("p", null, "In portable mode saved passwords are encrypted with a master password. Choose one:"),
+          pw,
+          el("p", "gap", "Repeat it:"),
+          again,
+        );
+      } else {
+        body.append(el("p", null, "Enter the master password to move the saved passwords to the macOS Keychain:"), pw);
+      }
+      return pw;
+    },
+    buttons: [
+      { label: "OK", value: "ok", default: true, submit: true },
+      { label: "Cancel", value: null },
+    ],
+    submit: async () => {
+      if (!pw.value) return "The master password cannot be empty";
+      if (need === "new" && pw.value !== again.value) return "The passwords do not match";
+      try {
+        change = await ctx.invoke("set_storage_mode", { mode, master: pw.value });
+      } catch (e) {
+        return `Cannot move settings: ${errText(e)}`;
+      }
+      return null;
+    },
+  });
+  return r === "ok" ? change : null;
+}
+
+// ---------------------------------------------------------------- connect flow
+
+/** Password or passphrase prompt; {secret, save} or null when cancelled. */
+async function askSecret({ title, text, retryText, offerSave, saveDefault }) {
+  let input;
+  let save = null;
+  let result = null;
+  const r = await form({
+    title,
+    cls: "srvask",
+    build: (body) => {
+      if (retryText) body.append(el("p", "error", retryText));
+      input = passwordInput();
+      body.append(el("p", null, text), input);
+      if (offerSave) {
+        save = checkbox("Save password");
+        save.box.checked = saveDefault;
+        save.label.classList.add("gap");
+        body.append(save.label);
+      }
+      return input;
+    },
+    buttons: [
+      { label: "OK", value: "ok", default: true, submit: true },
+      { label: "Cancel", value: null },
+    ],
+    submit: () => {
+      result = { secret: input.value, save: !!save?.box.checked };
+      return null;
+    },
+  });
+  return r === "ok" ? result : null;
+}
+
+function hostKeyDialog(reply) {
+  const changed = !!reply.changedFrom;
+  return dialog({
+    title: changed ? "Host key changed" : "Unknown host key",
+    text: hostKeyText(reply).split("\n"),
+    danger: changed,
+    buttons: changed
+      ? [
+          { label: "Replace and connect", value: "yes" },
+          { label: "Cancel", value: null, default: true },
+        ]
+      : [
+          { label: "Connect", value: "yes", default: true },
+          { label: "Cancel", value: null },
+        ],
+  });
+}
+
+/** The saved server named `name`, or null. */
+function findServer(nodes, name) {
+  return flattenNodes(nodes).find((r) => r.node.kind === "server" && r.node.name === name)?.node ?? null;
+}
+
+/**
+ * Connects `request` ({server} or {url}; see `ConnectRequest`), answering the backend's
+ * questions (host key, password, passphrase, master password) until it is connected.
+ * With `navigate` (default) the active panel opens the server and the other panel its local
+ * folder. Resolves with the server location, or null (cancelled, or the error was shown).
+ */
+export async function connectFlow(request, { navigate = true } = {}) {
+  const req = { save: false, ...request };
+  // Never the URL itself: it may hold a password.
+  const name = req.server ?? urlDisplayName(req.url);
+  let entry = null;
+  if (req.server) {
+    try {
+      entry = findServer((await ctx.invoke("servers_load")).nodes, req.server);
+    } catch {
+      entry = null;
+    }
+  }
+  try {
+    for (;;) {
+      let reply;
+      const done = busyNote(`Connecting to ${name}…`);
+      try {
+        reply = await ctx.invoke("connect", { req });
+      } catch (e) {
+        done();
+        await message("Connect", errText(e));
+        return null;
+      }
+      done();
+      if (reply.kind === "connected") {
+        closedOnPurpose.delete(parseRemote(reply.location)?.server);
+        if (navigate) {
+          await ctx.active().go(reply.location);
+          if (reply.localDir) await ctx.other().go(reply.localDir);
+          ctx.status(`Connected to ${parseRemote(reply.location)?.server ?? name}`);
+        }
+        return reply.location;
+      }
+      if (reply.kind === "hostKey") {
+        if ((await hostKeyDialog(reply)) !== "yes") return null;
+        req.acceptFingerprint = reply.fingerprint;
+      } else if (reply.kind === "needPassword" || reply.kind === "needPassphrase") {
+        const phrase = reply.kind === "needPassphrase";
+        const a = await askSecret({
+          title: phrase ? "Passphrase" : "Password",
+          text: phrase ? `Passphrase for the key of ${name}:` : `Password for ${name}:`,
+          retryText: reply.retry ? (phrase ? "Wrong passphrase, try again" : "Wrong password, try again") : null,
+          offerSave: !!entry,
+          saveDefault: !!entry?.savePassword,
+        });
+        if (!a) return null;
+        if (phrase) req.passphrase = a.secret;
+        else req.password = a.secret;
+        req.save = a.save;
+      } else if (reply.kind === "needMaster") {
+        if (!(await askMaster(reply.create))) return null;
+      } else {
+        await message("Connect", `Unexpected answer: ${reply.kind}`);
+        return null;
+      }
+    }
+  } finally {
+    req.password = undefined;
+    req.passphrase = undefined;
+  }
+}
+
+/** Ctrl+Shift+F: closes the active panel's connection; its panels go to the local folder or home. */
+export async function disconnectActive() {
+  // Inside the temp copy of a server archive counts as being on that server.
+  const archive = remoteArchiveOf(ctx.active().location, remoteArchives);
+  const r = parseRemote(archive ? archive.parent : ctx.active().location);
+  if (!r) {
+    ctx.status("Disconnect: this panel is not on a server");
+    return;
+  }
+  let local = null;
+  try {
+    local = findServer((await ctx.invoke("servers_load")).nodes, r.server)?.localDir ?? null;
+  } catch {
+    local = null;
+  }
+  // Taken before the disconnect: it deletes the temp copies the panels may be inside.
+  const affected = ctx.panels().filter((p) => onServer(p, r.server) || inServerArchive(p, r.server));
+  // A job still running on it may report this name as lost: that is no news to the user.
+  noteDisconnect(r.server);
+  try {
+    await ctx.invoke("disconnect", { name: r.server });
+  } catch (e) {
+    // Still connected: its real losses must show again.
+    closedOnPurpose.delete(r.server);
+    ctx.status(`Disconnect: ${errText(e)}`);
+    return;
+  }
+  for (const p of affected) await p.go(local || ctx.home);
+  forgetArchives(r.server);
+  ctx.status(`Disconnected from ${r.server}`);
+}
+
+// ---------------------------------------------------------------- connection lost
+
+/**
+ * Servers the user closed on purpose and has not connected again since: a job still running
+ * on one may report it as lost (up to 60 s later), which is no news to the user.
+ */
+const closedOnPurpose = new Set();
+/** Server name -> token of its open "connection lost" dialog (one per server). */
+const lostOpen = new Map();
+let lostToken = 0;
+
+function noteDisconnect(name) {
+  closedOnPurpose.add(name);
+}
+
+/**
+ * The connections `names` died (a `connections://changed` `lost` list, or a panel or chmod
+ * error on one server that `connectionLost` recognised). Shows `Connection to <name> lost`
+ * once per server. `origin` ({panel, target}): a panel whose navigation to `target` failed;
+ * after a reconnect it goes there even if it was not on that server yet.
+ */
+export function serversLost(names, origin = null) {
+  for (const name of lostToShow(names, closedOnPurpose)) {
+    if (lostOpen.has(name)) continue;
+    const token = ++lostToken;
+    lostOpen.set(name, token);
+    const release = () => {
+      if (lostOpen.get(name) === token) lostOpen.delete(name);
+    };
+    lostDialog(name, origin, release)
+      .catch((e) => ctx.status(`Connection to ${name}: ${errText(e)}`))
+      .finally(release);
+  }
+}
+
+/** Server named in a panel or chmod error location, when the error means the connection is gone. */
+export function lostServer(message, ...locations) {
+  if (!connectionLost(message)) return null;
+  for (const l of locations) {
+    const r = l ? parseRemote(l) : null;
+    if (r) return r.server;
+  }
+  return null;
+}
+
+const onServer = (p, name) => parseRemote(p.location)?.server === name;
+
+/** The panel is inside the temp copy of an archive that came from server `name`. */
+const inServerArchive = (p, name) => {
+  const archive = remoteArchiveOf(p.location, remoteArchives);
+  return !!archive && parseRemote(archive.parent)?.server === name;
+};
+
+/** Forgets the temp archive copies of `name` (its clean copies were removed on disconnect). */
+function forgetArchives(name) {
+  for (const [copy, parent] of remoteArchives) {
+    if (parseRemote(parent)?.server === name) remoteArchives.delete(copy);
+  }
+}
+
+/**
+ * Reconnect: the connect flow (no navigation; saved or session passwords need no prompt), then
+ * every panel on that server lists its folder again (or the nearest existing one). A cancelled
+ * or failed reconnect asks again. Close (or Escape): the connection is closed and those panels
+ * go home. `release()` ends this dialog's claim on the server before the re-list, so a new
+ * loss during it gets a dialog of its own.
+ */
+async function lostDialog(name, origin, release) {
+  for (;;) {
+    const r = await dialog({
+      title: "Connection lost",
+      text: `Connection to ${name} lost`,
+      buttons: [
+        { label: "Reconnect", value: "reconnect", default: true },
+        { label: "Close", value: null },
+      ],
+    });
+    if (r !== "reconnect") break;
+    const at = await connectFlow({ server: name }, { navigate: false });
+    if (!at) continue;
+    release();
+    const root = remoteRoot(at);
+    let ok = true;
+    for (const p of ctx.panels()) {
+      if (onServer(p, name)) ok = (await p.go(onRoot(root, p.location), p.cursorName ?? undefined)).ok && ok;
+    }
+    if (origin && !onServer(origin.panel, name)) ok = (await origin.panel.go(onRoot(root, origin.target))).ok && ok;
+    if (ok) ctx.status(`Reconnected to ${name}`);
+    return;
+  }
+  noteDisconnect(name);
+  const affected = ctx.panels().filter((p) => onServer(p, name) || inServerArchive(p, name));
+  try {
+    // Also removes the temporary copies of its files.
+    await ctx.invoke("disconnect", { name });
+  } catch (e) {
+    console.error("fxfm: disconnect", e);
+  }
+  for (const p of affected) await p.go(ctx.home);
+  forgetArchives(name);
+}
+
+// ---------------------------------------------------------------- change attributes
+
+const RWX = ["Read", "Write", "Execute"];
+const WHO = ["Owner", "Group", "Others"];
+
+/**
+ * `cm_chmod`: octal field and nine rwx boxes (kept in sync) for the marked entries or the one
+ * under the cursor. The start value is the cursor entry's mode. Folders are not changed
+ * recursively.
+ */
+export async function chmodDialog() {
+  const panel = ctx.active();
+  const sources = operationSources(panel.entries, panel.marked, panel.cursorIndex);
+  if (!sources.length) return;
+  if (!parseRemote(panel.location)) {
+    await message("Change attributes", CHMOD_ONLY_REMOTE);
+    return;
+  }
+  const { paths } = operationPaths(panel.location, sources);
+  const under = panel.cursorEntry && !panel.cursorEntry.up ? panel.cursorEntry : sources[0];
+  let mode = chmodStart(under);
+  let octal;
+  const boxes = [];
+  const paint = () => {
+    modeBits(mode).forEach((on, i) => {
+      boxes[i].checked = on;
+    });
+  };
+  const r = await form({
+    title: "Change attributes",
+    cls: "chmod",
+    build: (body) => {
+      const what = sources.length === 1 ? `"${sources[0].name}"` : `${sources.length} file(s)/dir(s)`;
+      body.append(el("p", null, `Change attributes of ${what}:`));
+      const grid = el("div", "rwx");
+      grid.append(el("span"), ...RWX.map((t) => el("span", "head", t)));
+      WHO.forEach((who, w) => {
+        grid.append(el("span", null, who));
+        for (let k = 0; k < 3; k++) {
+          const i = w * 3 + k;
+          const box = el("input");
+          box.type = "checkbox";
+          box.title = `${who}: ${RWX[k]}`;
+          box.addEventListener("change", () => {
+            mode = withModeBit(mode, i, box.checked);
+            octal.value = modeOctal(mode);
+          });
+          boxes.push(box);
+          grid.append(box);
+        }
+      });
+      octal = el("input");
+      octal.type = "text";
+      octal.spellcheck = false;
+      octal.className = "octal";
+      octal.value = modeOctal(mode);
+      octal.addEventListener("input", () => {
+        const m = parseModeOctal(octal.value);
+        if (m === null) return;
+        mode = m;
+        paint();
+      });
+      const line = el("div", "srvfield");
+      line.append(el("label", null, "Octal:"), octal);
+      body.append(line, grid);
+      if (sources.some((e) => e.isDir)) {
+        body.append(el("p", "note gap", "Only the folders themselves change, not what is inside them."));
+      }
+      paint();
+      return octal;
+    },
+    buttons: [
+      { label: "OK", value: "ok", default: true, submit: true },
+      { label: "Cancel", value: null },
+    ],
+    submit: () => {
+      const m = parseModeOctal(octal.value);
+      if (m === null) return "Enter 1 to 4 octal digits (0–7)";
+      mode = m;
+      return null;
+    },
+  });
+  if (r !== "ok") return;
+  // Every entry is tried; only a lost connection stops (the rest would fail the same way).
+  const results = [];
+  let lost = null;
+  for (const [i, location] of paths.entries()) {
+    try {
+      await ctx.invoke("chmod", { location, mode });
+      results.push({ name: sources[i].name, error: null });
+    } catch (e) {
+      lost = lostServer(errText(e), location);
+      if (lost) break;
+      results.push({ name: sources[i].name, error: errText(e) });
+    }
+  }
+  // Entries that changed are unmarked; failed (or not tried) ones stay marked.
+  for (const res of results) if (res.error === null) panel.marked.delete(res.name);
+  await Promise.all(ctx.panels().map((p) => p.refresh()));
+  panel.render();
+  if (lost) {
+    serversLost([lost]);
+    return;
+  }
+  const summary = chmodSummary(results);
+  if (summary) await message("Change attributes", summary.join("\n"));
+  else ctx.status(`Attributes set to ${modeOctal(mode)}`);
+}
+
+// ---------------------------------------------------------------- secrets of the editor
+
+/**
+ * After the editor saved `entry` (replacing `before`): stores or deletes secrets as
+ * `secretChanges` says. Every call is sent first; a locked vault queues them in the backend,
+ * and the master password is then asked once, which applies the whole queue.
+ */
+async function storeSecrets(entry, before, secret) {
+  let master = null; // {create} of a needMaster reply
+  const errors = [];
+  for (const [kind, value] of secretChanges(before, entry, secret)) {
+    try {
+      await ctx.invoke("server_secret_set", { id: entry.id, kind, secret: value });
+    } catch (e) {
+      if (e?.kind === "needMaster") master = { create: e.create };
+      else errors.push(errText(e));
+    }
+  }
+  if (master && !(await askMaster(master.create))) {
+    ctx.status("The password change waits until you enter the master password");
+  }
+  if (errors.length) await message("Password", errors.join("\n"));
+}
+
+// ---------------------------------------------------------------- connection editor
+
+const PROTOCOLS = [
+  ["sftp", "SFTP"],
+  ["scp", "SCP"],
+  ["ftp", "FTP"],
+  ["ftps", "FTPS"],
+];
+const AUTHS = [
+  ["password", "Password"],
+  ["key", "Key file"],
+  ["keyPassphrase", "Key file + passphrase"],
+];
+const ENCODINGS = [
+  ["utf8", "UTF-8"],
+  ["windows1250", "Windows-1250"],
+  ["latin1", "Latin-1"],
+];
+
+function select(options, value) {
+  const s = el("select");
+  for (const [v, label] of options) {
+    const o = el("option", null, label);
+    o.value = v;
+    s.append(o);
+  }
+  s.value = value;
+  return s;
+}
+
+function textInput(value) {
+  const i = el("input");
+  i.type = "text";
+  i.spellcheck = false;
+  i.autocomplete = "off";
+  i.value = value ?? "";
+  return i;
+}
+
+/** The native file/folder picker; the chosen path, or null (cancelled, or the error was shown). */
+async function pick(options) {
+  try {
+    const p = await window.__TAURI__.dialog.open(options);
+    return typeof p === "string" ? p : null;
+  } catch (e) {
+    await message("Choose", errText(e));
+    return null;
+  }
+}
+
+function smallButton(label, fn) {
+  const b = el("button", "browse", label);
+  b.type = "button";
+  b.addEventListener("click", fn);
+  return b;
+}
+
+/**
+ * The "Edit connection" dialog. `save(entry)` stores the list with the entry and returns an
+ * error text or null. Resolves with {entry, secret} after a successful save, else null.
+ */
+async function editServer(initial, { otherNames, save }) {
+  const f = {};
+  const rows = {};
+  let result = null;
+  const line = (name, label, ...controls) => {
+    const r = el("div", "srvfield");
+    r.append(el("label", null, label), ...controls);
+    rows[name] = r;
+    return r;
+  };
+  let protocol = initial.protocol;
+
+  const sync = () => {
+    const vis = fieldsFor(f.protocol.value);
+    for (const [k, r] of Object.entries(rows)) r.hidden = !vis.has(k);
+    const auth = vis.has("auth") ? f.auth.value : "password";
+    if (auth === "password") rows.keyPath.hidden = true;
+    if (auth === "key") rows.savePassword.hidden = true;
+    f.secret.placeholder = auth === "keyPassphrase" ? "Passphrase" : "Password";
+    if (initial.savePassword) f.secret.placeholder += " (leave empty to keep the saved one)";
+    f.secret.disabled = !f.savePassword.checked;
+  };
+
+  const r = await form({
+    title: "Edit connection",
+    cls: "srvedit",
+    build: (body) => {
+      f.name = textInput(initial.name);
+      f.protocol = select(PROTOCOLS, initial.protocol);
+      f.host = textInput(initial.host);
+      f.port = el("input", "port");
+      f.port.type = "number";
+      f.port.min = "1";
+      f.port.max = "65535";
+      f.port.value = String(initial.port);
+      f.user = textInput(initial.user);
+      f.auth = select(AUTHS, initial.auth);
+      f.keyPath = textInput(initial.keyPath);
+      const chooseKey = smallButton("Choose…", async () => {
+        const p = await pick({ defaultPath: `${ctx.home}/.ssh` });
+        if (p) f.keyPath.value = p;
+      });
+      const importKey = smallButton("Import…", async () => {
+        const p = await pick({ defaultPath: `${ctx.home}/.ssh` });
+        if (!p) return;
+        try {
+          f.keyPath.value = await ctx.invoke("import_key", { path: p });
+        } catch (e) {
+          await message("Import key", errText(e));
+        }
+      });
+      importKey.title = "Copy the key into fxfm's data folder (keys/), readable only by you";
+      const sp = checkbox("Save password");
+      f.savePassword = sp.box;
+      f.savePassword.checked = initial.savePassword;
+      f.secret = passwordInput();
+      f.remoteDir = textInput(initial.remoteDir);
+      f.localDir = textInput(initial.localDir);
+      const chooseLocal = smallButton("Choose…", async () => {
+        const p = await pick({ directory: true, defaultPath: f.localDir.value || ctx.home });
+        if (p) f.localDir.value = p;
+      });
+      const legacy = checkbox("Allow legacy algorithms (ssh-rsa/SHA1)");
+      f.legacyAlgorithms = legacy.box;
+      f.legacyAlgorithms.checked = initial.legacyAlgorithms;
+      const passive = checkbox("Passive mode");
+      f.ftpPassive = passive.box;
+      f.ftpPassive.checked = initial.ftpPassive;
+      f.ftpEncoding = select(ENCODINGS, initial.ftpEncoding);
+
+      body.append(
+        line("name", "Name:", f.name),
+        line("protocol", "Protocol:", f.protocol),
+        line("host", "Host:", f.host),
+        line("port", "Port:", f.port),
+        line("user", "User:", f.user),
+        line("auth", "Authentication:", f.auth),
+        line("keyPath", "Key file:", f.keyPath, chooseKey, importKey),
+        line("savePassword", "", sp.label, f.secret),
+        line("remoteDir", "Remote dir:", f.remoteDir),
+        line("localDir", "Local dir:", f.localDir, chooseLocal),
+        line("legacyAlgorithms", "", legacy.label),
+        line("ftpPassive", "", passive.label),
+        line("ftpEncoding", "Name encoding:", f.ftpEncoding),
+      );
+      f.protocol.addEventListener("change", () => {
+        f.port.value = String(portAfterProtocolChange(protocol, f.protocol.value, f.port.value));
+        protocol = f.protocol.value;
+        sync();
+      });
+      f.auth.addEventListener("change", sync);
+      f.savePassword.addEventListener("change", sync);
+      sync();
+      return f.name;
+    },
+    buttons: [
+      { label: "OK", value: "ok", default: true, submit: true },
+      { label: "Cancel", value: null },
+    ],
+    submit: async () => {
+      const ssh = fieldsFor(f.protocol.value).has("auth");
+      const auth = ssh ? f.auth.value : "password";
+      const entry = {
+        ...initial,
+        name: f.name.value.trim(),
+        protocol: f.protocol.value,
+        host: f.host.value.trim(),
+        port: Number(f.port.value),
+        user: f.user.value.trim(),
+        auth,
+        keyPath: f.keyPath.value.trim() || null,
+        savePassword: auth !== "key" && f.savePassword.checked,
+        remoteDir: f.remoteDir.value.trim() || null,
+        localDir: f.localDir.value.trim() || null,
+        legacyAlgorithms: f.legacyAlgorithms.checked,
+        ftpPassive: f.ftpPassive.checked,
+        ftpEncoding: f.ftpEncoding.value,
+      };
+      const problem = validateServer(entry, otherNames);
+      if (problem) return problem;
+      if (!Number.isInteger(entry.port) || entry.port < 1 || entry.port > 65535) {
+        return "Port must be a number from 1 to 65535";
+      }
+      const failed = await save(entry);
+      if (failed) return failed;
+      result = { entry, secret: entry.savePassword ? f.secret.value : "" };
+      return null;
+    },
+  });
+  return r === "ok" ? result : null;
+}
+
+// ---------------------------------------------------------------- Connect to server dialog
+
+const HELP = [
+  "Enter or double click: connect to the selected server. Esc: close.",
+  "↑/↓: move the selection. ←/→: close or open a folder. Ctrl+↑/↓ or dragging with the mouse: change the order. Delete: delete the entry.",
+  "New URL…: connect once without saving it, e.g. sftp://user@host:2222/var/www (also scp://, ftp:// and ftps://). Without a user name FTP logs in as anonymous.",
+  "Saved passwords are kept in the macOS Keychain (system mode) or, in portable mode, encrypted with a master password (Encrypt…).",
+];
+
+/** Folders the user closed in the tree (folder names from the root), for this run. */
+const closedFolders = new Set();
+
+/** Ctrl+F: the TC "Connect to server" dialog. Changes are saved right away. */
+export async function showConnect() {
+  let work;
+  try {
+    work = await ctx.invoke("servers_load");
+  } catch (e) {
+    ctx.status(`Cannot read the server list: ${errText(e)}`);
+    return;
+  }
+  let sel = null;
+  let busy = false;
+  /** Node at `path`, or null when the path no longer exists (after a reload or a delete). */
+  const nodeAt = (p) => {
+    if (!p) return null;
+    let l = work.nodes;
+    for (const i of p.slice(0, -1)) {
+      l = l[i]?.children;
+      if (!l) return null;
+    }
+    return l[p[p.length - 1]] ?? null;
+  };
+  const isOpen = (node, path) => !closedFolders.has(folderKey(work.nodes, path));
+  const visible = () => treeRows(work.nodes, isOpen);
+
+  const backdrop = el("div", "backdrop");
+  const box = el("div", "dialog hotcfg srvcfg");
+  const list = el("div", "hotlist srvlist");
+  list.tabIndex = 0;
+  const modal = { el: backdrop };
+  const close = () => popModal(modal);
+
+  /** Saves a changed copy of the list; `change(next)` returns the new selection (or undefined). */
+  const commit = async (change) => {
+    const next = structuredClone(work);
+    const newSel = change(next);
+    try {
+      await ctx.invoke("servers_save", { list: next });
+    } catch (e) {
+      await message("Connect to server", errText(e));
+      return false;
+    }
+    work = next;
+    if (newSel !== undefined) sel = newSel;
+    render();
+    return true;
+  };
+
+  const reload = async () => {
+    try {
+      work = await ctx.invoke("servers_load");
+    } catch (e) {
+      ctx.status(`Cannot read the server list: ${errText(e)}`);
+    }
+    render();
+  };
+
+  /** Runs one action at a time; the dialog ignores input meanwhile. */
+  const guarded = (fn) => async () => {
+    if (busy) return;
+    busy = true;
+    try {
+      await fn();
+    } catch (e) {
+      await message("Connect to server", errText(e));
+    } finally {
+      busy = false;
+      if (backdrop.isConnected && !box.contains(document.activeElement)) list.focus();
+    }
+  };
+
+  let rowDrag = null; // {path, x, y, active}
+  let rowEls = [];
+  const buttons = {};
+
+  function render() {
+    if (sel && !nodeAt(sel)) sel = null;
+    // The selection is always visible: open the folders above it (a new or dropped entry).
+    for (let k = 1; sel && k < sel.length; k++) closedFolders.delete(folderKey(work.nodes, sel.slice(0, k)));
+    const rows = visible();
+    if (!sel && rows.length) sel = rows[0].path;
+    list.replaceChildren();
+    rowEls = [];
+    for (const r of rows) {
+      const row = el("div", "hrow srow");
+      row.style.paddingLeft = `${4 + r.depth * 16}px`;
+      if (r.node.kind === "folder") {
+        const open = isOpen(r.node, r.path);
+        const arrow = el("span", "twisty", open ? "▾" : "▸");
+        arrow.addEventListener("click", (e) => {
+          e.stopPropagation();
+          toggle(r.path);
+        });
+        row.append(arrow, `📁 ${r.node.name}`);
+        row.classList.add("folder");
+      } else {
+        row.append(el("span", "twisty", ""), `☁️ ${r.node.name}`);
+      }
+      rowEls.push({ row, path: r.path });
+      row.addEventListener("mousedown", (e) => {
+        if (e.button === 0) rowDrag = { path: r.path, x: e.clientX, y: e.clientY, active: false };
+      });
+      row.addEventListener("click", () => {
+        // No rebuild here: a detached row would swallow the dblclick that follows.
+        sel = r.path;
+        paintSel();
+        list.focus();
+      });
+      row.addEventListener("dblclick", () => {
+        sel = r.path;
+        if (r.node.kind === "folder") toggle(r.path);
+        else doConnect();
+      });
+      list.append(row);
+    }
+    paintSel();
+  }
+
+  function paintSel() {
+    const key = sel?.join(".");
+    for (const { row, path } of rowEls) row.classList.toggle("sel", path.join(".") === key);
+    list.querySelector(".sel")?.scrollIntoView({ block: "nearest" });
+    const n = nodeAt(sel);
+    buttons.connect.disabled = n?.kind !== "server";
+    buttons.duplicate.disabled = n?.kind !== "server";
+    buttons.edit.disabled = !n;
+    buttons.del.disabled = !n;
+  }
+
+  function toggle(path) {
+    const node = nodeAt(path);
+    if (node?.kind !== "folder") return;
+    const key = folderKey(work.nodes, path);
+    if (closedFolders.has(key)) closedFolders.delete(key);
+    else closedFolders.add(key);
+    sel = path;
+    render();
+  }
+
+  const moveSel = (delta) => {
+    const rows = visible();
+    if (!rows.length) return;
+    const i = sel ? rows.findIndex((r) => r.path.join(".") === sel.join(".")) : -1;
+    sel = rows[Math.min(rows.length - 1, Math.max(0, i + delta))].path;
+    paintSel();
+  };
+
+  /** ←: close an open folder, else go to the parent folder. →: open a closed folder, else into it. */
+  const leftRight = (right) => {
+    const n = nodeAt(sel);
+    if (!n) return;
+    const isFolder = n.kind === "folder";
+    const open = isFolder && isOpen(n, sel);
+    if (right) {
+      if (isFolder && !open) toggle(sel);
+      else if (isFolder && n.children.length) {
+        sel = [...sel, 0];
+        paintSel();
+      }
+    } else if (open) {
+      toggle(sel);
+    } else if (sel.length > 1) {
+      sel = sel.slice(0, -1);
+      paintSel();
+    }
+  };
+
+  const move = (delta) =>
+    commit((next) => {
+      if (!sel) return undefined;
+      return moveNode(next.nodes, sel, delta);
+    });
+
+  /** Where a new node goes: into the selected folder, else after the selection, else at the end. */
+  const insertAt = (nodes, node, after = sel) => {
+    const at = after ? parentList(nodes, after)[after[after.length - 1]] : null;
+    if (at?.kind === "folder") {
+      at.children.push(node);
+      return [...after, at.children.length - 1];
+    }
+    if (after) {
+      parentList(nodes, after).splice(after[after.length - 1] + 1, 0, node);
+      return [...after.slice(0, -1), after[after.length - 1] + 1];
+    }
+    nodes.push(node);
+    return [nodes.length - 1];
+  };
+
+  /** Opens the editor for `entry` (new when `isNew`), saving it at `place(nodes, entry)`. */
+  const editEntry = async (entry, before, place) => {
+    const otherNames = serverNames(work.nodes).filter((n) => before === null || n !== before.name);
+    let newSel;
+    const r = await editServer(entry, {
+      otherNames,
+      save: async (e) => {
+        const next = structuredClone(work);
+        newSel = place(next.nodes, e);
+        try {
+          await ctx.invoke("servers_save", { list: next });
+        } catch (err) {
+          return errText(err);
+        }
+        work = next;
+        return null;
+      },
+    });
+    if (!r) return null;
+    sel = newSel;
+    render();
+    await storeSecrets(r.entry, before, r.secret);
+    return r.entry;
+  };
+
+  const newConnection = () =>
+    editEntry(newServerEntry(crypto.randomUUID()), null, (nodes, e) => insertAt(nodes, e));
+
+  const duplicate = async () => {
+    const n = nodeAt(sel);
+    if (n?.kind !== "server") return;
+    const at = sel;
+    const copy = {
+      ...structuredClone(n),
+      id: crypto.randomUUID(),
+      name: duplicateName(n.name, serverNames(work.nodes)),
+      savePassword: false,
+    };
+    const saved = await editEntry(copy, null, (nodes, e) => {
+      parentList(nodes, at).splice(at[at.length - 1] + 1, 0, e);
+      return [...at.slice(0, -1), at[at.length - 1] + 1];
+    });
+    if (saved) ctx.status(`Copied to '${saved.name}' without the password`);
+  };
+
+  const askFolderName = async (title, initial) => {
+    const r = await dialog({ title, text: "Folder name:", input: initial, buttons: OK_CANCEL });
+    return r?.text.trim() || null;
+  };
+
+  const newFolder = async () => {
+    const name = await askFolderName("New folder", "");
+    if (name) await commit((next) => insertAt(next.nodes, { kind: "folder", name, children: [] }));
+  };
+
+  const edit = async () => {
+    const n = nodeAt(sel);
+    if (!n) return;
+    if (n.kind === "folder") {
+      const name = await askFolderName("Rename folder", n.name);
+      if (name && name !== n.name) {
+        const at = sel;
+        const wasClosed = closedFolders.delete(folderKey(work.nodes, at));
+        await commit((next) => {
+          parentList(next.nodes, at)[at[at.length - 1]].name = name;
+          return at;
+        });
+        if (wasClosed) closedFolders.add(folderKey(work.nodes, at));
+        render();
+      }
+      return;
+    }
+    const at = sel;
+    await editEntry(structuredClone(n), n, (nodes, e) => {
+      parentList(nodes, at)[at[at.length - 1]] = e;
+      return at;
+    });
+  };
+
+  const del = async () => {
+    const n = nodeAt(sel);
+    if (!n) return;
+    let text;
+    if (n.kind === "server") text = `Delete '${n.name}' and its saved password?`;
+    else {
+      const count = serverNames(n.children).length;
+      text = count
+        ? `Delete folder '${n.name}' and the ${count} server(s) in it, with their saved passwords?`
+        : `Delete folder '${n.name}'?`;
+    }
+    const ok = await dialog({
+      title: "Delete",
+      text,
+      buttons: [
+        { label: "Delete", value: "yes", default: true },
+        { label: "Cancel", value: null },
+      ],
+    });
+    if (ok !== "yes") return;
+    const at = sel;
+    await commit((next) => {
+      const l = parentList(next.nodes, at);
+      const i = at[at.length - 1];
+      l.splice(i, 1);
+      if (l.length) return [...at.slice(0, -1), Math.min(i, l.length - 1)];
+      return at.length > 1 ? at.slice(0, -1) : null;
+    });
+  };
+
+  const doConnect = guarded(async () => {
+    const n = nodeAt(sel);
+    if (n?.kind === "folder") return toggle(sel);
+    if (n?.kind !== "server") return;
+    const loc = await connectFlow({ server: n.name, save: false });
+    // Success closes the dialog (the next Ctrl+F reads the list again, with any
+    // "Save password" the connection turned on); otherwise the user is back here.
+    if (loc) close();
+    else await reload();
+  });
+
+  const newUrl = guarded(async () => {
+    const r = await dialog({
+      title: "New URL",
+      text: "URL (sftp://user@host:port/path):",
+      input: "sftp://",
+      select: { start: 7, end: 7 },
+      buttons: OK_CANCEL,
+    });
+    const url = r?.text.trim();
+    if (!url) return;
+    const loc = await connectFlow({ url, save: false });
+    if (loc) close();
+  });
+
+  const help = () => dialog({ title: "Help", text: HELP, buttons: OK });
+
+  // Reordering by mouse, not HTML5 drag & drop: the webview's native drag-drop handler
+  // takes the drag events, so HTML5 `drop` never fires (same as the hotlist dialog).
+  const rowAt = (x, y) => {
+    const hit = document.elementFromPoint(x, y)?.closest(".srow");
+    return rowEls.find((r) => r.row === hit) ?? null;
+  };
+  const paintDropRow = (target) => {
+    for (const r of rowEls) r.row.classList.toggle("dropover", r === target);
+  };
+  backdrop.addEventListener("mousemove", (e) => {
+    if (!rowDrag) return;
+    if (!(e.buttons & 1)) {
+      rowDrag = null;
+      paintDropRow(null);
+      return;
+    }
+    if (!rowDrag.active) rowDrag.active = dragStarted(rowDrag, { x: e.clientX, y: e.clientY });
+    if (rowDrag.active) paintDropRow(rowAt(e.clientX, e.clientY));
+  });
+  backdrop.addEventListener("mouseup", (e) => {
+    const d = rowDrag;
+    rowDrag = null;
+    paintDropRow(null);
+    if (!d?.active || busy) return;
+    const target = rowAt(e.clientX, e.clientY);
+    if (!target) return;
+    guarded(() => commit((next) => relocateNode(next.nodes, d.path, target.path) ?? undefined))();
+  });
+
+  const mkBtn = (key, label, fn) => {
+    const b = el("button", null, label);
+    b.type = "button";
+    b.addEventListener("click", fn);
+    if (key) buttons[key] = b;
+    return b;
+  };
+  const side = el("div", "hotbtns");
+  const connectBtn = mkBtn("connect", "Connect", doConnect);
+  connectBtn.classList.add("def");
+  side.append(
+    connectBtn,
+    mkBtn(null, "New connection…", guarded(newConnection)),
+    mkBtn(null, "New URL…", newUrl),
+    mkBtn("duplicate", "Duplicate entry…", guarded(duplicate)),
+    mkBtn(null, "New folder…", guarded(newFolder)),
+    mkBtn("edit", "Edit…", guarded(edit)),
+    mkBtn("del", "Delete", guarded(del)),
+    mkBtn(null, "Encrypt…", guarded(encryptDialog)),
+    el("div", "gap"),
+    mkBtn(null, "Cancel", close),
+    mkBtn(null, "Help", help),
+  );
+  const left = el("div", "hotleft");
+  left.append(el("div", "hothead", "Servers:"), list);
+  const main = el("div", "hotmain");
+  main.append(left, side);
+  box.append(el("div", "title", "Connect to server"), main);
+  backdrop.append(box);
+
+  modal.onKey = (e) => {
+    if (busy) {
+      e.preventDefault();
+      return;
+    }
+    const onList = document.activeElement === list;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      close();
+    } else if (e.key === "Tab") {
+      e.preventDefault();
+      cycleFocus(box, e);
+    } else if (e.ctrlKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+      e.preventDefault();
+      guarded(() => move(e.key === "ArrowUp" ? -1 : 1))();
+    } else if (onList && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+      e.preventDefault();
+      moveSel(e.key === "ArrowUp" ? -1 : 1);
+    } else if (onList && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+      e.preventDefault();
+      leftRight(e.key === "ArrowRight");
+    } else if (onList && (e.key === "Home" || e.key === "End")) {
+      e.preventDefault();
+      const rows = visible();
+      if (rows.length) sel = rows[e.key === "Home" ? 0 : rows.length - 1].path;
+      paintSel();
+    } else if (onList && e.key === "Delete") {
+      e.preventDefault();
+      guarded(del)();
+    } else if (e.key === "Enter" && !e.isComposing) {
+      e.preventDefault();
+      const f = document.activeElement;
+      if (f?.tagName === "BUTTON" && box.contains(f)) f.click();
+      else doConnect();
+    }
+  };
+
+  render();
+  pushModal(modal);
+  list.focus();
+}

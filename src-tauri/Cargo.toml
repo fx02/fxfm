@@ -1,0 +1,34 @@
+[package]
+name = "fxfm"
+version = "0.1.0"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+fxfm-core = { path = "../crates/core" }
+tauri = { version = "2", features = ["protocol-asset"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+dirs = "7"
+libc = "0.2"
+notify = "8"
+sha2 = "0.10"
+# F3 audio output (decoding is in fxfm-core).
+cpal = "0.18.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+security-framework = "3"
+# Drag & drop: native drag-out of panel files, file icons and the modifier state at drop time.
+drag = "2.1.1"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSData", "NSDictionary", "NSGeometry"] }
+objc2-app-kit = { version = "0.3", features = ["NSEvent", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphicsContext", "NSWorkspace", "objc2-core-graphics"] }
+
+[dev-dependencies]
+tar = "0.4"
+tempfile = "3"

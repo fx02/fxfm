@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>fxfm – glavni prozor</title>
+<style>
+body{margin:0;background:#2b2b2b;font-family:-apple-system,"Segoe UI",sans-serif;color:#ddd;padding:24px}
+h2{margin:0 0 4px;color:#fff;font-weight:600}
+.sub{color:#aaa;margin:0 0 18px;font-size:14px}
+.macbar{background:#1e1e1e;color:#eee;font-size:13px;padding:4px 12px;display:flex;gap:18px;border-radius:6px 6px 0 0}
+.macbar b{font-weight:700}
+.win{border:1px solid #555;border-radius:8px;overflow:hidden;max-width:1300px;box-shadow:0 10px 40px #0008}
+.title{background:#3c3c3c;display:flex;align-items:center;padding:7px 10px;font-size:13px;color:#ddd}
+.dots span{display:inline-block;width:12px;height:12px;border-radius:50%;margin-right:7px}
+.title .t{flex:1;text-align:center;margin-right:60px}
+.panes{display:flex;background:#f0f0f0;gap:4px;padding:3px}
+.pane{flex:1;display:flex;flex-direction:column;min-width:0}
+.drives{display:flex;gap:4px;padding:3px 2px;font-size:15px;color:#000}
+.drives span{padding:1px 7px;border:1px solid transparent;border-radius:3px}
+.drives span.on{background:#cfe3fb;border-color:#8ab4e8}
+.path{display:flex;align-items:center;background:#f0f0f0;color:#000;font-size:15px;gap:8px;padding:2px 2px 3px}
+.combo{border:1px solid #aaa;background:#fff;padding:0 18px 0 6px;position:relative}
+.combo:after{content:"⌄";position:absolute;right:4px;top:-3px}
+.path .free{flex:1}
+.cur{background:#fff;color:#000;font-size:14px;padding:1px 6px;border:1px solid #999}
+.cur.active{background:#2f6fd0;color:#fff}
+.list{background:#000;height:420px;font-family:"Segoe UI",-apple-system,sans-serif;font-size:17px;line-height:25px;padding:2px 0;overflow:hidden}
+.r{padding:0 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#fff}
+.r i{font-style:normal;display:inline-block;width:22px}
+.sel{background:#555}
+.hid{color:#9a9a9a}.arc{color:#ff6a4d}.med{color:#8a8aff}.mark{color:#ff4d4d;font-weight:600}
+.status{display:flex;background:#f0f0f0;color:#000;font-size:15px;padding:3px 6px;gap:20px}
+.status .n{flex:1}
+.cmd{background:#f0f0f0;color:#000;display:flex;align-items:center;font-size:14px;padding:2px 6px;gap:6px}
+.cmd input{flex:1;font-size:14px}
+.fkeys{display:flex;background:#e6e6e6;border-top:1px solid #bbb}
+.fkeys div{flex:1;text-align:center;color:#000;font-size:15px;padding:5px 0;border-right:1px solid #bbb}
+.notes{max-width:1300px;margin-top:18px;font-size:14px;line-height:1.6;color:#ccc}
+.notes b{color:#fff}
+</style></head><body>
+<h2>fxfm – glavni prozor (prijedlog)</h2>
+<p class="sub">TC raspored 1:1, prilagođen macOS-u. Lijevi panel je lokalni disk, desni je spojen na SFTP server.</p>
+
+<div class="macbar"><b></b><b>fxfm</b><span>Files</span><span>Mark</span><span>Commands</span><span>Net</span><span>Show</span><span>Configuration</span><span>Start</span><span>Help</span></div>
+<div class="win">
+ <div class="title"><div class="dots"><span style="background:#ff5f57"></span><span style="background:#febc2e"></span><span style="background:#28c840"></span></div><div class="t">fxfm 0.1</div></div>
+ <div class="panes">
+  <div class="pane">
+   <div class="drives"><span class="on">💻 /</span><span>🏠 ~</span><span>💾 USB-SANDISK</span><span>🌐 smb-share</span><span>📀 Install macOS</span><span>☁️ web-1</span></div>
+   <div class="path"><span class="combo">💻 /</span><span class="free">[Macintosh HD]  288.594.048 k of 971.350.180 k free</span><span>/</span><span>..</span></div>
+   <div class="cur active">~/Documents/PVT/*.*</div>
+   <div class="list">
+    <div class="r"><i>⬆</i>[..]</div>
+    <div class="r mark"><i>📁</i>[!archive]</div>
+    <div class="r sel"><i>📁</i>[linux]</div>
+    <div class="r"><i>📁</i>[fxmp]</div>
+    <div class="r"><i>📁</i>[keys]</div>
+    <div class="r"><i>📁</i>[projects]</div>
+    <div class="r hid"><i>📄</i>.DS_Store</div>
+    <div class="r"><i>📄</i>deploy.sh</div>
+    <div class="r"><i>📄</i>notes.md</div>
+    <div class="r med"><i>🎬</i>holiday-video-2025.mp4</div>
+    <div class="r arc"><i>🗜</i>site-backup.tgz</div>
+    <div class="r arc"><i>🗜</i>patch_2026_11.7z</div>
+    <div class="r"><i>📕</i>Release_Notes_v1.2.0.pdf</div>
+    <div class="r"><i>📄</i>server notes.txt</div>
+   </div>
+   <div class="status"><span class="n">[linux]</span><span>&lt;DIR&gt;</span><span>05.11.2026 15:56</span><span>drwxr-xr-x</span></div>
+  </div>
+  <div class="pane">
+   <div class="drives"><span>💻 /</span><span>🏠 ~</span><span>💾 USB-SANDISK</span><span>🌐 smb-share</span><span>📀 Install macOS</span><span class="on">☁️ web-1</span></div>
+   <div class="path"><span class="combo">☁️ web-1</span><span class="free">[sftp://root@192.0.2.10]</span><span>/</span><span>..</span></div>
+   <div class="cur">sftp://web-1/var/www/html/*.*</div>
+   <div class="list">
+    <div class="r"><i>⬆</i>[..]</div>
+    <div class="r"><i>📁</i>[api]</div>
+    <div class="r"><i>📁</i>[assets]</div>
+    <div class="r"><i>📁</i>[vendor]</div>
+    <div class="r hid"><i>📄</i>.htaccess</div>
+    <div class="r"><i>📄</i>config.php</div>
+    <div class="r"><i>📄</i>index.php</div>
+    <div class="r arc"><i>🗜</i>release-1.2.0.tar.gz</div>
+    <div class="r"><i>📄</i>restart.sh</div>
+   </div>
+   <div class="status"><span class="n">config.php</span><span>4.218</span><span>02.11.2026 09:14</span><span>-rw-r--r--</span></div>
+  </div>
+ </div>
+ <div class="cmd"><span>~/Documents/PVT&gt;</span><input placeholder="naredbeni redak (izvršava se u Terminalu)"></div>
+ <div class="fkeys"><div>F3 View</div><div>F4 Edit</div><div>F5 Copy</div><div>F6 Move</div><div>F7 NewFolder</div><div>F8 Delete</div><div>⌥F4 Exit</div></div>
+</div>
+
+<div class="notes">
+<b>Što je drugačije nego na Windowsu:</b><br>
+• <b>Traka diskova</b> umjesto c/d/l/m: <code>/</code> (Macintosh HD), <code>~</code> (home), zatim svaki montirani volumen iz <code>/Volumes</code> (USB, DMG, SMB share). Aktivne SFTP/FTP veze isto se pojavljuju kao "disk" (☁️ web-1).<br>
+• <b>Meni</b> (Files, Mark, Commands, Net, Show, Configuration, Start) nalazi se u gornjoj traci macOS-a, kao kod svake Mac aplikacije, a ne unutar prozora.<br>
+• <b>Status</b> umjesto Windows atributa (----, --h-) pokazuje Unix prava (drwxr-xr-x).<br>
+• <b>Boje</b> (moja pretpostavka): mape u [zagradama] bijele, skrivene datoteke sive, arhive narančasto-crvene, video/audio ljubičasto-plave, označene datoteke (Insert/Space) crvene. Sve se može podesiti.<br>
+• <b>Naredbeni redak</b> iznad F-tipki je kao u TC-u, ali opcionalan.
+</div>
+</body></html>

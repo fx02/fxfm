@@ -1,0 +1,288 @@
+[
+  {
+    "event": {
+      "code": "F5",
+      "key": "F5",
+      "ctrlKey": false,
+      "altKey": false,
+      "shiftKey": false,
+      "metaKey": false
+    },
+    "combo": "F5"
+  },
+  {
+    "event": {
+      "code": "F6",
+      "key": "F6",
+      "ctrlKey": false,
+      "altKey": false,
+      "shiftKey": true,
+      "metaKey": false
+    },
+    "combo": "Shift+F6"
+  },
+  {
+    "event": {
+      "code": "F1",
+      "key": "¡",
+      "ctrlKey": false,
+      "altKey": true,
+      "shiftKey": false,
+      "metaKey": false
+    },
+    "combo": "Alt+F1"
+  },
+  {
+    "event": {
+      "code": "KeyD",
+      "key": "d",
+      "ctrlKey": true,
+      "altKey": false,
+      "shiftKey": false,
+      "metaKey": false
+    },
+    "combo": "Ctrl+D"
+  },
+  {
+    "event": {
+      "code": "F7",
+      "key": "F7",
+      "ctrlKey": false,
+      "altKey": true,
+      "shiftKey": false,
+      "metaKey": false
+    },
+    "combo": "Alt+F7"
+  },
+  {
+    "event": {
+      "code": "NumpadAdd",
+      "key": "+",
+      "ctrlKey": false,
+      "altKey": false,
+      "shiftKey": false,
+      "metaKey": false
+    },
+    "combo": "NumAdd"
+  },
+  {
+    "event": {
+      "code": "NumpadSubtract",
+      "key": "-",
+      "ctrlKey": false,
+      "altKey": false,
+      "shiftKey": false,
+      "metaKey": false
+    },
+    "combo": "NumSubtract"
+  },
+  {
+    "event": {
+      "code": "NumpadMultiply",
+      "key": "*",
+      "ctrlKey": false,
+      "altKey": false,
+      "shiftKey": false,
+      "metaKey": false
+    },
+    "combo": "NumMultiply"
+  },
+  {
+    "event": {
+      "code": "Equal",
+      "key": "=",
+      "ctrlKey": true,
+      "altKey": false,
+      "shiftKey": false,
+      "metaKey": false
+    },
+    "combo": "Ctrl+="
+  },
+  {
+    "event": {
+      "code": "Minus",
+      "key": "-",
+      "ctrlKey": true,
+      "altKey": false,
+      "shiftKey": false,
+      "metaKey": false
+    },
+    "combo": "Ctrl+-"
+  },
+  {
+    "event": {
+      "code": "Backslash",
+      "key": "\\",
+      "ctrlKey": true,
+      "altKey": false,
+      "shiftKey": false,
+      "metaKey": false
+    },
+    "combo": "Ctrl+\\"
+  },
+  {
+    "event": {
+      "code": "Digit8",
+      "key": "8",
+      "ctrlKey": true,
+      "altKey": false,
+      "shiftKey": false,
+      "metaKey": false
+    },
+    "combo": "Ctrl+8"
+  },
+  {
+    "event": {
+      "code": "Space",
+      "key": " ",
+      "ctrlKey": false,
+      "altKey": false,
+      "shiftKey": false,
+      "metaKey": false
+    },
+    "combo": "Space"
+  },
+  {
+    "event": {
+      "code": "Tab",
+      "key": "Tab",
+      "ctrlKey": false,
+      "altKey": false,
+      "shiftKey": false,
+      "metaKey": false
+    },
+    "combo": "Tab"
+  },
+  {
+    "event": {
+      "code": "Enter",
+      "key": "Enter",
+      "ctrlKey": false,
+      "altKey": false,
+      "shiftKey": false,
+      "metaKey": false
+    },
+    "combo": "Enter"
+  },
+  {
+    "event": {
+      "code": "NumpadEnter",
+      "key": "Enter",
+      "ctrlKey": false,
+      "altKey": false,
+      "shiftKey": false,
+      "metaKey": false
+    },
+    "combo": "Enter"
+  },
+  {
+    "event": {
+      "code": "Enter",
+      "key": "Enter",
+      "ctrlKey": true,
+      "altKey": false,
+      "shiftKey": false,
+      "metaKey": false
+    },
+    "combo": "Ctrl+Enter"
+  },
+  {
+    "event": {
+      "code": "PageUp",
+      "key": "PageUp",
+      "ctrlKey": true,
+      "altKey": false,
+      "shiftKey": false,
+      "metaKey": false
+    },
+    "combo": "Ctrl+PageUp"
+  },
+  {
+    "event": {
+      "code": "Delete",
+      "key": "Delete",
+      "ctrlKey": false,
+      "altKey": false,
+      "shiftKey": false,
+      "metaKey": false
+    },
+    "combo": "Delete"
+  },
+  {
+    "event": {
+      "code": "Delete",
+      "key": "Delete",
+      "ctrlKey": false,
+      "altKey": false,
+      "shiftKey": true,
+      "metaKey": false
+    },
+    "combo": "Shift+Delete"
+  },
+  {
+    "event": {
+      "code": "Backspace",
+      "key": "Backspace",
+      "ctrlKey": false,
+      "altKey": false,
+      "shiftKey": false,
+      "metaKey": false
+    },
+    "combo": "Backspace"
+  },
+  {
+    "event": {
+      "code": "KeyA",
+      "key": "å",
+      "ctrlKey": false,
+      "altKey": true,
+      "shiftKey": false,
+      "metaKey": false
+    },
+    "combo": "Alt+A"
+  },
+  {
+    "event": {
+      "code": "KeyF",
+      "key": "f",
+      "ctrlKey": true,
+      "altKey": false,
+      "shiftKey": true,
+      "metaKey": false
+    },
+    "combo": "Ctrl+Shift+F"
+  },
+  {
+    "event": {
+      "code": "ArrowUp",
+      "key": "ArrowUp",
+      "ctrlKey": true,
+      "altKey": false,
+      "shiftKey": false,
+      "metaKey": false
+    },
+    "combo": "Ctrl+Up"
+  },
+  {
+    "event": {
+      "code": "KeyQ",
+      "key": "q",
+      "ctrlKey": false,
+      "altKey": false,
+      "shiftKey": false,
+      "metaKey": true
+    },
+    "combo": "Cmd+Q"
+  },
+  {
+    "event": {
+      "code": "F4",
+      "key": "F4",
+      "ctrlKey": true,
+      "altKey": true,
+      "shiftKey": true,
+      "metaKey": true
+    },
+    "combo": "Ctrl+Alt+Shift+Cmd+F4"
+  }
+]
