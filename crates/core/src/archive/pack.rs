@@ -1,4 +1,11 @@
-//! Packing local files into a new zip archive (Files → Pack files, Alt+F5).
+//! Packing local files into an archive (Files → Pack files, Alt+F5).
+//!
+//! [`pack`] picks the format from the target's name: zip is written here directly (with
+//! optional encryption); tar, tar.gz and 7z are made by adding the sources to an empty
+//! archive with the archive rewriter; gz compresses one file. With `add`, the sources go
+//! into an existing archive instead (the rewriter; never encrypted).
+//!
+//! For zip:
 //!
 //! The sources are listed first (folders recursively, links as links), then the archive is
 //! written to a hidden `.<name>.fxfm-<pid>-<n>.part` next to the target and renamed into
@@ -22,8 +29,9 @@ use zip::unstable::write::FileOptionsExt;
 use zip::write::FullFileOptions;
 use zip::ZipWriter;
 
-use super::write::{sibling, TempFile};
+use super::write::{rewrite, sibling, Edit, TempFile};
 use super::ziptime::entry_options;
+use super::{ArchiveError, ArchiveKind, IndexCache};
 use crate::ops::{
     location, rename_noreplace, ErrorAnswer, OpError, OpObserver, OpSummary, Progress,
 };
@@ -64,6 +72,9 @@ pub struct PackOptions {
     pub encryption: ZipEncryption,
     /// Replace an existing target; otherwise an existing target is `OpError::Exists`.
     pub overwrite: bool,
+    /// Add the sources into the existing archive `target` (replacing entries of the same
+    /// name) instead of making a new one.
+    pub add: bool,
 }
 
 impl fmt::Debug for PackOptions {
@@ -72,8 +83,211 @@ impl fmt::Debug for PackOptions {
             .field("password", &self.password.as_ref().map(|_| "<redacted>"))
             .field("encryption", &self.encryption)
             .field("overwrite", &self.overwrite)
+            .field("add", &self.add)
             .finish()
     }
+}
+
+/// Refusal for a password on a format other than zip.
+pub const PASSWORD_ZIP_ONLY: &str = "Only ZIP archives can have a password";
+/// Refusal for a .gz of anything but one file.
+pub const GZ_ONE_FILE: &str =
+    "A .gz file holds exactly one file; choose ZIP, TAR, TAR.GZ, TAR.BZ2, TAR.XZ or 7Z for more";
+
+/// Packs `sources` into `target` in the format its name says (zip, tar, tar.gz/tgz, gz, 7z),
+/// or adds them to the existing archive `target` with `opts.add`. Entry names are the
+/// sources' paths relative to `base`. A cancel gives `Ok(summary)` with `cancelled` set.
+pub fn pack(
+    sources: &[PathBuf],
+    base: &Path,
+    target: &Path,
+    opts: &PackOptions,
+    obs: &dyn OpObserver,
+) -> Result<OpSummary, OpError> {
+    let name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let kind = ArchiveKind::from_name(&name).ok_or_else(|| {
+        OpError::Io(format!("{name}: unknown archive type (use .zip, .tar, .tgz, .tar.gz, .tar.bz2, .tar.xz, .gz or .7z)"))
+    })?;
+    let password = opts.password.as_deref().is_some_and(|p| !p.is_empty());
+    if opts.add {
+        if password {
+            return Err(OpError::Io(
+                "Adding to an archive cannot encrypt; leave the password empty".into(),
+            ));
+        }
+        if kind == ArchiveKind::Gz {
+            return Err(OpError::Io(GZ_ONE_FILE.into()));
+        }
+        check_not_into_itself(sources, target)?;
+        if !target.is_file() {
+            return Err(OpError::Io(format!(
+                "{}: no such archive",
+                target.display()
+            )));
+        }
+        return add_to(sources, base, target, kind, obs);
+    }
+    if kind == ArchiveKind::Zip {
+        return pack_zip(sources, base, target, opts, obs);
+    }
+    if password {
+        return Err(OpError::Io(PASSWORD_ZIP_ONLY.into()));
+    }
+    check_not_into_itself(sources, target)?;
+    check_target(target, opts.overwrite)?;
+    let part = create_part(target)?;
+    let made = if kind == ArchiveKind::Gz {
+        gzip_one(sources, &part.path, obs)
+    } else {
+        write_empty(&part.path, kind).and_then(|()| add_to(sources, base, &part.path, kind, obs))
+    };
+    let summary = made?;
+    if summary.cancelled {
+        return Ok(summary);
+    }
+    place(part, target, opts.overwrite)?;
+    Ok(summary)
+}
+
+/// Moves the finished `.part` to `target` and syncs the folder.
+fn place(mut part: TempFile, target: &Path, overwrite: bool) -> Result<(), OpError> {
+    if let Ok(f) = File::open(&part.path) {
+        crate::ops::sync_file(&f).map_err(|e| fail(target, e))?;
+    }
+    let placed = if overwrite {
+        fs::rename(&part.path, target)
+    } else {
+        rename_noreplace(&part.path, target)
+    };
+    match placed {
+        Ok(()) => part.done = true,
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            return Err(OpError::Exists(target.to_string_lossy().into_owned()))
+        }
+        Err(e) => return Err(fail(target, e)),
+    }
+    if let Some(dir) = target.parent() {
+        if let Err(e) = File::open(dir).and_then(|d| d.sync_all()) {
+            log::warn!("fsync of {} failed: {e}", dir.display());
+        }
+    }
+    Ok(())
+}
+
+/// An archive of `kind` with no entries at `path` (which exists, empty).
+fn write_empty(path: &Path, kind: ArchiveKind) -> Result<(), OpError> {
+    let f = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|e| fail(path, e))?;
+    let done = match kind {
+        k @ (ArchiveKind::Tar | ArchiveKind::TarGz | ArchiveKind::TarBz2 | ArchiveKind::TarXz) => {
+            super::TarSink::new(k, f)
+                .and_then(|sink| tar::Builder::new(sink).into_inner())
+                .and_then(|sink| sink.finish())
+                .map(drop)
+        }
+        ArchiveKind::SevenZ => {
+            drop(f);
+            sevenz_rust2::ArchiveWriter::create(path)
+                .map_err(|e| io::Error::other(e.to_string()))
+                .and_then(|w| w.finish().map(drop))
+        }
+        ArchiveKind::Zip | ArchiveKind::Gz => Ok(()),
+    };
+    done.map_err(|e| fail(path, e))
+}
+
+/// Adds `sources` to the archive `archive` (named relative to `base`) with the rewriter.
+fn add_to(
+    sources: &[PathBuf],
+    base: &Path,
+    archive: &Path,
+    kind: ArchiveKind,
+    obs: &dyn OpObserver,
+) -> Result<OpSummary, OpError> {
+    let edits = sources
+        .iter()
+        .map(|src| {
+            entry_name(src, base).map(|inner| Edit::Add {
+                src: src.clone(),
+                inner,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    match rewrite(archive, kind, &edits, &IndexCache::new(), obs) {
+        Ok(()) => Ok(OpSummary {
+            done: sources.len() as u64,
+            ..OpSummary::default()
+        }),
+        Err(ArchiveError::Cancelled) => Ok(OpSummary {
+            cancelled: true,
+            ..OpSummary::default()
+        }),
+        Err(e) => Err(OpError::Io(format!("{}: {e}", archive.display()))),
+    }
+}
+
+/// Gzips the one file in `sources` into `part` (the gzip header keeps its name and time).
+fn gzip_one(sources: &[PathBuf], part: &Path, obs: &dyn OpObserver) -> Result<OpSummary, OpError> {
+    let [src] = sources else {
+        return Err(OpError::Io(GZ_ONE_FILE.into()));
+    };
+    let md = fs::metadata(src).map_err(|e| fail(src, e))?;
+    if !md.is_file() {
+        return Err(OpError::Io(GZ_ONE_FILE.into()));
+    }
+    let mut input = File::open(src).map_err(|e| fail(src, e))?;
+    let out = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(part)
+        .map_err(|e| fail(part, e))?;
+    let name = src
+        .file_name()
+        .map(|n| n.as_encoded_bytes().to_vec())
+        .unwrap_or_default();
+    let mut enc = flate2::GzBuilder::new()
+        .filename(name)
+        .mtime(u32::try_from(md.mtime()).unwrap_or(0))
+        .write(BufWriter::new(out), flate2::Compression::default());
+    let mut progress = Progress {
+        total_files: 1,
+        total_bytes: md.len(),
+        current: src.to_string_lossy().into_owned(),
+        ..Progress::default()
+    };
+    obs.progress(&progress);
+    let mut buf = vec![0u8; BUF];
+    loop {
+        if obs.is_cancelled() {
+            return Ok(OpSummary {
+                cancelled: true,
+                ..OpSummary::default()
+            });
+        }
+        let n = match input.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(fail(src, e)),
+        };
+        enc.write_all(&buf[..n]).map_err(|e| fail(part, e))?;
+        progress.done_bytes += n as u64;
+        obs.progress(&progress);
+    }
+    let bw = enc.finish().map_err(|e| fail(part, e))?;
+    bw.into_inner().map_err(|e| fail(part, e.error()))?;
+    progress.done_files = 1;
+    obs.progress(&progress);
+    Ok(OpSummary {
+        done: 1,
+        ..OpSummary::default()
+    })
 }
 
 /// Packs `sources` (local paths) into the zip `target`. Entry names are the sources' paths
@@ -144,7 +358,7 @@ fn pack_impl(
         }
         Err(Fatal::Op(e)) => return Err(e),
     };
-    out.sync_all().map_err(|e| fail(target, e))?;
+    crate::ops::sync_file(&out).map_err(|e| fail(target, e))?;
     drop(out);
     if obs.is_cancelled() {
         p.summary.cancelled = true;
@@ -608,6 +822,7 @@ mod tests {
             password: None,
             encryption: ZipEncryption::Aes256,
             overwrite: false,
+            add: false,
         }
     }
 
@@ -616,6 +831,7 @@ mod tests {
             password: Some(Zeroizing::new(pw.to_string())),
             encryption,
             overwrite: false,
+            add: false,
         }
     }
 
@@ -795,11 +1011,12 @@ mod tests {
         let before = std::fs::read(&archive).unwrap();
         let opts = PackOptions {
             overwrite: true,
+            add: false,
             ..plain()
         };
         let into_itself = OpError::Io(INTO_ITSELF.into());
         let e = pack_zip(
-            &[archive.clone()],
+            std::slice::from_ref(&archive),
             &base,
             &archive,
             &opts,
@@ -957,6 +1174,7 @@ mod tests {
         o.cancel_on_progress = true;
         let opts = PackOptions {
             overwrite: true,
+            add: false,
             ..plain()
         };
         let s = pack_zip(&sources, &base, &target, &opts, &o).unwrap();
@@ -982,6 +1200,7 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), b"old archive");
         let opts = PackOptions {
             overwrite: true,
+            add: false,
             ..plain()
         };
         pack_zip(&sources, &base, &target, &opts, &obs(ErrorAnswer::Cancel)).unwrap();
@@ -1071,5 +1290,147 @@ mod tests {
         let secret: Secret = serde_json::from_str(r#""hunter2""#).unwrap();
         assert_eq!(secret.0.as_str(), "hunter2");
         assert_eq!(format!("{secret:?}"), "<redacted>");
+    }
+
+    fn names_in(archive: &Path, kind: ArchiveKind) -> Vec<String> {
+        let idx = crate::archive::read::read_index(archive, kind).unwrap();
+        idx.entries.iter().map(|e| e.path.clone()).collect()
+    }
+
+    #[test]
+    fn packs_tar_tgz_and_7z_by_name() {
+        for (file, kind) in [
+            ("out.tar", ArchiveKind::Tar),
+            ("out.tgz", ArchiveKind::TarGz),
+            ("out.tar.gz", ArchiveKind::TarGz),
+            ("out.tar.bz2", ArchiveKind::TarBz2),
+            ("out.tar.xz", ArchiveKind::TarXz),
+            ("out.7z", ArchiveKind::SevenZ),
+        ] {
+            let (t, base, sources) = tree();
+            let target = t.path().join(file);
+            let s = pack(
+                &sources,
+                &base,
+                &target,
+                &plain(),
+                &obs(ErrorAnswer::Cancel),
+            )
+            .unwrap();
+            assert!(!s.cancelled, "{file}");
+            let names = names_in(&target, kind);
+            for n in ["a.txt", "sub", "sub/b.txt", "sub/empty", ".hidden", UNICODE] {
+                assert!(
+                    names.iter().any(|x| x == n),
+                    "{file}: {n} missing in {names:?}"
+                );
+            }
+            // No .part left behind.
+            let left: Vec<_> = std::fs::read_dir(t.path())
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_name().to_string_lossy().contains(".fxfm-"))
+                .collect();
+            assert!(left.is_empty(), "{file}: {left:?}");
+        }
+    }
+
+    #[test]
+    fn gz_packs_one_file_only() {
+        let (t, base, _) = tree();
+        let target = t.path().join("a.txt.gz");
+        pack(
+            &[base.join("a.txt")],
+            &base,
+            &target,
+            &plain(),
+            &obs(ErrorAnswer::Cancel),
+        )
+        .unwrap();
+        let mut d = flate2::read::GzDecoder::new(File::open(&target).unwrap());
+        let mut body = String::new();
+        d.read_to_string(&mut body).unwrap();
+        assert_eq!(body, "alpha");
+        assert_eq!(d.header().unwrap().filename(), Some(&b"a.txt"[..]));
+        let two = pack(
+            &[base.join("a.txt"), base.join(".hidden")],
+            &base,
+            &t.path().join("two.gz"),
+            &plain(),
+            &obs(ErrorAnswer::Cancel),
+        );
+        assert!(matches!(two, Err(OpError::Io(m)) if m == GZ_ONE_FILE));
+        assert!(!t.path().join("two.gz").exists());
+    }
+
+    #[test]
+    fn password_only_for_zip_and_unknown_names_refused() {
+        let (t, base, sources) = tree();
+        let r = pack(
+            &sources,
+            &base,
+            &t.path().join("x.tar"),
+            &with_password("pw", ZipEncryption::Aes256),
+            &obs(ErrorAnswer::Cancel),
+        );
+        assert!(matches!(r, Err(OpError::Io(m)) if m == PASSWORD_ZIP_ONLY));
+        let r = pack(
+            &sources,
+            &base,
+            &t.path().join("x.rar"),
+            &plain(),
+            &obs(ErrorAnswer::Cancel),
+        );
+        assert!(matches!(r, Err(OpError::Io(m)) if m.contains("unknown archive type")));
+    }
+
+    #[test]
+    fn adds_to_an_existing_archive() {
+        for file in ["out.zip", "out.tar", "out.tgz", "out.7z"] {
+            let (t, base, _) = tree();
+            let target = t.path().join(file);
+            let kind = ArchiveKind::from_name(file).unwrap();
+            pack(
+                &[base.join("a.txt")],
+                &base,
+                &target,
+                &plain(),
+                &obs(ErrorAnswer::Cancel),
+            )
+            .unwrap();
+            let add = PackOptions {
+                add: true,
+                ..plain()
+            };
+            let s = pack(
+                &[base.join("sub")],
+                &base,
+                &target,
+                &add,
+                &obs(ErrorAnswer::Cancel),
+            )
+            .unwrap();
+            assert_eq!(s.done, 1, "{file}");
+            let names = names_in(&target, kind);
+            for n in ["a.txt", "sub/b.txt", "sub/empty"] {
+                assert!(
+                    names.iter().any(|x| x == n),
+                    "{file}: {n} missing in {names:?}"
+                );
+            }
+        }
+        let (t, base, _) = tree();
+        let add = PackOptions {
+            add: true,
+            ..plain()
+        };
+        let r = pack(
+            &[base.join("a.txt")],
+            &base,
+            &t.path().join("none.zip"),
+            &add,
+            &obs(ErrorAnswer::Cancel),
+        );
+        assert!(matches!(r, Err(OpError::Io(m)) if m.contains("no such archive")));
     }
 }

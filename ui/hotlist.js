@@ -23,7 +23,10 @@ import {
 import { dialog, popModal, pushModal } from "./dialogs.js";
 import { connectFlow } from "./servers.js";
 
-/** {invoke, hotlist(), setHotlist(h), home, active(), other(), status(text), mods()} from app.js. */
+/**
+ * {invoke, hotlist(), setHotlist(h), home, active(), folder() (the active panel's real folder:
+ * for a search results list, the folder it came from), other(), status(text), mods()} from app.js.
+ */
 let ctx = null;
 
 export function initHotlist(c) {
@@ -77,7 +80,7 @@ async function choose(item) {
 
 async function addCurrentDir() {
   const h = structuredClone(ctx.hotlist());
-  addCurrent(h.nodes, ctx.active().location, ctx.home);
+  addCurrent(h.nodes, ctx.folder(), ctx.home);
   await save(h);
   ctx.status(`Added to hotlist: ${h.nodes[h.nodes.length - 1].title}`);
 }
@@ -255,7 +258,7 @@ export function configureHotlist() {
   const browse = mkBtn("🔍", async () => {
     const dir = await window.__TAURI__.dialog.open({
       directory: true,
-      defaultPath: pickerStart(cmd.value, ctx.home, ctx.active().location),
+      defaultPath: pickerStart(cmd.value, ctx.home, ctx.folder()),
     });
     if (typeof dir === "string" && sel && nodeAt(sel).kind === "item") {
       cmd.value = `cd ${dir}`;
@@ -412,7 +415,7 @@ export function configureHotlist() {
     return r?.text.trim() || null;
   };
   const addItem = async () => {
-    const loc = ctx.active().location;
+    const loc = ctx.folder();
     const tmp = [];
     addCurrent(tmp, loc, ctx.home);
     const t = await askTitle("Add Item", tmp[0].title);

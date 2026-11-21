@@ -90,13 +90,18 @@ pub fn rewrite(
                 write_zip(&file, &real, &plan.items, out, &mut prog)
             })
         }
-        ArchiveKind::Tar | ArchiveKind::TarGz => {
-            let gz = kind == ArchiveKind::TarGz;
-            let (items, hard_links) = tar_items(open_tar(&file, &real, gz)?)?;
+        ArchiveKind::Tar | ArchiveKind::TarGz | ArchiveKind::TarBz2 | ArchiveKind::TarXz => {
+            let (items, hard_links) = tar_items(open_tar(&file, &real, kind)?)?;
             let plan = Plan { items, hard_links }.apply_all(edits)?;
             let mut prog = Prog::new(obs, &plan.items, 0);
             commit(&real, &orig, obs, |out| {
-                write_tar(open_tar(&file, &real, gz)?, &plan.items, out, gz, &mut prog)
+                write_tar(
+                    open_tar(&file, &real, kind)?,
+                    &plan.items,
+                    out,
+                    kind,
+                    &mut prog,
+                )
             })
         }
         ArchiveKind::SevenZ => rewrite_7z(&real, &orig, &index, edits, obs),
@@ -597,7 +602,7 @@ fn commit(
         .open(&tmp.path)
         .map_err(io)?;
     let f = write(f)?;
-    f.sync_all().map_err(io)?;
+    crate::ops::sync_file(&f).map_err(io)?;
     drop(f);
     if obs.is_cancelled() {
         return Err(ArchiveError::Cancelled);
@@ -730,13 +735,9 @@ fn write_zip(
 
 // ---- tar ----
 
-fn open_tar(file: &File, real: &Path, gz: bool) -> Result<Box<dyn Read>, ArchiveError> {
+fn open_tar(file: &File, real: &Path, kind: ArchiveKind) -> Result<Box<dyn Read>, ArchiveError> {
     let f = BufReader::new(reopen(file, real)?);
-    Ok(if gz {
-        Box::new(flate2::read::GzDecoder::new(f))
-    } else {
-        Box::new(f)
-    })
+    Ok(super::tar_decoder(kind, f))
 }
 
 fn tar_skip(ty: tar::EntryType) -> bool {
@@ -794,22 +795,12 @@ fn write_tar(
     src: impl Read,
     items: &[Item],
     out: File,
-    gz: bool,
+    kind: ArchiveKind,
     prog: &mut Prog,
 ) -> Result<File, ArchiveError> {
-    if gz {
-        let enc =
-            flate2::write::GzEncoder::new(BufWriter::new(out), flate2::Compression::default());
-        let enc = tar_entries(src, items, tar::Builder::new(enc), prog)?;
-        into_file(enc.finish().map_err(|e| prog.fail(e))?)
-    } else {
-        into_file(tar_entries(
-            src,
-            items,
-            tar::Builder::new(BufWriter::new(out)),
-            prog,
-        )?)
-    }
+    let sink = super::TarSink::new(kind, BufWriter::new(out)).map_err(|e| prog.fail(e))?;
+    let sink = tar_entries(src, items, tar::Builder::new(sink), prog)?;
+    into_file(sink.finish().map_err(|e| prog.fail(e))?)
 }
 
 fn tar_entries<W: Write>(
@@ -1323,10 +1314,12 @@ mod tests {
         }
     }
 
-    const KINDS: [ArchiveKind; 4] = [
+    const KINDS: [ArchiveKind; 6] = [
         ArchiveKind::Zip,
         ArchiveKind::Tar,
         ArchiveKind::TarGz,
+        ArchiveKind::TarBz2,
+        ArchiveKind::TarXz,
         ArchiveKind::SevenZ,
     ];
 
@@ -1343,6 +1336,8 @@ mod tests {
             ArchiveKind::Zip => "a.zip",
             ArchiveKind::Tar => "a.tar",
             ArchiveKind::TarGz => "a.tar.gz",
+            ArchiveKind::TarBz2 => "a.tar.bz2",
+            ArchiveKind::TarXz => "a.tar.xz",
             ArchiveKind::Gz => "a.txt.gz",
             ArchiveKind::SevenZ => "a.7z",
         }

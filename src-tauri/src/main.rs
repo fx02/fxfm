@@ -5,11 +5,16 @@ mod audio;
 mod commands;
 mod dragdrop;
 mod editwatch;
+mod fnkey;
+#[cfg(target_os = "macos")]
+mod fsevents;
 mod jobs;
 mod keychain;
 mod launch;
 mod menu;
 mod remote;
+mod search;
+mod smb;
 mod state;
 mod translocation;
 mod volwatch;
@@ -27,6 +32,11 @@ fn main() {
             let _ = state.handle.set(app.handle().clone());
             let home = state.home.clone();
             volwatch::start(app.handle().clone(), home);
+            fnkey::start(app.handle().clone());
+            let search = state::lock(&state.settings).search.clone();
+            state.search.start_live();
+            state.search.start(&search);
+            state.search.start_ticker();
             let keymap = state::lock(&app.state::<state::AppState>().keymap).clone();
             let mods = state::lock(&app.state::<state::AppState>().settings).modifiers;
             app.set_menu(menu::build(app.handle(), &keymap, &mods)?)?;
@@ -38,6 +48,7 @@ fn main() {
             commands::list_dir,
             commands::list_volumes,
             commands::nearest_existing,
+            commands::paths_exist,
             commands::dir_size,
             commands::set_session,
             commands::save_session,
@@ -52,14 +63,19 @@ fn main() {
             commands::cancel_job,
             commands::mkdir,
             commands::rename,
+            commands::multi_rename,
+            smb::smb_browse,
+            smb::smb_list_shares,
             commands::view_content,
             commands::view_text_as,
             commands::quick_look,
             commands::set_archive_password,
             commands::location_in_archive,
             commands::open_viewer,
+            commands::open_find_files,
             commands::edit_file,
             commands::open_remote_archive,
+            commands::cancel_download,
             commands::edit_new,
             commands::upload_back,
             commands::edit_confirm,
@@ -78,6 +94,9 @@ fn main() {
             remote::connect,
             remote::disconnect,
             remote::list_connections,
+            remote::smb_shares,
+            remote::smb_unmount,
+            remote::connect_cancel,
             remote::master_unlock,
             remote::master_set,
             remote::master_status,
@@ -86,7 +105,16 @@ fn main() {
             audio::audio_play,
             audio::audio_stop,
             audio::audio_seek,
+            audio::audio_pause,
+            audio::audio_volume,
             audio::audio_outputs,
+            search::commands::search_status,
+            search::commands::search_build,
+            search::commands::search_start,
+            search::commands::search_cancel,
+            search::commands::search_forget,
+            search::commands::search_rebuild,
+            search::commands::search_refresh,
         ])
         .on_window_event(|window, event| {
             // Closing the main window (Exit, Alt+F4, red button) quits fxfm,
@@ -102,6 +130,7 @@ fn main() {
             if let RunEvent::Exit = event {
                 // Cmd+Q (NSApp terminate) only delivers Exit, never ExitRequested.
                 commands::flush_session(&app.state::<state::AppState>());
+                app.state::<state::AppState>().search.shutdown();
             }
             if let RunEvent::ExitRequested { .. } | RunEvent::Exit = event {
                 // Cancelled operations remove their partial output; give them

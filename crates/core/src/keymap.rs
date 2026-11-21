@@ -123,7 +123,8 @@ impl fmt::Display for KeyCombo {
 
 impl KeyCombo {
     /// The physical keys of this TC combo under `m`, written with `ctrl` = Control,
-    /// `alt` = Option and `cmd` = Command.
+    /// `alt` = Option and `cmd` = Command. A modifier mapped to Fn has no flag here (see
+    /// [`KeyCombo::uses_fn`]).
     pub fn physical(&self, m: &Modifiers) -> KeyCombo {
         let mut p = KeyCombo {
             ctrl: false,
@@ -143,16 +144,25 @@ impl KeyCombo {
                     MacKey::Control => p.ctrl = true,
                     MacKey::Option => p.alt = true,
                     MacKey::Command => p.cmd = true,
+                    MacKey::Fn => {}
                 }
             }
         }
         p
     }
 
+    /// True when this TC combo needs the Fn key under `m`.
+    pub fn uses_fn(&self, m: &Modifiers) -> bool {
+        (self.ctrl && m.ctrl == MacKey::Fn) || (self.alt && m.alt == MacKey::Fn)
+    }
+
     /// The label macOS menus use for the physical keys: `⌃⌥⇧⌘` then the key (`⌥F5`).
     pub fn label(&self, m: &Modifiers) -> String {
         let p = self.physical(m);
         let mut out = String::new();
+        if self.uses_fn(m) {
+            out.push_str("fn ");
+        }
         for (on, sym) in [(p.ctrl, '⌃'), (p.alt, '⌥'), (p.shift, '⇧'), (p.cmd, '⌘')] {
             if on {
                 out.push(sym);
@@ -339,14 +349,21 @@ pub static COMMANDS: &[CommandDef] = &[
         menu: "Commands",
         title: "Search",
         defaults: &["Alt+F7"],
-        available: false,
+        available: true,
+    },
+    CommandDef {
+        id: "cm_feed_listbox",
+        menu: "Commands",
+        title: "Feed search results to listbox",
+        defaults: &[],
+        available: true,
     },
     CommandDef {
         id: "cm_multi_rename",
         menu: "Files",
-        title: "Multi-rename",
+        title: "Multi-rename…",
         defaults: &["Ctrl+M"],
-        available: false,
+        available: true,
     },
     CommandDef {
         id: "cm_chmod",
@@ -512,13 +529,15 @@ impl Keymap {
         changed
     }
 
-    /// `(combo, command)` pairs whose physical keys under `m` are a combo macOS reserves.
+    /// `(combo, command)` pairs whose physical keys under `m` are a combo macOS reserves
+    /// (none of the listed combos involves Fn).
     pub fn system_conflicts(&self, m: &Modifiers) -> Vec<(String, String)> {
         self.bindings
             .iter()
             .filter(|(k, _)| {
-                k.parse::<KeyCombo>()
-                    .is_ok_and(|c| SYSTEM_RESERVED.contains(&c.physical(m).to_string().as_str()))
+                k.parse::<KeyCombo>().is_ok_and(|c| {
+                    !c.uses_fn(m) && SYSTEM_RESERVED.contains(&c.physical(m).to_string().as_str())
+                })
             })
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
@@ -556,6 +575,15 @@ pub fn load_migrating(dir: &Path, settings: &mut Settings) -> Keymap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cm_search_available() {
+        let c = COMMANDS.iter().find(|c| c.id == "cm_search").unwrap();
+        assert!(c.available);
+        assert_eq!(c.defaults, &["Alt+F7"]);
+        let f = COMMANDS.iter().find(|c| c.id == "cm_feed_listbox").unwrap();
+        assert!(f.available && f.defaults.is_empty());
+    }
 
     fn c(s: &str) -> KeyCombo {
         s.parse().unwrap()
@@ -675,6 +703,11 @@ mod tests {
         assert_eq!(c("Ctrl+Alt+Space").label(&swapped), "⌃⌥Space");
         assert_eq!(c("Ctrl+D").label(&swapped), "⌥D");
         assert_eq!(c("Ctrl+D").physical(&swapped).to_string(), "Alt+D");
+        let fn_alt = mods(MacKey::Fn, MacKey::Control);
+        assert_eq!(c("Alt+F5").label(&fn_alt), "fn F5");
+        assert_eq!(c("Ctrl+Alt+Shift+X").label(&fn_alt), "fn ⌃⇧X");
+        assert!(c("Alt+F5").uses_fn(&fn_alt));
+        assert!(!c("Ctrl+F5").uses_fn(&fn_alt));
     }
 
     /// The README key table is generated from COMMANDS; this keeps it current.

@@ -444,6 +444,46 @@ fn prepare_dest(dest: &Dest) -> Result<(), OpError> {
     fs::create_dir_all(dir).map_err(|e| OpError::Io(format!("{}: {e}", dir.display())))
 }
 
+/// Flushes `f` to stable storage as far as its file system allows. Rust's `sync_all` is
+/// `F_FULLFSYNC` on macOS, which SMB shares (and some other file systems) reject with
+/// ENOTSUP; then a plain `fsync` is used, and a file system without either is taken as
+/// flushed (the data was written and the close reports write errors).
+pub fn sync_file(f: &File) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    sync_with(
+        || f.sync_all(),
+        || {
+            // SAFETY: the descriptor belongs to `f`, which outlives this call.
+            if unsafe { libc::fsync(f.as_raw_fd()) } == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        },
+    )
+}
+
+/// `sync_file`'s fallback order: `full`, then `plain` when the file system does not
+/// support `full`, then success when it supports neither.
+fn sync_with(
+    full: impl FnOnce() -> io::Result<()>,
+    plain: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    let unsupported = |e: &io::Error| {
+        matches!(
+            e.raw_os_error(),
+            Some(libc::ENOTSUP) | Some(libc::EINVAL) | Some(libc::ENOTTY) | Some(libc::ENOSYS)
+        )
+    };
+    match full() {
+        Err(e) if unsupported(&e) => match plain() {
+            Err(e) if unsupported(&e) => Ok(()),
+            r => r,
+        },
+        r => r,
+    }
+}
+
 /// Rename that fails with `AlreadyExists` instead of replacing `to`.
 pub(crate) fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -588,11 +628,6 @@ impl Conflicts {
             ConflictAnswer::Rename { new_name } => Decision::Rename(new_name),
             ConflictAnswer::Cancel => return None,
         })
-    }
-
-    /// Whether "Overwrite all older" is in effect.
-    pub(crate) fn overwrite_older(&self) -> bool {
-        self.overwrite_older
     }
 }
 
@@ -1041,8 +1076,7 @@ impl<'a> Ctx<'a> {
         if self.moving || overwrite {
             // The copy replaces the target, or the source is deleted later:
             // make sure the data is on disk first.
-            out.sync_all()
-                .map_err(|e| LeafError::Io(out_path.to_path_buf(), e))?;
+            sync_file(out).map_err(|e| LeafError::Io(out_path.to_path_buf(), e))?;
         }
         Ok(())
     }
@@ -1854,6 +1888,46 @@ mod tests {
         assert_eq!(*obs.1.lock().unwrap(), 1);
         assert_eq!(s.done, 1);
         assert_eq!(read(&dst.join("f")), "data");
+    }
+
+    #[test]
+    fn sync_falls_back_when_full_sync_is_unsupported() {
+        let err = |n| -> io::Result<()> { Err(io::Error::from_raw_os_error(n)) };
+        // SMB: F_FULLFSYNC is ENOTSUP, fsync works.
+        let mut plain_ran = false;
+        assert!(sync_with(
+            || err(libc::ENOTSUP),
+            || {
+                plain_ran = true;
+                Ok(())
+            }
+        )
+        .is_ok());
+        assert!(plain_ran);
+        // Neither supported: the written data stands.
+        assert!(sync_with(|| err(libc::ENOTSUP), || err(libc::EINVAL)).is_ok());
+        // A real failure is reported, from either step.
+        assert_eq!(
+            sync_with(|| err(libc::EIO), || Ok(()))
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::EIO)
+        );
+        assert_eq!(
+            sync_with(|| err(libc::ENOTSUP), || err(libc::EIO))
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::EIO)
+        );
+        // Full sync works: plain is not needed.
+        assert!(sync_with(|| Ok(()), || panic!("plain fsync not expected")).is_ok());
+    }
+
+    #[test]
+    fn sync_file_works_on_a_local_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = File::create(tmp.path().join("x")).unwrap();
+        sync_file(&f).unwrap();
     }
 
     #[test]

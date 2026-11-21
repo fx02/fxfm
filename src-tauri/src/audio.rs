@@ -28,6 +28,7 @@ const IDLE: Duration = Duration::from_millis(5);
 pub enum PlayState {
     Loading,
     Playing,
+    Paused,
     Ended,
     Stopped,
     Error,
@@ -117,24 +118,45 @@ pub struct Opened {
     pub sink: Box<dyn Sink>,
     /// The named device is not connected: this is the system default instead.
     pub fallback: bool,
+    /// Name of the device opened (None when unknown).
+    pub device: Option<String>,
 }
 
 pub trait SinkFactory: Send + Sync {
-    /// Opens the output device named `device` (the first of that name), or the system default
+    /// Opens the output device `device` (an id, or the first of that name), or the system default
     /// when it is None or not connected; `Err` carries the message for the strip.
     fn open(&self, device: Option<&str>) -> Result<Opened, String>;
+    /// Name of the device `open(device)` would use now (None when unknown); checked while
+    /// playing, so a new system default or a reconnected chosen device is taken at once.
+    fn current(&self, _device: Option<&str>) -> Option<String> {
+        None
+    }
 }
 
 /// The output devices through cpal.
 pub struct CpalFactory;
 
-/// Names of the output devices in the order the system lists them (empty on error).
-/// Does not open a stream.
-pub fn output_names() -> Vec<String> {
+/// An output device for Options: its name and cpal id (`coreaudio:<UID>`, stable across
+/// reconnects). Devices that share a name are told apart by the id.
+#[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct OutputDevice {
+    pub name: String,
+    pub id: Option<String>,
+}
+
+/// The output devices in the order the system lists them (empty on error). Does not open a
+/// stream.
+pub fn outputs() -> Vec<OutputDevice> {
     use cpal::traits::{DeviceTrait, HostTrait};
     match cpal::default_host().output_devices() {
         Ok(devs) => devs
-            .filter_map(|d| d.description().ok().map(|d| d.name().to_string()))
+            .filter_map(|d| {
+                let name = d.description().ok()?.name().to_string();
+                Some(OutputDevice {
+                    name,
+                    id: d.id().ok().map(|i| i.to_string()),
+                })
+            })
             .collect(),
         Err(e) => {
             eprintln!("fxfm: audio outputs: {e}");
@@ -143,12 +165,30 @@ pub fn output_names() -> Vec<String> {
     }
 }
 
-/// The first output device called `name`.
-fn find_output(host: &cpal::Host, name: &str) -> Option<cpal::Device> {
+/// Which of `devices` the saved choice `sel` means: the device with that id, else the first
+/// one with that name (older settings and devices with a unique name store the name).
+pub fn pick_output(devices: &[OutputDevice], sel: &str) -> Option<usize> {
+    devices
+        .iter()
+        .position(|d| d.id.as_deref() == Some(sel))
+        .or_else(|| devices.iter().position(|d| d.name == sel))
+}
+
+/// The output device the saved choice `sel` means (see [`pick_output`]).
+fn find_output(host: &cpal::Host, sel: &str) -> Option<cpal::Device> {
     use cpal::traits::{DeviceTrait, HostTrait};
-    host.output_devices()
-        .ok()?
-        .find(|d| d.description().is_ok_and(|x| x.name() == name))
+    let devs: Vec<cpal::Device> = host.output_devices().ok()?.collect();
+    let info: Vec<OutputDevice> = devs
+        .iter()
+        .map(|d| OutputDevice {
+            name: d
+                .description()
+                .map(|x| x.name().to_string())
+                .unwrap_or_default(),
+            id: d.id().ok().map(|i| i.to_string()),
+        })
+        .collect();
+    pick_output(&info, sel).map(|i| devs[i].clone())
 }
 
 struct Queue {
@@ -208,8 +248,23 @@ impl SinkFactory for CpalFactory {
                 cap,
             }),
             fallback,
+            device: device_name(&dev),
         })
     }
+
+    fn current(&self, device: Option<&str>) -> Option<String> {
+        use cpal::traits::HostTrait;
+        let host = cpal::default_host();
+        device
+            .and_then(|n| find_output(&host, n))
+            .or_else(|| host.default_output_device())
+            .and_then(|d| device_name(&d))
+    }
+}
+
+fn device_name(d: &cpal::Device) -> Option<String> {
+    use cpal::traits::DeviceTrait;
+    d.description().ok().map(|x| x.name().to_string())
 }
 
 fn build<T>(
@@ -464,6 +519,17 @@ struct Output {
     wanted: Mutex<Option<String>>,
     /// Missing devices already reported (once per app run).
     warned: Mutex<std::collections::HashSet<String>>,
+    /// Attenuation as f32 bits: 0.0 = full volume, 1.0 = silent (so the default is full).
+    quiet: std::sync::atomic::AtomicU32,
+    /// Name of the device the audio thread has open (as the factory reported it).
+    opened: Mutex<Option<String>>,
+}
+
+impl Output {
+    /// The playback volume, 0.0 (silent) to 1.0 (full).
+    fn volume(&self) -> f32 {
+        1.0 - f32::from_bits(self.quiet.load(Ordering::Relaxed))
+    }
 }
 
 /// Sends events of the active request only, so a replaced playback stays silent.
@@ -497,6 +563,7 @@ enum Cmd {
     Play(Request, mpsc::SyncSender<Result<(), String>>),
     Stop,
     Seek(f64),
+    Pause(bool),
     Shutdown(mpsc::SyncSender<()>),
 }
 
@@ -682,6 +749,23 @@ impl Player {
             self.send(Cmd::Seek(secs));
         }
     }
+
+    /// Pauses (`true`) or resumes (`false`) the playing file. Does not wait.
+    pub fn pause(&self, paused: bool) {
+        self.send(Cmd::Pause(paused));
+    }
+
+    /// Sets the volume, 0.0 to 1.0 (clamped); it applies within a fraction of a second.
+    pub fn set_volume(&self, volume: f64) {
+        let v = if volume.is_finite() {
+            volume.clamp(0.0, 1.0) as f32
+        } else {
+            1.0
+        };
+        self.output
+            .quiet
+            .store((1.0 - v).to_bits(), Ordering::Relaxed);
+    }
 }
 
 /// The audio thread: owns the output and the current playback.
@@ -692,6 +776,8 @@ fn worker(rx: mpsc::Receiver<Cmd>, factory: &dyn SinkFactory, gate: &Gate, outpu
     // The device name `sink` was opened for (None = the system default).
     let mut sink_for: Option<String> = None;
     let mut job: Option<Job> = None;
+    // When the system was last asked whether the device to use changed.
+    let mut dev_checked = Instant::now();
     // Opens the wanted device unless it is open and healthy; Ok carries the fallback notice
     // when the device is missing and that was not reported yet.
     let open = |sink: &mut Option<Box<dyn Sink>>,
@@ -701,10 +787,12 @@ fn worker(rx: mpsc::Receiver<Cmd>, factory: &dyn SinkFactory, gate: &Gate, outpu
         if *sink_for == wanted && sink.as_ref().is_some_and(|s| s.failure().is_none()) {
             return Ok(None);
         }
+        *lock(&output.opened) = None;
         *sink = None;
         match catch_unwind(AssertUnwindSafe(|| factory.open(wanted.as_deref()))) {
             Ok(Ok(o)) => {
                 *sink = Some(o.sink);
+                *lock(&output.opened) = o.device;
                 let notice = match &wanted {
                     Some(name) if o.fallback && lock(&output.warned).insert(name.clone()) => {
                         Some(fallback_notice(name))
@@ -719,7 +807,15 @@ fn worker(rx: mpsc::Receiver<Cmd>, factory: &dyn SinkFactory, gate: &Gate, outpu
         }
     };
     loop {
-        let cmd = if job.is_some() {
+        let paused = job.as_ref().is_some_and(|j| j.paused);
+        let cmd = if paused {
+            // Paused: wait for a command without spinning; the output stays open.
+            match rx.recv_timeout(Duration::from_millis(250)) {
+                Ok(c) => Some(c),
+                Err(RecvTimeoutError::Timeout) => None,
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        } else if job.is_some() {
             match rx.try_recv() {
                 Ok(c) => Some(c),
                 Err(TryRecvError::Empty) => None,
@@ -745,6 +841,26 @@ fn worker(rx: mpsc::Receiver<Cmd>, factory: &dyn SinkFactory, gate: &Gate, outpu
             Some(Cmd::Seek(t)) => {
                 if let Some(j) = job.as_mut() {
                     j.seek = Some(t);
+                    if j.paused {
+                        j.paused_at = t.max(0.0);
+                        j.emit(gate, PlayState::Paused, j.paused_at, None);
+                    }
+                }
+            }
+            Some(Cmd::Pause(p)) => {
+                if let (Some(j), Some(s)) = (job.as_mut(), sink.as_mut()) {
+                    if p && !j.paused {
+                        // Stop at once: what is queued is dropped and played again on resume.
+                        let at = j.seek.unwrap_or_else(|| j.position(s.as_ref()));
+                        s.clear();
+                        j.seek = Some(at);
+                        j.paused = true;
+                        j.paused_at = at;
+                        j.emit(gate, PlayState::Paused, at, None);
+                    } else if !p && j.paused {
+                        j.paused = false;
+                        j.last_tick = None;
+                    }
                 }
             }
             Some(Cmd::Play(req, reply)) => {
@@ -787,8 +903,22 @@ fn worker(rx: mpsc::Receiver<Cmd>, factory: &dyn SinkFactory, gate: &Gate, outpu
         let (Some(j), Some(s)) = (job.as_mut(), sink.as_mut()) else {
             continue;
         };
+        if j.paused {
+            continue;
+        }
+        j.volume = output.volume();
+        // Every 2 s: has the device to use changed (a new system default, the chosen device
+        // connected again)? Then move there like after a device loss.
+        let mut moved = false;
+        if dev_checked.elapsed() >= Duration::from_secs(2) {
+            dev_checked = Instant::now();
+            let have = lock(&output.opened).clone();
+            if let (Some(have), Some(now)) = (have, factory.current(sink_for.as_deref())) {
+                moved = have != now;
+            }
+        }
         // A new device was chosen in Options: move there like after a device loss.
-        let step = if *lock(&output.wanted) != sink_for {
+        let step = if *lock(&output.wanted) != sink_for || moved {
             Ok(Step::DeviceLost("output device changed".into()))
         } else {
             catch_unwind(AssertUnwindSafe(|| j.step(s.as_mut(), gate)))
@@ -864,6 +994,11 @@ struct Job {
     last_tick: Option<Instant>,
     /// Sent as the message of `playing` events (the chosen device is missing).
     notice: Option<String>,
+    /// Paused: nothing is decoded or queued; `seek` holds where to go on.
+    paused: bool,
+    paused_at: f64,
+    /// Volume applied to the samples (0.0..=1.0).
+    volume: f32,
 }
 
 impl Job {
@@ -888,6 +1023,9 @@ impl Job {
             end: None,
             last_tick: None,
             notice: None,
+            paused: false,
+            paused_at: 0.0,
+            volume: 1.0,
         }
     }
 
@@ -993,6 +1131,13 @@ impl Job {
         self.pending.clear();
         self.sent = 0;
         map_channels(&self.resampled, src_ch, self.dev_ch, &mut self.pending);
+        if self.volume < 1.0 {
+            // Squared: the slider then feels even (loudness follows amplitude roughly so).
+            let g = self.volume * self.volume;
+            for s in &mut self.pending {
+                *s *= g;
+            }
+        }
         Step::Busy
     }
 }
@@ -1056,10 +1201,10 @@ fn open_copy_error(path: &str, e: &str) -> String {
     format!("Cannot play {}: {e}", file_name(path))
 }
 
-/// Output device names for Options (empty when there are none or listing failed).
+/// Output devices for Options (empty when there are none or listing failed).
 #[tauri::command]
-pub async fn audio_outputs() -> Vec<String> {
-    tauri::async_runtime::spawn_blocking(output_names)
+pub async fn audio_outputs() -> Vec<OutputDevice> {
+    tauri::async_runtime::spawn_blocking(outputs)
         .await
         .unwrap_or_default()
 }
@@ -1072,6 +1217,17 @@ pub fn audio_stop(state: State<'_, AppState>) {
 #[tauri::command]
 pub fn audio_seek(state: State<'_, AppState>, secs: f64) {
     state.audio.seek(secs);
+}
+
+#[tauri::command]
+pub fn audio_pause(state: State<'_, AppState>, paused: bool) {
+    state.audio.pause(paused);
+}
+
+/// Volume 0.0..=1.0.
+#[tauri::command]
+pub fn audio_volume(state: State<'_, AppState>, volume: f64) {
+    state.audio.set_volume(volume);
 }
 
 /// The player of the app: events go to the main window.
@@ -1090,6 +1246,23 @@ pub fn app_player(handle: Arc<std::sync::OnceLock<AppHandle>>) -> Player {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn saved_output_is_found_by_id_then_by_name() {
+        use super::{pick_output, OutputDevice};
+        let d = |name: &str, id: &str| OutputDevice {
+            name: name.into(),
+            id: Some(id.into()),
+        };
+        let devs = [
+            d("DAC", "coreaudio:a"),
+            d("Speakers", "coreaudio:s"),
+            d("DAC", "coreaudio:b"),
+        ];
+        assert_eq!(pick_output(&devs, "coreaudio:b"), Some(2));
+        assert_eq!(pick_output(&devs, "DAC"), Some(0));
+        assert_eq!(pick_output(&devs, "Speakers"), Some(1));
+        assert_eq!(pick_output(&devs, "coreaudio:gone"), None);
+    }
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
 
@@ -1172,6 +1345,8 @@ mod tests {
         devices: Vec<String>,
         /// The device name of every open (None = the default).
         asked: Mutex<Vec<Option<String>>>,
+        /// What the system would use now (None = "Built-in").
+        now: Mutex<Option<String>>,
         sinks: Mutex<Vec<Arc<Stats>>>,
     }
 
@@ -1190,7 +1365,12 @@ mod tests {
                     stats,
                 }),
                 fallback: device.is_some_and(|d| !self.devices.iter().any(|x| x == d)),
+                device: Some(lock(&self.now).clone().unwrap_or_else(|| "Built-in".into())),
             })
+        }
+
+        fn current(&self, _device: Option<&str>) -> Option<String> {
+            Some(lock(&self.now).clone().unwrap_or_else(|| "Built-in".into()))
         }
     }
 
@@ -1216,6 +1396,7 @@ mod tests {
             fail: fail.map(str::to_string),
             devices: vec!["USB DAC".into(), "Speakers".into()],
             asked: Mutex::new(Vec::new()),
+            now: Mutex::new(None),
             sinks: Mutex::new(Vec::new()),
         });
         let events: Events = Arc::default();
@@ -1304,6 +1485,60 @@ mod tests {
         assert_eq!(stopped.path, "pcm_s16.wav");
         p.shutdown();
         assert!(factory.sink(0).dropped.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn pause_stops_feeding_and_resume_goes_on() {
+        let (p, factory, events) = player(false, None);
+        play(&p, "flac_8k.flac", None).unwrap();
+        wait_for(&events, |e| e.state == PlayState::Playing);
+        p.pause(true);
+        let paused = wait_for(&events, |e| e.state == PlayState::Paused);
+        let sink = factory.sink(0);
+        // The queue is dropped at once and nothing new is queued while paused.
+        wait_until(|| sink.queued.load(Ordering::SeqCst) == 0);
+        let pushed = sink.pushed.load(Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(80));
+        assert_eq!(sink.pushed.load(Ordering::SeqCst), pushed);
+        let before = lock(&events).len();
+        p.pause(false);
+        wait_until(|| sink.pushed.load(Ordering::SeqCst) > pushed);
+        wait_until(|| {
+            lock(&events)[before..]
+                .iter()
+                .any(|e| e.state == PlayState::Playing)
+        });
+        let e = lock(&events)[before..]
+            .iter()
+            .find(|e| e.state == PlayState::Playing)
+            .cloned()
+            .unwrap();
+        assert!(e.position + 0.05 >= paused.position, "{e:?} {paused:?}");
+        p.shutdown();
+    }
+
+    #[test]
+    fn a_new_system_default_takes_over_while_playing() {
+        let (p, factory, events) = player(false, None);
+        play(&p, "flac_8k.flac", None).unwrap();
+        wait_for(&events, |e| e.state == PlayState::Playing);
+        assert_eq!(factory.opened(), 1);
+        *lock(&factory.now) = Some("AirPods".into());
+        wait_until(|| factory.opened() == 2);
+        p.shutdown();
+    }
+
+    #[test]
+    fn volume_is_clamped() {
+        let (p, _factory, _events) = player(true, None);
+        p.set_volume(0.5);
+        assert!((p.output.volume() - 0.5).abs() < 1e-6);
+        p.set_volume(7.0);
+        assert!((p.output.volume() - 1.0).abs() < 1e-6);
+        p.set_volume(-1.0);
+        assert!(p.output.volume().abs() < 1e-6);
+        p.set_volume(f64::NAN);
+        assert!((p.output.volume() - 1.0).abs() < 1e-6);
     }
 
     #[test]

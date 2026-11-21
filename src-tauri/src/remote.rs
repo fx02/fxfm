@@ -29,6 +29,9 @@ pub const CONNECT_TIMEOUT_MSG: &str = "Server did not answer within 15 seconds";
 pub const MASTER_REQUIRED: &str = "master password required";
 pub const CHMOD_ONLY_REMOTE: &str = "Change attributes works on SFTP and SCP servers";
 pub const CONNECTIONS_CHANGED: &str = "connections://changed";
+pub const SMB_CANCELLED: &str = "Mounting was cancelled";
+/// A server connection the UI stopped waiting for (the half-made connection is closed).
+pub const CONNECT_CANCELLED: &str = "Connecting was cancelled";
 
 const KINDS: [secrets::SecretKind; 2] = [
     secrets::SecretKind::Password,
@@ -64,6 +67,8 @@ pub struct ConnectRequest {
     pub passphrase: Option<String>,
     /// Store the entered secrets (keychain or vault).
     pub save: bool,
+    /// Id of this attempt in the UI; `connect_cancel` with it abandons an SMB mount.
+    pub attempt: Option<String>,
     pub accept_fingerprint: Option<String>,
 }
 
@@ -77,6 +82,9 @@ pub enum ConnectReply {
     Connected {
         location: String,
         local_dir: Option<String>,
+        /// A remark for the status line (an SMB sub-folder that does not exist).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
     HostKey {
         host: String,
@@ -136,29 +144,42 @@ pub struct Attempt {
     pub accept_fingerprint: Option<String>,
 }
 
-pub enum Outcome {
-    Connected(Arc<dyn RemoteFs>),
+/// `T`: what a successful attempt gives (a connection, or an SMB mount point).
+pub enum Outcome<T = Arc<dyn RemoteFs>> {
+    Connected(T),
     Reply(ConnectReply),
 }
 
 pub enum Step {
     Done(ConnectReply),
-    Attempt(Attempt),
+    /// Boxed: an attempt is much larger than a reply.
+    Attempt(Box<Attempt>),
 }
 
-/// The server is asked for a password (SSH password login, every FTP login).
+/// The server is asked for a password (SSH password login, every FTP and SMB login).
 fn uses_password(s: &ServerEntry) -> bool {
-    matches!(s.protocol, Protocol::Ftp | Protocol::Ftps) || s.auth == Auth::Password
+    matches!(s.protocol, Protocol::Ftp | Protocol::Ftps | Protocol::Smb) || s.auth == Auth::Password
 }
 
 /// What the UI gets for a failed or finished connection attempt. On success the typed
 /// secrets are kept for the session (and stored with `save`); a rejected one is forgotten.
+#[cfg(test)]
 pub fn after_connect(
     result: Result<Arc<dyn RemoteFs>, ConnectError>,
     a: &Attempt,
     session: &dyn SecretStore,
     store: Option<&dyn SecretStore>,
 ) -> Result<Outcome, String> {
+    after_attempt(result, a, session, store)
+}
+
+/// `after_connect` for any kind of success (`T`: a connection or an SMB mount point).
+pub fn after_attempt<T>(
+    result: Result<T, ConnectError>,
+    a: &Attempt,
+    session: &dyn SecretStore,
+    store: Option<&dyn SecretStore>,
+) -> Result<Outcome<T>, String> {
     let pw = account(&a.server.id, secrets::SecretKind::Password);
     let pp = account(&a.server.id, secrets::SecretKind::Passphrase);
     let reply = |r| Ok(Outcome::Reply(r));
@@ -226,7 +247,63 @@ fn start_reply(server: &ServerEntry, fs: &dyn RemoteFs) -> Result<ConnectReply, 
     Ok(ConnectReply::Connected {
         location: format_remote(server.protocol.scheme(), &server.name, &dir),
         local_dir: server.local_dir.clone(),
+        note: None,
     })
+}
+
+/// Where a mounted SMB share opens: `<mount point>/<remote dir>`, or the mount point (with a
+/// note) when that folder does not exist.
+pub fn smb_reply(server: &ServerEntry, mount: &Path) -> ConnectReply {
+    let sub = server
+        .remote_dir
+        .as_deref()
+        .map(|d| d.trim().trim_matches('/'))
+        .filter(|d| !d.is_empty());
+    let (location, note) = match sub {
+        Some(d) if mount.join(d).is_dir() => (mount.join(d), None),
+        Some(d) => (
+            mount.to_path_buf(),
+            Some(format!(
+                "Folder '{d}' not found on {}, opened the share",
+                server.name
+            )),
+        ),
+        None => (mount.to_path_buf(), None),
+    };
+    ConnectReply::Connected {
+        location: location.to_string_lossy().into_owned(),
+        local_dir: None,
+        note,
+    }
+}
+
+/// A saved SMB share for the drive list: where it is mounted now, with its space.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SmbShare {
+    pub name: String,
+    /// The mount point, or None when the share is not mounted.
+    pub mount: Option<String>,
+    pub total: u64,
+    pub free: u64,
+}
+
+/// Every saved SMB entry in tree order, with its mount state and space from `mounts` (the
+/// smbfs mount table; no `statvfs`, which could hang on a dead server).
+pub fn shares_with_mounts(list: &ServerList, mounts: &[crate::smb::SmbMount]) -> Vec<SmbShare> {
+    list.all()
+        .into_iter()
+        .filter(|e| e.protocol == Protocol::Smb)
+        .map(|e| {
+            let m = crate::smb::mount_of(e, mounts);
+            SmbShare {
+                name: e.name.clone(),
+                mount: m.map(|m| m.on.clone()),
+                total: m.map_or(0, |m| m.total),
+                free: m.map_or(0, |m| m.free),
+            }
+        })
+        .collect()
 }
 
 fn set_save_password(nodes: &mut [ServerNode], id: &str) {
@@ -253,6 +330,10 @@ pub struct Connector {
     pending: Mutex<Vec<(String, Option<String>)>>,
     /// F3 copies of server files: (location, copy folder).
     views: Mutex<Vec<(String, PathBuf)>>,
+    /// SMB mounts in progress (`ConnectRequest::attempt`), and those the UI stopped waiting
+    /// for: their result is dropped (no password kept or stored).
+    mounting: Mutex<HashSet<String>>,
+    abandoned: Mutex<HashSet<String>>,
 }
 
 impl Connector {
@@ -265,6 +346,8 @@ impl Connector {
             system,
             pending: Mutex::new(Vec::new()),
             views: Mutex::new(Vec::new()),
+            mounting: Mutex::new(HashSet::new()),
+            abandoned: Mutex::new(HashSet::new()),
         }
     }
 
@@ -546,7 +629,7 @@ impl Connector {
             password: lookup(secrets::SecretKind::Password, &req.password),
             passphrase: lookup(secrets::SecretKind::Passphrase, &req.passphrase),
         };
-        Ok(Step::Attempt(Attempt {
+        Ok(Step::Attempt(Box::new(Attempt {
             server,
             saved,
             creds,
@@ -556,7 +639,7 @@ impl Connector {
             },
             save,
             accept_fingerprint: req.accept_fingerprint.clone(),
-        }))
+        })))
     }
 
     /// Steps 4 and 5: the reply, and a new connection registered under the server's name.
@@ -567,21 +650,10 @@ impl Connector {
         a: Attempt,
         result: Result<Arc<dyn RemoteFs>, ConnectError>,
     ) -> Result<ConnectReply, String> {
-        let outcome = match self.with_store(data, |st| {
-            after_connect(result.clone(), &a, &self.session_secrets, Some(st))
-        }) {
-            Some(o) => o,
-            None => after_connect(result, &a, &self.session_secrets, None),
-        }?;
-        let fs = match outcome {
+        let fs = match self.settle(data, &a, result)? {
             Outcome::Reply(r) => return Ok(r),
             Outcome::Connected(fs) => fs,
         };
-        if a.save && a.saved && !a.server.save_password {
-            if let Err(e) = self.mark_save_password(data, &a.server.id) {
-                eprintln!("fxfm: saving servers: {e}");
-            }
-        }
         // Another attempt may have connected meanwhile; keep that one.
         let fs = match ctx.sessions.get(&a.server.name) {
             Some(existing) => {
@@ -599,6 +671,127 @@ impl Connector {
         })
     }
 
+    /// `after_attempt` with the store of the current mode; a success with "Save password"
+    /// turns the entry's `savePassword` on.
+    fn settle<T: Clone>(
+        &self,
+        data: &DataLocation,
+        a: &Attempt,
+        result: Result<T, ConnectError>,
+    ) -> Result<Outcome<T>, String> {
+        let outcome = match self.with_store(data, |st| {
+            after_attempt(result.clone(), a, &self.session_secrets, Some(st))
+        }) {
+            Some(o) => o,
+            None => after_attempt(result, a, &self.session_secrets, None),
+        }?;
+        if matches!(outcome, Outcome::Connected(_)) && a.save && a.saved && !a.server.save_password
+        {
+            if let Err(e) = self.mark_save_password(data, &a.server.id) {
+                eprintln!("fxfm: saving servers: {e}");
+            }
+        }
+        Ok(outcome)
+    }
+
+    /// `mount()` for the UI's attempt `req.attempt`: when the UI cancelled while it ran, the
+    /// result is dropped (`SMB_CANCELLED`).
+    fn tracked_mount(
+        &self,
+        req: &ConnectRequest,
+        mount: impl FnOnce() -> Result<PathBuf, ConnectError>,
+    ) -> Result<Result<PathBuf, ConnectError>, String> {
+        if let Some(id) = &req.attempt {
+            lock(&self.mounting).insert(id.clone());
+        }
+        let result = mount();
+        if let Some(id) = &req.attempt {
+            lock(&self.mounting).remove(id);
+            // The UI cancelled: the mount stays, but nothing typed is kept or saved.
+            if lock(&self.abandoned).remove(id) {
+                return Err(SMB_CANCELLED.to_string());
+            }
+        }
+        Ok(result)
+    }
+
+    /// Connecting a saved SMB share: an existing mount of it is used as is; otherwise the
+    /// password is looked up (or asked for, unless it is a guest or Kerberos login) and
+    /// `mount` mounts it. `find` and `mount` are `smb::find_mount` and `smb::mount` outside
+    /// tests.
+    pub fn connect_smb(
+        &self,
+        data: &DataLocation,
+        ctx: &Ctx,
+        req: &ConnectRequest,
+        find: impl Fn(&ServerEntry) -> Option<PathBuf>,
+        mount: impl FnOnce(&ServerEntry, Option<&str>) -> Result<PathBuf, ConnectError>,
+    ) -> Result<ConnectReply, String> {
+        let server = req
+            .server
+            .as_deref()
+            .and_then(|n| lock(&self.servers).find_by_name(n).cloned())
+            .ok_or("Unknown server")?;
+        if let Some(mp) = find(&server) {
+            return Ok(smb_reply(&server, &mp));
+        }
+        // Kerberos: the system's ticket logs in; no password is looked up, asked for or kept.
+        if server.kerberos {
+            return match self.tracked_mount(req, || mount(&server, None))? {
+                Ok(mp) => Ok(smb_reply(&server, &mp)),
+                Err(ConnectError::AuthFailed) => Err(crate::smb::SMB_KERBEROS_FAILED.to_string()),
+                Err(ConnectError::Failed(m)) => Err(m),
+                Err(_) => Err(crate::smb::SMB_KERBEROS_FAILED.to_string()),
+            };
+        }
+        let a = match self.prepare(data, ctx, req)? {
+            Step::Done(r) => return Ok(r),
+            Step::Attempt(a) => a,
+        };
+        let guest = server.user.trim().is_empty();
+        if !guest && a.creds.password.is_none() {
+            return Ok(ConnectReply::NeedPassword { retry: false });
+        }
+        let result = self.tracked_mount(req, || mount(&a.server, a.creds.password.as_deref()))?;
+        let result = match result {
+            Err(ConnectError::AuthFailed) if guest => {
+                return Err(crate::smb::SMB_NO_GUEST.to_string())
+            }
+            r => r,
+        };
+        match self.settle(data, &a, result) {
+            Ok(Outcome::Connected(mp)) => Ok(smb_reply(&a.server, &mp)),
+            Ok(Outcome::Reply(r)) => Ok(r),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The UI stopped waiting for attempt `id` (an SMB mount or a server connection); when it
+    /// is still running, its result is dropped.
+    pub fn cancel_attempt(&self, id: &str) {
+        if lock(&self.mounting).contains(id) {
+            lock(&self.abandoned).insert(id.to_string());
+        }
+    }
+
+    /// Unmounts the saved SMB share `name` (`unmount`: `smb::unmount` outside tests).
+    /// Returns the mount point it had.
+    pub fn disconnect_smb(
+        &self,
+        name: &str,
+        find: impl Fn(&ServerEntry) -> Option<PathBuf>,
+        unmount: impl FnOnce(&Path) -> Result<(), String>,
+    ) -> Result<String, String> {
+        let server = lock(&self.servers)
+            .find_by_name(name)
+            .filter(|e| e.protocol == Protocol::Smb)
+            .cloned()
+            .ok_or_else(|| format!("Unknown share '{name}'"))?;
+        let mp = find(&server).ok_or_else(|| format!("'{name}' is not mounted"))?;
+        unmount(&mp)?;
+        Ok(mp.to_string_lossy().into_owned())
+    }
+
     /// The whole connection flow (blocking; the network part has its own timeouts).
     pub fn connect(
         &self,
@@ -606,9 +799,17 @@ impl Connector {
         ctx: &Ctx,
         req: &ConnectRequest,
     ) -> Result<ConnectReply, String> {
+        let smb = req
+            .server
+            .as_deref()
+            .and_then(|n| lock(&self.servers).find_by_name(n).map(|e| e.protocol))
+            == Some(Protocol::Smb);
+        if smb {
+            return self.connect_smb(data, ctx, req, crate::smb::find_mount, crate::smb::mount);
+        }
         let a = match self.prepare(data, ctx, req)? {
             Step::Done(r) => return Ok(r),
-            Step::Attempt(a) => a,
+            Step::Attempt(a) => *a,
         };
         let known = KnownHosts::new(data.dir.join(KNOWN_HOSTS_FILE));
         let opts = ConnectOptions {
@@ -616,7 +817,18 @@ impl Connector {
             known: &known,
             accept_fingerprint: a.accept_fingerprint.as_deref(),
         };
+        if let Some(id) = &req.attempt {
+            lock(&self.mounting).insert(id.clone());
+        }
         let result = core_remote::connect(&a.server, &a.creds, &opts);
+        if let Some(id) = &req.attempt {
+            lock(&self.mounting).remove(id);
+            // The UI cancelled: the new connection is dropped (closed), nothing is saved.
+            if lock(&self.abandoned).remove(id) {
+                drop(result);
+                return Err(CONNECT_CANCELLED.to_string());
+            }
+        }
         self.finish(data, ctx, a, result)
     }
 
@@ -910,6 +1122,35 @@ pub async fn disconnect(app: AppHandle, name: String) -> Result<(), String> {
     .await
 }
 
+/// Saved SMB shares and where they are mounted (for the drive list).
+#[tauri::command]
+pub async fn smb_shares(app: AppHandle) -> Result<Vec<SmbShare>, String> {
+    blocking(move || {
+        let state = app.state::<AppState>();
+        let list = state.remote.servers();
+        shares_with_mounts(&list, &crate::smb::smb_mounts())
+    })
+    .await
+}
+
+/// The UI stopped waiting for the connect attempt `attempt` (an SMB mount).
+#[tauri::command]
+pub fn connect_cancel(app: AppHandle, attempt: String) {
+    app.state::<AppState>().remote.cancel_attempt(&attempt);
+}
+
+/// Unmounts the saved SMB share `name`; returns its former mount point.
+#[tauri::command]
+pub async fn smb_unmount(app: AppHandle, name: String) -> Result<String, String> {
+    blocking(move || {
+        let state = app.state::<AppState>();
+        state
+            .remote
+            .disconnect_smb(&name, crate::smb::find_mount, crate::smb::unmount)
+    })
+    .await?
+}
+
 #[tauri::command]
 pub fn list_connections(app: AppHandle) -> Vec<ConnectionInfo> {
     let state = app.state::<AppState>();
@@ -1185,7 +1426,8 @@ mod tests {
         assert_eq!(
             j(ConnectReply::Connected {
                 location: "sftp://m/home/zb".into(),
-                local_dir: None
+                local_dir: None,
+                note: None,
             }),
             json!({"kind": "connected", "location": "sftp://m/home/zb", "localDir": null})
         );
@@ -1857,5 +2099,310 @@ mod tests {
         assert!(list.find_by_name("a").unwrap().save_password);
         let disk: ServerList = storage::load_json(t.path(), SERVERS_FILE);
         assert_eq!(disk, list);
+    }
+    // ------------------------------------------------------------ SMB shares
+
+    fn smb_srv(name: &str, user: &str) -> ServerEntry {
+        ServerEntry {
+            id: fxfm_core::servers::new_id(),
+            name: name.into(),
+            protocol: Protocol::Smb,
+            host: "nas".into(),
+            port: 445,
+            user: user.into(),
+            share: "data".into(),
+            ..ServerEntry::default()
+        }
+    }
+
+    fn smb_req(name: &str, password: Option<&str>, save: bool) -> ConnectRequest {
+        ConnectRequest {
+            server: Some(name.into()),
+            password: password.map(str::to_string),
+            save,
+            ..ConnectRequest::default()
+        }
+    }
+
+    #[test]
+    fn smb_already_mounted_needs_no_password() {
+        let t = tempfile::tempdir().unwrap();
+        let data = loc(StorageMode::System, t.path());
+        let ctx = Ctx::new(t.path().join("tmp-root"));
+        let (c, _) = connector();
+        let mp = t.path().join("Data");
+        std::fs::create_dir_all(mp.join("docs")).unwrap();
+        let mut e = smb_srv("nas", "zb");
+        e.remote_dir = Some("/docs".into());
+        c.save_servers(&data, list_of(&[&e])).unwrap();
+        let r = c
+            .connect_smb(
+                &data,
+                &ctx,
+                &smb_req("nas", None, false),
+                |_| Some(mp.clone()),
+                |_, _| panic!("must not mount again"),
+            )
+            .unwrap();
+        assert_eq!(
+            r,
+            ConnectReply::Connected {
+                location: mp.join("docs").to_string_lossy().into_owned(),
+                local_dir: None,
+                note: None
+            }
+        );
+        // A missing sub-folder: the share's root with a note.
+        e.remote_dir = Some("nope".into());
+        c.save_servers(&data, list_of(&[&e])).unwrap();
+        match c
+            .connect_smb(
+                &data,
+                &ctx,
+                &smb_req("nas", None, false),
+                |_| Some(mp.clone()),
+                |_, _| panic!(),
+            )
+            .unwrap()
+        {
+            ConnectReply::Connected { location, note, .. } => {
+                assert_eq!(location, mp.to_string_lossy());
+                assert!(note.unwrap().contains("'nope'"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn smb_asks_for_the_password_and_saves_it() {
+        let t = tempfile::tempdir().unwrap();
+        let data = loc(StorageMode::System, t.path());
+        let ctx = Ctx::new(t.path().join("tmp-root"));
+        let (c, sys) = connector();
+        let e = smb_srv("nas", "CORP\\zb");
+        c.save_servers(&data, list_of(&[&e])).unwrap();
+        let mp = t.path().join("Data");
+        std::fs::create_dir(&mp).unwrap();
+        // No saved password: asked before anything is mounted.
+        let r = c.connect_smb(
+            &data,
+            &ctx,
+            &smb_req("nas", None, false),
+            |_| None,
+            |_, _| panic!("must ask first"),
+        );
+        assert_eq!(r, Ok(ConnectReply::NeedPassword { retry: false }));
+        // Wrong password: asked again, and it is not kept.
+        let r = c.connect_smb(
+            &data,
+            &ctx,
+            &smb_req("nas", Some("bad"), true),
+            |_| None,
+            |_, pw| {
+                assert_eq!(pw, Some("bad"));
+                Err(ConnectError::AuthFailed)
+            },
+        );
+        assert_eq!(r, Ok(ConnectReply::NeedPassword { retry: true }));
+        let acct = account(&e.id, fxfm_core::secrets::SecretKind::Password);
+        assert_eq!(sys.get(&acct).unwrap(), None);
+        // Right password with "Save password": stored, and the entry remembers it.
+        let r = c
+            .connect_smb(
+                &data,
+                &ctx,
+                &smb_req("nas", Some("good"), true),
+                |_| None,
+                |_, pw| {
+                    assert_eq!(pw, Some("good"));
+                    Ok(mp.clone())
+                },
+            )
+            .unwrap();
+        assert!(matches!(r, ConnectReply::Connected { .. }));
+        assert_eq!(sys.get(&acct).unwrap().as_deref(), Some("good"));
+        assert!(c.servers().find_by_name("nas").unwrap().save_password);
+        // Next time the saved password is used without asking.
+        let r = c.connect_smb(
+            &data,
+            &ctx,
+            &smb_req("nas", None, false),
+            |_| None,
+            |_, pw| {
+                assert_eq!(pw, Some("good"));
+                Ok(mp.clone())
+            },
+        );
+        assert!(matches!(r, Ok(ConnectReply::Connected { .. })));
+    }
+
+    #[test]
+    fn smb_guest_never_asks() {
+        let t = tempfile::tempdir().unwrap();
+        let data = loc(StorageMode::System, t.path());
+        let ctx = Ctx::new(t.path().join("tmp-root"));
+        let (c, _) = connector();
+        let e = smb_srv("pub", "");
+        c.save_servers(&data, list_of(&[&e])).unwrap();
+        let mp = t.path().to_path_buf();
+        let r = c.connect_smb(
+            &data,
+            &ctx,
+            &smb_req("pub", None, false),
+            |_| None,
+            |_, pw| {
+                assert_eq!(pw, None);
+                Ok(mp.clone())
+            },
+        );
+        assert!(matches!(r, Ok(ConnectReply::Connected { .. })));
+        let r = c.connect_smb(
+            &data,
+            &ctx,
+            &smb_req("pub", None, false),
+            |_| None,
+            |_, _| Err(ConnectError::AuthFailed),
+        );
+        assert_eq!(r, Err(crate::smb::SMB_NO_GUEST.to_string()));
+    }
+
+    #[test]
+    fn smb_kerberos_never_asks_or_sends_a_password() {
+        let t = tempfile::tempdir().unwrap();
+        let data = loc(StorageMode::System, t.path());
+        let ctx = Ctx::new(t.path().join("tmp-root"));
+        let (c, sys) = connector();
+        let mut e = smb_srv("ad", "CORP\\zb");
+        e.kerberos = true;
+        c.save_servers(&data, list_of(&[&e])).unwrap();
+        let mp = t.path().to_path_buf();
+        // Even a password the UI sent along is not handed to the mount, nor kept.
+        let r = c.connect_smb(
+            &data,
+            &ctx,
+            &smb_req("ad", Some("typed"), true),
+            |_| None,
+            |s, pw| {
+                assert!(s.kerberos);
+                assert_eq!(pw, None);
+                Ok(mp.clone())
+            },
+        );
+        assert!(matches!(r, Ok(ConnectReply::Connected { .. })));
+        let acct = account(&e.id, fxfm_core::secrets::SecretKind::Password);
+        assert_eq!(sys.get(&acct).unwrap(), None);
+        assert_eq!(c.session_secrets.get(&acct).unwrap(), None);
+        // No ticket: an error that says so, never a password prompt.
+        let r = c.connect_smb(
+            &data,
+            &ctx,
+            &smb_req("ad", None, false),
+            |_| None,
+            |_, _| Err(ConnectError::AuthFailed),
+        );
+        assert_eq!(r, Err(crate::smb::SMB_KERBEROS_FAILED.to_string()));
+        let mut req = smb_req("ad", None, false);
+        req.attempt = Some("k1".into());
+        let r = c.connect_smb(
+            &data,
+            &ctx,
+            &req,
+            |_| None,
+            |_, _| {
+                c.cancel_attempt("k1");
+                Ok(mp.clone())
+            },
+        );
+        assert_eq!(r, Err(SMB_CANCELLED.to_string()));
+    }
+
+    #[test]
+    fn smb_disconnect_and_share_list() {
+        let t = tempfile::tempdir().unwrap();
+        let data = loc(StorageMode::System, t.path());
+        let (c, _) = connector();
+        let a = smb_srv("a", "zb");
+        let mut b = smb_srv("b", "zb");
+        b.share = "other".into();
+        let s = srv("ssh");
+        c.save_servers(
+            &data,
+            ServerList {
+                nodes: vec![
+                    ServerNode::Folder {
+                        name: "f".into(),
+                        children: vec![ServerNode::Server(b.clone())],
+                    },
+                    ServerNode::Server(s.clone()),
+                    ServerNode::Server(a.clone()),
+                ],
+            },
+        )
+        .unwrap();
+        let mp = t.path().to_string_lossy().into_owned();
+        let mounts = vec![crate::smb::SmbMount {
+            from: "//zb@NAS/Data".into(),
+            on: mp.clone(),
+            total: 100,
+            free: 40,
+        }];
+        let shares = shares_with_mounts(&c.servers(), &mounts);
+        let names: Vec<_> = shares.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["b", "a"]);
+        assert_eq!(shares[0].mount, None);
+        assert_eq!(shares[1].mount.as_deref(), Some(mp.as_str()));
+        assert_eq!((shares[1].total, shares[1].free), (100, 40));
+
+        let find = |e: &ServerEntry| crate::smb::find_mount_in(e, &mounts);
+        let r = c.disconnect_smb("a", find, |p| {
+            assert_eq!(p, t.path());
+            Ok(())
+        });
+        assert_eq!(r, Ok(mp.clone()));
+        assert_eq!(
+            c.disconnect_smb("a", find, |_| Err("Resource busy".into())),
+            Err("Resource busy".into())
+        );
+        assert_eq!(
+            c.disconnect_smb("b", find, |_| panic!()),
+            Err("'b' is not mounted".into())
+        );
+        assert!(c.disconnect_smb("ssh", find, |_| panic!()).is_err());
+    }
+    #[test]
+    fn smb_cancelled_mount_keeps_no_password() {
+        let t = tempfile::tempdir().unwrap();
+        let data = loc(StorageMode::System, t.path());
+        let ctx = Ctx::new(t.path().join("tmp-root"));
+        let (c, sys) = connector();
+        let mut e = smb_srv("nas", "zb");
+        e.save_password = false;
+        c.save_servers(&data, list_of(&[&e])).unwrap();
+        let mp = t.path().to_path_buf();
+        let mut req = smb_req("nas", Some("typed"), true);
+        req.attempt = Some("a1".into());
+        // The UI cancels while macOS is still mounting; the mount then succeeds.
+        let r = c.connect_smb(
+            &data,
+            &ctx,
+            &req,
+            |_| None,
+            |_, _| {
+                c.cancel_attempt("a1");
+                Ok(mp.clone())
+            },
+        );
+        assert_eq!(r, Err(SMB_CANCELLED.to_string()));
+        let acct = account(&e.id, fxfm_core::secrets::SecretKind::Password);
+        assert_eq!(sys.get(&acct).unwrap(), None);
+        assert_eq!(c.session_secrets.get(&acct).unwrap(), None);
+        assert!(!c.servers().find_by_name("nas").unwrap().save_password);
+        // A cancel after the attempt finished changes nothing for the next one.
+        c.cancel_attempt("a1");
+        req.attempt = Some("a2".into());
+        let r = c.connect_smb(&data, &ctx, &req, |_| None, |_, _| Ok(mp.clone()));
+        assert!(matches!(r, Ok(ConnectReply::Connected { .. })));
+        assert_eq!(sys.get(&acct).unwrap().as_deref(), Some("typed"));
+        assert!(c.abandoned.lock().unwrap().is_empty());
     }
 }

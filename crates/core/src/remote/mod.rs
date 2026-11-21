@@ -286,6 +286,10 @@ pub fn connect(
         Protocol::Sftp => Ok(Arc::new(sftp::SftpFs::connect(server, creds, opts)?)),
         Protocol::Scp => Ok(Arc::new(scp::ScpFs::connect(server, creds, opts)?)),
         Protocol::Ftp | Protocol::Ftps => Ok(Arc::new(ftp::FtpFs::connect(server, creds, opts)?)),
+        // macOS mounts SMB shares; there is no SMB backend (see `servers::smb_url`).
+        Protocol::Smb => Err(ConnectError::Failed(
+            "SMB shares are mounted by macOS, not connected".into(),
+        )),
     }
 }
 

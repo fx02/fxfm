@@ -1,0 +1,37 @@
+{
+  "font": "#ffffff",
+  "background": "#000000",
+  "background2": "#000000",
+  "mark": "#ff3b30",
+  "cursor": "#555555",
+  "cursorFont": "#ffff4d",
+  "invertedCursor": true,
+  "hidden": "#9a9a9a",
+  "byType": true,
+  "typeRules": [
+    {
+      "masks": "*.log;*.txt;*.ini;*.cfg;*.conf;*.md;*.rtf;*.pdf;*.doc;*.docx;*.xls;*.xlsx;*.ppt;*.pptx;*.odt;*.ods;*.csv;*.json;*.xml;*.yaml;*.yml;*.htm;*.html;*.srt;*.sub",
+      "color": "#c8c8c8"
+    },
+    {
+      "masks": "*.app;*.command;*.sh;*.pkg;*.exe;*.bat;*.msi;*.com;*.jar;*.torrent",
+      "color": "#5fd35f"
+    },
+    {
+      "masks": "*.jpg;*.jpeg;*.gif;*.tif;*.tiff;*.png;*.heic;*.webp;*.svg;*.psd;*.bmp;*.ico;*.icns;*.raw;*.cr2;*.nef",
+      "color": "#ffff4d"
+    },
+    {
+      "masks": "*.zip;*.rar;*.7z;*.gz;*.tgz;*.tar;*.bz2;*.xz;*.zst;*.iso;*.dmg;*.cab;*.arj;*.lha;*.img;*.bin;*.cue",
+      "color": "#ff6a4d"
+    },
+    {
+      "masks": "*.avi;*.mpg;*.mpeg;*.mp4;*.m4v;*.mkv;*.mov;*.wmv;*.flv;*.webm;*.ts;*.mts;*.vob;*.3gp",
+      "color": "#8a8aff"
+    },
+    {
+      "masks": "*.mp3;*.wav;*.flac;*.ogg;*.oga;*.opus;*.m4a;*.aac;*.aif;*.aiff;*.wma;*.ac3;*.au;*.gsm",
+      "color": "#8a8aff"
+    }
+  ]
+}

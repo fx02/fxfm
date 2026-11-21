@@ -1,10 +1,12 @@
-// Drag & drop: out of a panel into other apps (native file drag of local entries), in from
-// other apps (Tauri drag-drop events with paths) and between the panels.
+// Drag & drop: out of a panel into other apps (native macOS drag), in from other apps (Tauri
+// drag-drop events with paths) and between the panels.
 //
-// One drop path for everything: a drag of local entries is a native macOS drag (any app can
-// take it); when it comes back over fxfm it arrives like a Finder drop, and `native` tells
-// which panel started it. Archive and server entries cannot be dragged natively: they are
-// dragged inside the webview with mouse events (`internal`), so only between the panels.
+// One drop path for everything: a panel drag is a native macOS drag (any app can take it);
+// local entries go as files, archive and server entries as file promises (written only when
+// the receiver asks for them). When the drag comes back over fxfm it arrives like a Finder
+// drop (a promise without paths), and `native` tells which panel started it. If the native
+// drag cannot start, archive and server entries are dragged inside the webview with mouse
+// events (`internal`), so at least between the panels.
 
 import {
   archiveOf,
@@ -15,11 +17,13 @@ import {
   dragStarted,
   dropTarget,
   isRemote,
+  isSearchLocation,
   joinLocation,
-  samePaths,
+  operationPaths,
+  ownDropPaths,
+  resultOpRefusal,
 } from "./lib.mjs";
 
-const NOT_SUPPORTED = "Dragging out of archives and servers is not supported yet";
 /** A native drop counts as fxfm's own drag this long after the session ended (event order varies). */
 const OWN_DROP_GRACE_MS = 2000;
 
@@ -30,7 +34,12 @@ const OWN_DROP_GRACE_MS = 2000;
 let ctx = null;
 /** Left button pressed on a row: {panel, name, x, y}; a drag starts once it moves > 5 px. */
 let press = null;
-/** Drag fxfm started: {panel, location, paths, clearsMarks}; `native` also has `endedAt`. */
+/**
+ * Drag fxfm started: {panel, location, cwd, paths, promised, clearsMarks}; `native` also has
+ * `endedAt`. `cwd` is where a relative target resolves (a results list: the first item's
+ * folder); `promised`: archive or server entries (file promises, no paths in drop events).
+ * `internal` has `outsideError`: why the native drag failed (shown when leaving the window).
+ */
 let native = null;
 let internal = null;
 /** Paths of the native drag currently over the window (from the enter event). */
@@ -59,29 +68,43 @@ function begin(p) {
   if (!names.length) return;
   ctx.activate(p.panel);
   const location = p.panel.location;
+  // A results list drags its items from their own folders (`path`): local files, or entries
+  // that are all inside archives (file promises).
+  const results = isSearchLocation(location);
+  const picked = names.map((n) => p.panel.entries.find((e) => !e.up && e.name === n));
+  const entries = results ? picked.filter(Boolean) : null;
+  if (results) {
+    const why = resultOpRefusal(entries, "drag");
+    if (why) {
+      ctx.status(why);
+      return;
+    }
+  }
+  const { cwd, paths } = results
+    ? operationPaths(location, entries)
+    : { cwd: location, paths: names.map((n) => joinLocation(location, n)) };
   const drag = {
     panel: p.panel,
     location,
-    paths: names.map((n) => joinLocation(location, n)),
+    cwd,
+    paths,
+    // By name only (as elsewhere in the UI); Rust checks every path again.
+    promised: results ? entries.every((e) => e.inArchive) : isRemote(location) || archiveOf(location) !== null,
     // A finished copy/move clears the marks only when the drag carried them (as F5 does).
     clearsMarks: p.panel.marked.has(p.name),
   };
-  // By name only (as elsewhere in the UI); Rust checks again and refuses non-local paths.
-  if (isRemote(location) || archiveOf(location)) {
-    startInternal(drag);
-    return;
-  }
+  const dirs = results ? entries.map((e) => !!e.isDir) : picked.map((e) => !!e?.isDir);
   native = { ...drag, endedAt: null };
-  ctx.invoke("start_drag", { paths: drag.paths }).catch((e) => {
+  ctx.invoke("start_drag", { paths: drag.paths, dirs }).catch((e) => {
     if (native?.paths === drag.paths) native = null;
     // Still dragging: at least the panel-to-panel drag works.
-    if (buttonDown && String(e) === NOT_SUPPORTED) startInternal(drag);
+    if (buttonDown && drag.promised) startInternal(drag, String(e));
     else ctx.status(`Cannot drag: ${e}`);
   });
 }
 
-function startInternal(drag) {
-  internal = { ...drag, outside: false };
+function startInternal(drag, outsideError) {
+  internal = { ...drag, outside: false, outsideError };
   document.body.classList.add("dragging");
 }
 
@@ -103,7 +126,8 @@ function hitTest(x, y) {
 
 /** Target of dropping `paths` at `hit` (null: nothing happens); `source`: the drag fxfm started or null. */
 function targetOf(hit, paths, source) {
-  if (!hit || !paths?.length) return null;
+  // Nothing can be dropped into a results list (it is no folder).
+  if (!hit || !paths?.length || isSearchLocation(hit.panel.location)) return null;
   return dropTarget({
     panelLocation: hit.panel.location,
     rowEntry: hit.entry,
@@ -123,9 +147,9 @@ function highlight(hit, paths, source) {
   panel.setDropHighlight(true, onRow ? hit.index : -1);
 }
 
-/** A native drop that came from fxfm's own drag (same paths, session not long over). */
+/** A native drop that came from fxfm's own drag (its paths, session not long over). */
 function ownDrag(paths) {
-  if (!native || !samePaths(paths, native.paths)) return null;
+  if (!ownDropPaths(native, paths)) return null;
   if (native.endedAt !== null && performance.now() - native.endedAt > OWN_DROP_GRACE_MS) return null;
   return native;
 }
@@ -141,7 +165,7 @@ function drop(hit, paths, source, shift) {
   if (target === null) return;
   // A drop from another app leaves that app in front: the dialog needs the keyboard.
   ctx.focusWindow();
-  const cwd = source ? source.location : (commonParent(paths) ?? hit.panel.location);
+  const cwd = source ? source.cwd : (commonParent(paths) ?? hit.panel.location);
   ctx
     .copyMoveTo(shift ? "move" : "copy", {
       paths,
@@ -163,7 +187,7 @@ function onMouseMove(ev) {
       return;
     }
     const outside = ev.clientX < 0 || ev.clientY < 0 || ev.clientX >= innerWidth || ev.clientY >= innerHeight;
-    if (outside && !internal.outside) ctx.status(NOT_SUPPORTED);
+    if (outside && !internal.outside) ctx.status(`Cannot drag out: ${internal.outsideError}`);
     internal.outside = outside;
     highlight(outside ? null : hitTest(ev.clientX, ev.clientY), internal.paths, internal);
     return;
@@ -201,7 +225,9 @@ async function onNativeDrag(ev) {
   if (p.type === "enter") hoverPaths = p.paths ?? [];
   const { x, y } = dragDropPoint(p.position, devicePixelRatio, true);
   if (p.type === "enter" || p.type === "over") {
-    highlight(hitTest(x, y), hoverPaths, ownDrag(hoverPaths ?? []));
+    const own = ownDrag(hoverPaths ?? []);
+    // fxfm's own file promises carry no paths: the drag knows them.
+    highlight(hitTest(x, y), own ? own.paths : hoverPaths, own);
     return;
   }
   if (p.type !== "drop") return;
@@ -209,21 +235,31 @@ async function onNativeDrag(ev) {
   const keys = ctx.invoke("drag_modifiers").catch(() => ({ shift: shiftDown }));
   hoverPaths = null;
   highlight(null);
-  const paths = p.paths ?? [];
   const hit = hitTest(x, y);
-  const source = ownDrag(paths);
+  const source = ownDrag(p.paths ?? []);
+  const paths = source ? source.paths : (p.paths ?? []);
   if (source) native = null;
   if (!paths.length || !hit || ctx.topModal()) return;
   drop(hit, paths, source, (await keys).shift);
 }
 
+/** Delays of the panel refreshes after a drag-out the receiver moved (Finder may finish later). */
+const MOVED_REFRESH_MS = [0, 1000];
+
 function onDragEnded(ev) {
-  const { result, message } = ev.payload;
-  if (!native) return;
+  const { result, operation, message } = ev.payload;
   if (result === "error") {
+    // Also after the drop: a file promise that could not be written.
     native = null;
     ctx.status(`Cannot drag: ${message}`);
     return;
+  }
+  if (!native) return;
+  if (operation === "move") {
+    const panel = native.panel;
+    for (const ms of MOVED_REFRESH_MS) {
+      setTimeout(() => panel.refresh().catch((e) => console.error("fxfm: refresh", e)), ms);
+    }
   }
   native.endedAt = performance.now();
 }

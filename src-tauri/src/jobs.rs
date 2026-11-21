@@ -4,7 +4,7 @@
 //! `job://error {job, path, msg}`, `job://done {job, summary | error}`, and
 //! `connections://changed {lost}` after `job://done` when a connection died.
 
-use fxfm_core::archive::pack::{pack_zip, PackOptions, Secret, ZipEncryption};
+use fxfm_core::archive::pack::{pack as pack_archive, PackOptions, Secret, ZipEncryption};
 use fxfm_core::ops::{
     ConflictAnswer, ConflictInfo, ErrorAnswer, OpError, OpObserver, OpSummary, Progress,
 };
@@ -62,11 +62,14 @@ pub enum JobRequest {
         encryption: ZipEncryption,
         #[serde(default)]
         overwrite: bool,
+        /// Add to the existing archive `target` instead of making a new one.
+        #[serde(default)]
+        add: bool,
     },
 }
 
-/// Refusal for packing anything that is not a local file or folder.
-pub const PACK_LOCAL_ONLY: &str = "Packing works with local files for now.";
+/// Refusal for adding to an archive that is not a local file.
+pub const PACK_ADD_LOCAL_ONLY: &str = "Adding works only to an archive in a local folder";
 
 /// The local path of `loc` when it is a local item (an archive file itself counts, its
 /// inside does not).
@@ -78,31 +81,99 @@ fn local_item(loc: &str) -> Option<PathBuf> {
     }
 }
 
-/// Checks that everything is local and packs. A relative `target` is taken in `cwd`.
+/// Packs `sources` into `target` (relative: in `cwd`). Sources inside archives or on servers
+/// are first copied to a temporary folder; a target inside an archive or on a server is
+/// packed in a temporary folder and then copied there. Temporary folders are removed.
 fn pack(
+    ctx: &Ctx,
     sources: &[String],
     cwd: &str,
     target: &str,
     opts: &PackOptions,
     obs: &dyn OpObserver,
 ) -> Result<OpSummary, OpError> {
-    let local_only = || OpError::Io(PACK_LOCAL_ONLY.into());
-    let base = local_item(cwd).ok_or_else(local_only)?;
-    if target.contains("://") {
-        return Err(local_only());
+    let target = if target.starts_with('/') || target.contains("://") {
+        target.to_string()
+    } else {
+        format!("{}/{target}", cwd.trim_end_matches('/'))
+    };
+    let (dest_dir, name) = match target.rsplit_once('/') {
+        Some((d, n)) if !n.is_empty() => (
+            if d.is_empty() || d.ends_with(':') {
+                format!("{d}/")
+            } else {
+                d.to_string()
+            },
+            n.to_string(),
+        ),
+        _ => return Err(OpError::Io(format!("{target}: not a file path"))),
+    };
+    let local_dest = matches!(vfs::parse(&dest_dir), Loc::Local(_));
+    if opts.add && !local_dest {
+        return Err(OpError::Io(PACK_ADD_LOCAL_ONLY.into()));
     }
-    let target = base.join(target);
-    // The folder must be a real folder, not the inside of an archive.
-    let dir = target.parent().ok_or_else(local_only)?;
-    if !matches!(vfs::parse(&dir.to_string_lossy()), Loc::Local(_)) {
-        return Err(local_only());
+    let mut temps: Vec<PathBuf> = Vec::new();
+    let res = (|| {
+        let temp = |temps: &mut Vec<PathBuf>, prefix: &str| -> Result<PathBuf, OpError> {
+            let d = ctx
+                .new_temp_dir(prefix)
+                .map_err(|e| OpError::Io(e.to_string()))?;
+            temps.push(d.clone());
+            Ok(d)
+        };
+        // Sources: local as they are, otherwise copied out first.
+        let local: Option<Vec<PathBuf>> = sources.iter().map(|s| local_item(s)).collect();
+        let (paths, base) = match (local, local_item(cwd)) {
+            (Some(p), Some(b)) => (p, b),
+            (Some(p), None) => {
+                let b = p
+                    .first()
+                    .and_then(|x| x.parent())
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| PathBuf::from("/"));
+                (p, b)
+            }
+            (None, _) => {
+                let stage = temp(&mut temps, "pack-src")?;
+                let s = vfs::copy(ctx, sources, &stage.to_string_lossy(), cwd, obs)?;
+                if s.cancelled {
+                    return Ok(s);
+                }
+                let mut names: Vec<PathBuf> = std::fs::read_dir(&stage)
+                    .map_err(|e| OpError::Io(e.to_string()))?
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .collect();
+                names.sort();
+                (names, stage)
+            }
+        };
+        if local_dest {
+            return pack_archive(&paths, &base, Path::new(&target), opts, obs);
+        }
+        // Packed here, then copied into the archive or onto the server.
+        let out = temp(&mut temps, "pack-out")?.join(&name);
+        let s = pack_archive(&paths, &base, &out, opts, obs)?;
+        if s.cancelled {
+            return Ok(s);
+        }
+        let up = vfs::copy(
+            ctx,
+            &[out.to_string_lossy().into_owned()],
+            &dest_dir,
+            &out.parent()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            obs,
+        )?;
+        Ok(OpSummary {
+            cancelled: up.cancelled,
+            ..s
+        })
+    })();
+    for d in temps {
+        ctx.cleanup_dir(&d);
     }
-    let paths = sources
-        .iter()
-        .map(|s| local_item(s))
-        .collect::<Option<Vec<_>>>()
-        .ok_or_else(local_only)?;
-    pack_zip(&paths, &base, &target, opts, obs)
+    res
 }
 
 /// A reply from the UI to a waiting job.
@@ -303,7 +374,7 @@ pub fn run_job(ctx: &Ctx, req: &JobRequest, obs: &dyn OpObserver) -> Result<OpSu
         JobRequest::Delete { paths, to_trash } => vfs::delete(ctx, paths, *to_trash, obs),
         JobRequest::Upload { local, target } => {
             // Never create a folder named like an archive that is gone.
-            vfs::check_upload_target(ctx, target).map_err(OpError::Io)?;
+            vfs::check_upload_target(ctx, target, None).map_err(OpError::Io)?;
             let cwd = Path::new(local)
                 .parent()
                 .map_or_else(|| "/".to_string(), |p| p.to_string_lossy().into_owned());
@@ -322,13 +393,15 @@ pub fn run_job(ctx: &Ctx, req: &JobRequest, obs: &dyn OpObserver) -> Result<OpSu
             password,
             encryption,
             overwrite,
+            add,
         } => {
             let opts = PackOptions {
                 password: password.as_ref().map(|p| p.0.clone()),
                 encryption: *encryption,
                 overwrite: *overwrite,
+                add: *add,
             };
-            pack(sources, cwd, target, &opts, obs)
+            pack(ctx, sources, cwd, target, &opts, obs)
         }
     }
 }
@@ -663,6 +736,7 @@ mod tests {
             password: None,
             encryption: ZipEncryption::Aes256,
             overwrite: false,
+            add: false,
         }
     }
 
@@ -696,40 +770,56 @@ mod tests {
     }
 
     #[test]
-    fn pack_job_refuses_archives_and_servers() {
+    fn pack_job_packs_from_and_into_archives() {
         let t = tempfile::tempdir().unwrap();
         let ctx = Ctx::new(t.path().join("tmp-root"));
         let tar_path = t.path().join("a.tar");
         make_tar(&tar_path, &[("x.txt", b"hello")]);
         let local = s(&t.path().join("b.txt"));
         std::fs::write(&local, b"bee").unwrap();
-        let refused = OpError::Io(PACK_LOCAL_ONLY.into());
-        for req in [
-            // a source inside an archive
-            pack_req(
-                vec![format!("{}/x.txt", s(&tar_path))],
-                s(&tar_path),
-                s(&t.path().join("o.zip")),
+        let names = |p: &Path, kind| {
+            let idx = fxfm_core::archive::read::read_index(p, kind).unwrap();
+            let mut v: Vec<String> = idx.entries.iter().map(|e| e.path.clone()).collect();
+            v.sort();
+            v
+        };
+        // A source inside an archive.
+        let req = pack_req(
+            vec![format!("{}/x.txt", s(&tar_path))],
+            s(&tar_path),
+            s(&t.path().join("o.zip")),
+        );
+        run_job(&ctx, &req, &probe(ConflictAnswer::Cancel)).unwrap();
+        assert_eq!(
+            names(
+                &t.path().join("o.zip"),
+                fxfm_core::archive::ArchiveKind::Zip
             ),
-            // a source on a server
-            pack_req(
-                vec!["sftp://web/x".into()],
-                "sftp://web/".into(),
-                s(&t.path().join("o.zip")),
-            ),
-            // a target inside an archive
-            pack_req(
-                vec![local.clone()],
-                s(t.path()),
-                format!("{}/o.zip", s(&tar_path)),
-            ),
-            // a target on a server
-            pack_req(vec![local.clone()], s(t.path()), "sftp://web/o.zip".into()),
-        ] {
-            let e = run_job(&ctx, &req, &probe(ConflictAnswer::Cancel)).unwrap_err();
-            assert_eq!(e, refused, "{req:?}");
-        }
-        assert!(!t.path().join("o.zip").exists());
+            ["x.txt"]
+        );
+        // A target inside an archive.
+        let req = pack_req(
+            vec![local.clone()],
+            s(t.path()),
+            format!("{}/in.zip", s(&tar_path)),
+        );
+        run_job(&ctx, &req, &probe(ConflictAnswer::Cancel)).unwrap();
+        assert_eq!(
+            names(&tar_path, fxfm_core::archive::ArchiveKind::Tar),
+            ["in.zip", "x.txt"]
+        );
+        // Temporary folders are gone.
+        let left = std::fs::read_dir(t.path().join("tmp-root"))
+            .map(|d| d.count())
+            .unwrap_or(0);
+        assert_eq!(left, 0);
+        // A server that is not connected fails; nothing is left behind.
+        let req = pack_req(vec![local.clone()], s(t.path()), "sftp://web/o2.zip".into());
+        assert!(run_job(&ctx, &req, &probe(ConflictAnswer::Cancel)).is_err());
+        let left = std::fs::read_dir(t.path().join("tmp-root"))
+            .map(|d| d.count())
+            .unwrap_or(0);
+        assert_eq!(left, 0);
     }
 
     /// Answers conflicts with `answer`; counts them.

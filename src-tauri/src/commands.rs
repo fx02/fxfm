@@ -19,7 +19,7 @@ use fxfm_core::storage::{self, DataLocation, StorageMode};
 use fxfm_core::vfs;
 use fxfm_core::viewer::{self, ViewContent};
 use fxfm_core::volumes::{self, Volume};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -295,18 +295,28 @@ pub async fn save_settings(
     blocking(move || {
         let state = app.state::<AppState>();
         let mods = settings.modifiers;
-        let changed = {
+        let (changed, search) = {
             // Held while saving, as before: a storage move waits for it.
             let data = lock(&state.data);
             let mut cur = lock(&state.settings);
             // The backend keeps this list; the UI's copy may be older.
             settings.keymap_commands = cur.keymap_commands.clone();
+            // Once asked, the index choice never goes back to "not asked" (`search_build`
+            // sets it in the backend; the UI's copy may be older).
+            if settings.search.index.is_none() {
+                settings.search.index = cur.search.index;
+            }
             storage::save_json(&data.dir, SETTINGS_FILE, &settings).map_err(|e| e.to_string())?;
             state.audio.set_output(settings.audio_output.clone());
+            state.audio.set_volume(settings.audio_volume);
             let changed = cur.modifiers != mods;
+            let search = settings.search.clone();
             *cur = settings;
-            changed
+            (changed, search)
         };
+        // After the data and settings locks are released: turning the index off waits for the
+        // index write lock.
+        state.search.apply_settings(&search);
         let keymap = lock(&state.keymap).clone();
         if changed {
             menu::refresh(&app, &keymap, &mods);
@@ -423,6 +433,7 @@ pub async fn set_storage_mode(
             &state.system_dir,
         )?;
         *data = to;
+        state.search.set_data_dir(&data.dir);
         let message = match (changed, mode) {
             (false, _) => String::new(),
             (true, StorageMode::System) => {
@@ -489,6 +500,46 @@ pub async fn rename(
     blocking(move || watch(&app, &ctx, || vfs::rename(&ctx, &path, &new_name))).await?
 }
 
+/// One multi-rename result for the UI: the item's path now, or why it was not renamed.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MultiRenameResult {
+    pub path: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Multi-rename (Ctrl+M) of local items; each keeps its folder.
+#[tauri::command]
+pub async fn multi_rename(
+    items: Vec<fxfm_core::multirename::RenameItem>,
+) -> Result<Vec<MultiRenameResult>, String> {
+    if let Some(it) = items.iter().find(|it| {
+        let p = it.path.to_string_lossy();
+        !p.starts_with('/') || parse_remote(&p).is_some() || split_location(&p).is_some()
+    }) {
+        return Err(format!(
+            "Multi-rename works on local files only: {}",
+            it.path.display()
+        ));
+    }
+    blocking(move || {
+        fxfm_core::multirename::multi_rename(&items)
+            .into_iter()
+            .map(|r| match r {
+                Ok(p) => MultiRenameResult {
+                    path: Some(p.to_string_lossy().into_owned()),
+                    error: None,
+                },
+                Err(e) => MultiRenameResult {
+                    path: None,
+                    error: Some(e),
+                },
+            })
+            .collect()
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn view_content(path: String) -> Result<ViewContent, String> {
     blocking(move || viewer::read_for_view(Path::new(&path)).map_err(|e| e.to_string())).await?
@@ -534,6 +585,26 @@ pub fn set_archive_password(state: State<'_, AppState>, archive: String, passwor
 /// regular file; a real folder named `x.zip` is not).
 fn archive_location(location: &str) -> bool {
     fxfm_core::archive::split_location(location).is_some()
+}
+
+/// The `paths` that still exist, in order: local paths by `symlink_metadata` (a dangling link
+/// counts), archive entries while the archive file exists, server paths as they are (never
+/// checked: no connection is opened for this).
+fn existing_paths(paths: Vec<String>) -> Vec<String> {
+    paths
+        .into_iter()
+        .filter(|p| match vfs::parse(p) {
+            vfs::Loc::Local(path) => std::fs::symlink_metadata(path).is_ok(),
+            // `parse` only gives an archive location while the archive is a regular file.
+            vfs::Loc::Archive(_) | vfs::Loc::Remote(_) => true,
+        })
+        .collect()
+}
+
+/// Search results in a panel: which of them still exist (see [`existing_paths`]).
+#[tauri::command]
+pub async fn paths_exist(paths: Vec<String>) -> Result<Vec<String>, String> {
+    blocking(move || existing_paths(paths)).await
 }
 
 #[tauri::command]
@@ -599,6 +670,89 @@ pub async fn open_viewer(
     Ok(())
 }
 
+/// Label of the Find files window (Alt+F7, `search.html`); there is one at a time.
+pub const FIND_FILES_WINDOW: &str = "findfiles";
+/// Smallest Find files window (logical pixels); `FIND_FILES_MIN` in lib.mjs is the same.
+const FIND_FILES_MIN: (f64, f64) = (520.0, 380.0);
+
+/// Where the Find files window was last (logical pixels), kept by the UI in browser storage.
+#[derive(Deserialize, Clone, Copy, Debug)]
+pub struct WindowGeometry {
+    pub x: Option<f64>,
+    pub y: Option<f64>,
+    pub width: f64,
+    pub height: f64,
+    #[serde(default)]
+    pub maximized: bool,
+}
+
+/// A kept window position is used only while a point just inside its top-left corner is on
+/// one of `screens` (logical `(x, y, width, height)`): the screen it was on may be gone.
+fn on_screen(screens: &[(f64, f64, f64, f64)], x: f64, y: f64) -> bool {
+    let (px, py) = (x + 40.0, y + 10.0);
+    screens
+        .iter()
+        .any(|&(sx, sy, w, h)| px >= sx && px < sx + w && py >= sy && py < sy + h)
+}
+
+/// The screens in logical pixels.
+fn screens(app: &AppHandle) -> Vec<(f64, f64, f64, f64)> {
+    app.available_monitors()
+        .unwrap_or_default()
+        .iter()
+        .map(|m| {
+            let s = m.scale_factor();
+            let (p, z) = (m.position(), m.size());
+            (
+                f64::from(p.x) / s,
+                f64::from(p.y) / s,
+                f64::from(z.width) / s,
+                f64::from(z.height) / s,
+            )
+        })
+        .collect()
+}
+
+/// Alt+F7: opens the Find files window (`findfiles`, `search.html`) at its kept geometry, or
+/// brings the open one to the front. True when a new window was created. The window starts
+/// hidden and shows itself once it is drawn. Async: creating a window from a sync command can
+/// deadlock.
+#[tauri::command]
+pub async fn open_find_files(
+    app: AppHandle,
+    geometry: Option<WindowGeometry>,
+) -> Result<bool, String> {
+    if let Some(w) = app.get_webview_window(FIND_FILES_WINDOW) {
+        let _ = w.unminimize();
+        w.show().map_err(|e| e.to_string())?;
+        w.set_focus().map_err(|e| e.to_string())?;
+        return Ok(false);
+    }
+    let (min_w, min_h) = FIND_FILES_MIN;
+    let mut b = WebviewWindowBuilder::new(
+        &app,
+        FIND_FILES_WINDOW,
+        WebviewUrl::App("search.html".into()),
+    )
+    .title("Find files")
+    .inner_size(820.0, 560.0)
+    .min_inner_size(min_w, min_h)
+    .visible(false);
+    let g = geometry.filter(|g| g.width.is_finite() && g.height.is_finite());
+    if let Some(g) = g {
+        b = b.inner_size(g.width.max(min_w), g.height.max(min_h));
+    }
+    match g.and_then(|g| g.x.zip(g.y)) {
+        Some((x, y)) if on_screen(&screens(&app), x, y) => b = b.position(x, y),
+        _ => b = b.center(),
+    }
+    if g.is_some_and(|g| g.maximized) {
+        b = b.maximized(true);
+    }
+    b.build().map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
 /// F4. A file inside an archive or on a server is copied into `edit-<n>/` and watched;
 /// changes are offered for upload (`edit://changed`). F4 again on the same file reopens
 /// that copy.
@@ -628,10 +782,39 @@ pub async fn open_remote_archive(app: AppHandle, location: String) -> Result<Str
         {
             return Err(format!("not an archive on a server: {location}"));
         }
-        let local = watch(&app, &state.vfs, || edit_copy(&state, &location))?;
-        Ok(path_string(&local))
+        lock(&DOWNLOADS_STOPPED).remove(&location);
+        let mut last = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        let mut progress = |done: u64, total: u64| {
+            if last.elapsed() >= std::time::Duration::from_millis(150) {
+                last = std::time::Instant::now();
+                let _ = tauri::Emitter::emit(
+                    &app,
+                    "download://progress",
+                    serde_json::json!({ "location": location, "done": done, "total": total }),
+                );
+            }
+            !lock(&DOWNLOADS_STOPPED).contains(&location)
+        };
+        let local = watch(&app, &state.vfs, || {
+            state
+                .edits
+                .open_for_edit_with(&state.vfs, &location, &mut progress)
+                .map(|(_, local)| local)
+        });
+        lock(&DOWNLOADS_STOPPED).remove(&location);
+        Ok(path_string(&local?))
     })
     .await?
+}
+
+/// Locations whose `open_remote_archive` download the UI cancelled.
+static DOWNLOADS_STOPPED: std::sync::LazyLock<Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Stops the running `open_remote_archive` download of `location`.
+#[tauri::command]
+pub fn cancel_download(location: String) {
+    lock(&DOWNLOADS_STOPPED).insert(location);
 }
 
 /// The watched local copy of archive or server file `location` (see
@@ -789,6 +972,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn find_files_position_must_be_on_a_screen() {
+        let screens = [(0.0, 0.0, 1440.0, 900.0), (-1920.0, -180.0, 1920.0, 1080.0)];
+        assert!(on_screen(&screens, 100.0, 100.0));
+        assert!(on_screen(&screens, -1500.0, -100.0));
+        // Off to the right of the built-in screen, or above every screen.
+        assert!(!on_screen(&screens, 1420.0, 100.0));
+        assert!(!on_screen(&screens, 100.0, -300.0));
+        assert!(!on_screen(&[], 0.0, 0.0));
+    }
+
+    #[test]
     fn edit_new_name_validation() {
         for bad in ["", ".", "..", "a/b", "/abs", "/", "x\0y"] {
             assert!(!valid_file_name(bad), "{bad:?} must be rejected");
@@ -816,6 +1010,41 @@ mod tests {
         assert!(pending.lock().unwrap().is_none());
         assert!(!flush_pending(&pending, &dir).unwrap());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn paths_exist_keeps_existing_and_archive_entries() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::write(t.path().join("a.txt"), b"x").unwrap();
+        std::fs::create_dir(t.path().join("dir")).unwrap();
+        std::fs::write(t.path().join("pack.zip"), b"x").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(t.path().join("nowhere"), t.path().join("dangling")).unwrap();
+        let p = |n: &str| t.path().join(n).to_str().unwrap().to_string();
+        let mut asked = vec![
+            p("a.txt"),
+            p("missing.txt"),
+            p("dir"),
+            p("pack.zip/docs/inner.txt"),
+            p("gone.zip/inner.txt"),
+            "sftp://server/x.txt".to_string(),
+        ];
+        let mut want = vec![
+            p("a.txt"),
+            p("dir"),
+            p("pack.zip/docs/inner.txt"),
+            "sftp://server/x.txt".to_string(),
+        ];
+        #[cfg(unix)]
+        {
+            // A dangling link is still an entry in its folder.
+            asked.push(p("dangling"));
+            want.push(p("dangling"));
+        }
+        assert_eq!(existing_paths(asked.clone()), want);
+        // The archive file goes: its entries go with it.
+        std::fs::remove_file(t.path().join("pack.zip")).unwrap();
+        assert!(!existing_paths(asked).contains(&p("pack.zip/docs/inner.txt")));
     }
 
     #[test]

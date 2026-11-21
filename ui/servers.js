@@ -35,6 +35,7 @@ import {
   remoteRoot,
   secretChanges,
   serverNames,
+  smbHostLabel,
   storageMasterPrompt,
   tcModifiers,
   treeRows,
@@ -44,7 +45,7 @@ import {
 } from "./lib.mjs";
 import { dialog, popModal, pushModal } from "./dialogs.js";
 
-/** {invoke, home, active(), other(), panels(), status(text), mods()} from app.js. */
+/** {invoke, home, active(), other(), panels(), status(text), mods(), refreshVolumes()} from app.js. */
 let ctx = null;
 
 export function initServers(c) {
@@ -176,15 +177,33 @@ function form({ title, cls, build, buttons, submit, danger = false }) {
   });
 }
 
-/** "Connecting to X…" over everything while `connect` runs (it gives up after 15 s). */
-function busyNote(text) {
+/**
+ * "Connecting to X…" over everything while `connect` runs (it gives up after 15 s).
+ * With `onCancel` (mounting an SMB share, which macOS may take long for) it has a Cancel
+ * button, also on Escape, that calls it.
+ */
+function busyNote(text, onCancel = null) {
   const backdrop = el("div", "backdrop");
   const box = el("div", "dialog busy");
   const body = el("div", "body");
   body.append(el("p", null, text));
   box.append(el("div", "title", "Connect"), body);
+  if (onCancel) {
+    const btns = el("div", "buttons");
+    const cancel = el("button", null, "Cancel");
+    cancel.type = "button";
+    cancel.addEventListener("click", onCancel);
+    btns.append(cancel);
+    box.append(btns);
+  }
   backdrop.append(box);
-  const modal = { el: backdrop, onKey: (e) => e.preventDefault() };
+  const modal = {
+    el: backdrop,
+    onKey: (e) => {
+      e.preventDefault();
+      if (onCancel && e.key === "Escape") onCancel();
+    },
+  };
   // Fast answers (a known host, an open session) do not flash a dialog.
   const timer = setTimeout(() => pushModal(modal), 250);
   return () => {
@@ -398,10 +417,11 @@ function findServer(nodes, name) {
 /**
  * Connects `request` ({server} or {url}; see `ConnectRequest`), answering the backend's
  * questions (host key, password, passphrase, master password) until it is connected.
- * With `navigate` (default) the active panel opens the server and the other panel its local
- * folder. Resolves with the server location, or null (cancelled, or the error was shown).
+ * With `navigate` (default) the active panel (or `panel`) opens the server and the other panel
+ * its local folder (unless `localDir` is false: picking a drive changes only its panel). Resolves with the server location, or null (cancelled, or the error was
+ * shown). A saved SMB share is mounted by macOS instead, and the location is its local folder.
  */
-export async function connectFlow(request, { navigate = true } = {}) {
+export async function connectFlow(request, { navigate = true, panel = null, localDir = true } = {}) {
   const req = { save: false, ...request };
   // Never the URL itself: it may hold a password.
   const name = req.server ?? urlDisplayName(req.url);
@@ -413,24 +433,44 @@ export async function connectFlow(request, { navigate = true } = {}) {
       entry = null;
     }
   }
+  const smb = entry?.protocol === "smb";
   try {
     for (;;) {
       let reply;
-      const done = busyNote(`Connecting to ${name}…`);
+      // Cancel stops waiting: a late SMB mount stays (macOS has it), a late server
+      // connection is closed by the backend.
+      let cancel = null;
+      const cancelled = new Promise((resolve) => {
+        cancel = () => resolve(CANCELLED);
+      });
+      const done = busyNote(smb ? `Mounting ${name}…` : `Connecting to ${name}…`, cancel);
+      // Each attempt has an id, so Cancel can tell the backend to drop its late result.
+      req.attempt = crypto.randomUUID();
+      const call = ctx.invoke("connect", { req });
+      call.catch(() => {}); // a cancelled attempt's late error goes nowhere
       try {
-        reply = await ctx.invoke("connect", { req });
+        reply = await Promise.race([call, cancelled]);
       } catch (e) {
         done();
         await message("Connect", errText(e));
         return null;
       }
       done();
+      if (reply === CANCELLED) {
+        // A late success then keeps no password and moves no panel (the mount itself stays).
+        ctx.invoke("connect_cancel", { attempt: req.attempt }).catch((e) => console.error("fxfm: connect_cancel", e));
+        ctx.status(smb ? `Stopped waiting for ${name}; macOS may still mount it` : `Connecting to ${name} was cancelled`);
+        return null;
+      }
       if (reply.kind === "connected") {
         closedOnPurpose.delete(parseRemote(reply.location)?.server);
+        if (smb) ctx.refreshVolumes?.();
         if (navigate) {
-          await ctx.active().go(reply.location);
-          if (reply.localDir) await ctx.other().go(reply.localDir);
-          ctx.status(`Connected to ${parseRemote(reply.location)?.server ?? name}`);
+          const target = panel ?? ctx.active();
+          await target.go(reply.location);
+          const otherPanel = panel ? ctx.panels().find((p) => p !== panel) : ctx.other();
+          if (localDir && reply.localDir) await otherPanel?.go(reply.localDir);
+          ctx.status(reply.note ?? `Connected to ${parseRemote(reply.location)?.server ?? name}`);
         }
         return reply.location;
       }
@@ -442,7 +482,13 @@ export async function connectFlow(request, { navigate = true } = {}) {
         const a = await askSecret({
           title: phrase ? "Passphrase" : "Password",
           text: phrase ? `Passphrase for the key of ${name}:` : `Password for ${name}:`,
-          retryText: reply.retry ? (phrase ? "Wrong passphrase, try again" : "Wrong password, try again") : null,
+          retryText: reply.retry
+            ? phrase
+              ? "Wrong passphrase, try again"
+              : smb
+                ? "Wrong user name or password."
+                : "Wrong password, try again"
+            : null,
           offerSave: !!entry,
           saveDefault: !!entry?.savePassword,
         });
@@ -463,13 +509,101 @@ export async function connectFlow(request, { navigate = true } = {}) {
   }
 }
 
+/** Marks the busy note's Cancel in `connectFlow`. */
+const CANCELLED = Symbol("cancelled");
+
+/** Every saved server entry of the tree `nodes`, in order. */
+function allServers(nodes) {
+  const out = [];
+  const walk = (list) => {
+    for (const n of list) {
+      if (n.kind === "folder") walk(n.children);
+      else out.push(n);
+    }
+  };
+  walk(nodes);
+  return out;
+}
+
+/**
+ * At startup: mounts the saved SMB shares marked "Connect at startup" that are not mounted
+ * yet, one after another, with their saved passwords. It never asks; a share without a
+ * saved password or that fails is named in the status line.
+ */
+export async function autoConnectShares() {
+  let entries;
+  try {
+    entries = allServers((await ctx.invoke("servers_load")).nodes).filter((e) => e.protocol === "smb" && e.autoConnect);
+  } catch (e) {
+    console.error("fxfm: servers_load", e);
+    return;
+  }
+  if (!entries.length) return;
+  const failed = [];
+  let mounted = 0;
+  for (const e of entries) {
+    try {
+      const reply = await ctx.invoke("connect", { req: { server: e.name, save: false } });
+      if (reply.kind === "connected") mounted++;
+      else failed.push(`${e.name} (${reply.kind === "needMaster" ? "the password vault is locked" : "no saved password"})`);
+    } catch (err) {
+      failed.push(`${e.name} (${errText(err)})`);
+    }
+  }
+  if (mounted) ctx.refreshVolumes?.();
+  if (failed.length) ctx.status(`Not connected at startup: ${failed.join(", ")}`);
+}
+
+/**
+ * Unmounts the saved SMB share `name` (`diskutil unmount`, never forced). Panels inside it go
+ * to the home folder. True when it was unmounted; a busy share shows diskutil's text.
+ */
+export async function disconnectShare(name) {
+  // The panels inside the share are taken before unmounting: the volume watcher may move
+  // them to /Volumes before the unmount call returns.
+  let affected = [];
+  try {
+    const share = (await ctx.invoke("smb_shares")).find((sh) => sh.name === name);
+    const inside = (loc) => share?.mount && (loc === share.mount || loc.startsWith(`${share.mount}/`));
+    affected = ctx.panels().filter((p) => inside(p.location));
+  } catch (e) {
+    console.error("fxfm: smb_shares", e);
+  }
+  let mount;
+  try {
+    mount = await ctx.invoke("smb_unmount", { name });
+  } catch (e) {
+    await message("Disconnect", errText(e));
+    return false;
+  }
+  const inMount = (loc) => loc === mount || loc.startsWith(`${mount}/`);
+  for (const p of ctx.panels()) {
+    if (affected.includes(p) || inMount(p.location)) await p.go(ctx.home);
+  }
+  ctx.refreshVolumes?.();
+  ctx.status(`Disconnected ${name}`);
+  return true;
+}
+
 /** Ctrl+Shift+F: closes the active panel's connection; its panels go to the local folder or home. */
 export async function disconnectActive() {
   // Inside the temp copy of a server archive counts as being on that server.
   const archive = remoteArchiveOf(ctx.active().location, remoteArchives);
   const r = parseRemote(archive ? archive.parent : ctx.active().location);
   if (!r) {
-    ctx.status("Disconnect: this panel is not on a server");
+    // A mounted SMB share: unmount it (like Disconnect in Ctrl+F).
+    const loc = ctx.active().location;
+    let share = null;
+    try {
+      share = (await ctx.invoke("smb_shares")).find((sh) => sh.mount && (loc === sh.mount || loc.startsWith(`${sh.mount}/`)));
+    } catch (e) {
+      console.error("fxfm: smb_shares", e);
+    }
+    if (share) {
+      await disconnectShare(share.name);
+      return;
+    }
+    ctx.status("Disconnect: this panel is not on a server or a mounted share");
     return;
   }
   let local = null;
@@ -737,6 +871,7 @@ const PROTOCOLS = [
   ["scp", "SCP"],
   ["ftp", "FTP"],
   ["ftps", "FTPS"],
+  ["smb", "SMB (network share)"],
 ];
 const AUTHS = [
   ["password", "Password"],
@@ -812,6 +947,13 @@ async function editServer(initial, { otherNames, save }) {
     f.secret.placeholder = auth === "keyPassphrase" ? "Passphrase" : "Password";
     if (initial.savePassword) f.secret.placeholder += " (leave empty to keep the saved one)";
     f.secret.disabled = !f.savePassword.checked;
+    const smb = f.protocol.value === "smb";
+    for (const b of rows.host.querySelectorAll("[data-smb-only]")) b.hidden = !smb;
+    rows.remoteDir.firstChild.textContent = smb ? "Folder in share:" : "Remote dir:";
+    const kerberos = smb && f.kerberos.checked;
+    // Kerberos: the system's ticket logs in, there is no password to save.
+    if (kerberos) rows.savePassword.hidden = true;
+    f.user.placeholder = kerberos ? "optional with Kerberos" : smb ? "empty: guest; DOMAIN\\user for a domain" : "";
   };
 
   const r = await form({
@@ -821,12 +963,91 @@ async function editServer(initial, { otherNames, save }) {
       f.name = textInput(initial.name);
       f.protocol = select(PROTOCOLS, initial.protocol);
       f.host = textInput(initial.host);
+      // SMB: computers that share files on the local network (Bonjour, and Windows over NetBIOS).
+      const browse = smallButton("Browse…", async () => {
+        const done = busyNote("Looking for computers that share files…");
+        let hosts = [];
+        try {
+          hosts = await ctx.invoke("smb_browse");
+        } catch (e) {
+          console.error("fxfm: smb_browse", e);
+        } finally {
+          done();
+        }
+        if (!hosts.length) {
+          await message("Browse", "No computers sharing files were found on the local network.");
+          return;
+        }
+        const r = await dialog({
+          title: "Browse",
+          text: "Computers sharing files on the local network:",
+          buttons: [
+            ...hosts.slice(0, 12).map((h, i) => ({ label: smbHostLabel(h), value: String(i), default: i === 0 })),
+            { label: "Cancel", value: null },
+          ],
+        });
+        if (r == null) return;
+        const h = hosts[Number(r)];
+        f.host.value = h.host;
+        if (!f.name.value.trim()) f.name.value = h.name;
+        f.share.focus();
+      });
+      browse.dataset.smbOnly = "1";
       f.port = el("input", "port");
       f.port.type = "number";
       f.port.min = "1";
       f.port.max = "65535";
       f.port.value = String(initial.port);
       f.user = textInput(initial.user);
+      f.share = textInput(initial.share);
+      // SMB: the shares the server lists for the entered user (smbutil view).
+      const listShares = smallButton("Shares…", async () => {
+        const host = f.host.value.trim();
+        if (!host) {
+          await message("Shares", "Enter the host first.");
+          return;
+        }
+        const user = f.user.value.trim();
+        const kerberos = f.kerberos.checked;
+        let password = null;
+        if (user && !kerberos) {
+          password = f.secret.disabled ? "" : f.secret.value;
+          if (!password) {
+            const s = await askSecret({ title: "Shares", text: `Password of ${user} on ${host}:` });
+            if (!s) return;
+            password = s.secret;
+          }
+        }
+        const done = busyNote(`Asking ${host} for its shares…`);
+        let shares;
+        try {
+          shares = await ctx.invoke("smb_list_shares", { host, port: Number(f.port.value) || 445, user, kerberos, password });
+        } catch (e) {
+          done();
+          await message("Shares", errText(e));
+          return;
+        }
+        done();
+        if (!shares.length) {
+          await message("Shares", `${host} lists no shares for ${user || "a guest"}.`);
+          return;
+        }
+        const r = await dialog({
+          title: "Shares",
+          text: `Shares on ${host}:`,
+          buttons: [
+            ...shares.slice(0, 12).map((sh, i) => ({ label: sh.comment ? `${sh.name} — ${sh.comment}` : sh.name, value: String(i), default: i === 0 })),
+            { label: "Cancel", value: null },
+          ],
+        });
+        if (r == null) return;
+        f.share.value = shares[Number(r)].name;
+        f.share.focus();
+      });
+      listShares.title = "List the shares of the server for this user";
+      const kerb = checkbox("Use the Kerberos ticket (kinit or Ticket Viewer) instead of a password");
+      f.kerberos = kerb.box;
+      f.kerberos.checked = Boolean(initial.kerberos);
       f.auth = select(AUTHS, initial.auth);
       f.keyPath = textInput(initial.keyPath);
       const chooseKey = smallButton("Choose…", async () => {
@@ -860,13 +1081,18 @@ async function editServer(initial, { otherNames, save }) {
       f.ftpPassive = passive.box;
       f.ftpPassive.checked = initial.ftpPassive;
       f.ftpEncoding = select(ENCODINGS, initial.ftpEncoding);
+      const auto = checkbox("Connect at startup (with the saved password)");
+      f.autoConnect = auto.box;
+      f.autoConnect.checked = Boolean(initial.autoConnect);
 
       body.append(
         line("name", "Name:", f.name),
         line("protocol", "Protocol:", f.protocol),
-        line("host", "Host:", f.host),
+        line("host", "Host:", f.host, browse),
         line("port", "Port:", f.port),
         line("user", "User:", f.user),
+        line("share", "Share:", f.share, listShares),
+        line("kerberos", "", kerb.label),
         line("auth", "Authentication:", f.auth),
         line("keyPath", "Key file:", f.keyPath, chooseKey, importKey),
         line("savePassword", "", sp.label, f.secret),
@@ -875,6 +1101,7 @@ async function editServer(initial, { otherNames, save }) {
         line("legacyAlgorithms", "", legacy.label),
         line("ftpPassive", "", passive.label),
         line("ftpEncoding", "Name encoding:", f.ftpEncoding),
+        line("autoConnect", "", auto.label),
       );
       f.protocol.addEventListener("change", () => {
         f.port.value = String(portAfterProtocolChange(protocol, f.protocol.value, f.port.value));
@@ -882,6 +1109,7 @@ async function editServer(initial, { otherNames, save }) {
         sync();
       });
       f.auth.addEventListener("change", sync);
+      f.kerberos.addEventListener("change", sync);
       f.savePassword.addEventListener("change", sync);
       sync();
       return f.name;
@@ -893,6 +1121,7 @@ async function editServer(initial, { otherNames, save }) {
     submit: async () => {
       const ssh = fieldsFor(f.protocol.value).has("auth");
       const auth = ssh ? f.auth.value : "password";
+      const kerberos = f.protocol.value === "smb" && f.kerberos.checked;
       const entry = {
         ...initial,
         name: f.name.value.trim(),
@@ -902,12 +1131,15 @@ async function editServer(initial, { otherNames, save }) {
         user: f.user.value.trim(),
         auth,
         keyPath: f.keyPath.value.trim() || null,
-        savePassword: auth !== "key" && f.savePassword.checked,
+        savePassword: auth !== "key" && !kerberos && f.savePassword.checked,
         remoteDir: f.remoteDir.value.trim() || null,
         localDir: f.localDir.value.trim() || null,
         legacyAlgorithms: f.legacyAlgorithms.checked,
         ftpPassive: f.ftpPassive.checked,
         ftpEncoding: f.ftpEncoding.value,
+        share: f.protocol.value === "smb" ? f.share.value.trim() : "",
+        autoConnect: f.protocol.value === "smb" && f.autoConnect.checked,
+        kerberos,
       };
       const problem = validateServer(entry, otherNames);
       if (problem) return problem;
@@ -930,6 +1162,7 @@ const help = (mods) => [
   "Enter or double click: connect to the selected server. Esc: close.",
   `↑/↓: move the selection. ←/→: close or open a folder. ${comboLabel("Ctrl+Up", mods)}/${comboLabel("Ctrl+Down", mods)} or dragging with the mouse: change the order. Delete: delete the entry.`,
   "New URL…: connect once without saving it, e.g. sftp://user@host:2222/var/www (also scp://, ftp:// and ftps://). Without a user name FTP logs in as anonymous.",
+  "SMB (network share): macOS mounts the share into /Volumes and fxfm opens it like a disk; every saved share is also in the drive list (Alt+F1/Alt+F2) and the drive bar. Disconnect unmounts it.",
   "Saved passwords are kept in the macOS Keychain (system mode) or, in portable mode, encrypted with a master password (Encrypt…).",
 ];
 
@@ -947,6 +1180,16 @@ export async function showConnect() {
   }
   let sel = null;
   let busy = false;
+  /** Names of the saved SMB shares that are mounted now. */
+  let mounted = new Set();
+  const readMounts = async () => {
+    try {
+      const shares = await ctx.invoke("smb_shares");
+      mounted = new Set(shares.filter((sh) => sh.mount).map((sh) => sh.name));
+    } catch (e) {
+      console.error("fxfm: smb_shares", e);
+    }
+  };
   /** Node at `path`, or null when the path no longer exists (after a reload or a delete). */
   const nodeAt = (p) => {
     if (!p) return null;
@@ -980,6 +1223,8 @@ export async function showConnect() {
     work = next;
     if (newSel !== undefined) sel = newSel;
     render();
+    // Saved SMB shares are drives: the drive list follows the server list.
+    ctx.refreshVolumes?.();
     return true;
   };
 
@@ -1030,6 +1275,9 @@ export async function showConnect() {
         });
         row.append(arrow, `📁 ${r.node.name}`);
         row.classList.add("folder");
+      } else if (r.node.protocol === "smb") {
+        const on = mounted.has(r.node.name) ? " (mounted)" : "";
+        row.append(el("span", "twisty", ""), `🌐 ${r.node.name}${on}`);
       } else {
         row.append(el("span", "twisty", ""), `☁️ ${r.node.name}`);
       }
@@ -1059,6 +1307,8 @@ export async function showConnect() {
     list.querySelector(".sel")?.scrollIntoView({ block: "nearest" });
     const n = nodeAt(sel);
     buttons.connect.disabled = n?.kind !== "server";
+    const isMounted = n?.kind === "server" && n.protocol === "smb" && mounted.has(n.name);
+    buttons.disconnect.hidden = !isMounted;
     buttons.duplicate.disabled = n?.kind !== "server";
     buttons.edit.disabled = !n;
     buttons.del.disabled = !n;
@@ -1138,6 +1388,7 @@ export async function showConnect() {
           return errText(err);
         }
         work = next;
+        ctx.refreshVolumes?.();
         return null;
       },
     });
@@ -1243,6 +1494,14 @@ export async function showConnect() {
     else await reload();
   });
 
+  const disconnect = guarded(async () => {
+    const n = nodeAt(sel);
+    if (n?.kind !== "server" || n.protocol !== "smb") return;
+    await disconnectShare(n.name);
+    await readMounts();
+    render();
+  });
+
   const newUrl = guarded(async () => {
     const r = await dialog({
       title: "New URL",
@@ -1300,6 +1559,7 @@ export async function showConnect() {
   connectBtn.classList.add("def");
   side.append(
     connectBtn,
+    mkBtn("disconnect", "Disconnect", disconnect),
     mkBtn(null, "New connection…", guarded(newConnection)),
     mkBtn(null, "New URL…", newUrl),
     mkBtn("duplicate", "Duplicate entry…", guarded(duplicate)),
@@ -1355,6 +1615,7 @@ export async function showConnect() {
     }
   };
 
+  await readMounts();
   render();
   pushModal(modal);
   list.focus();

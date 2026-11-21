@@ -1,11 +1,12 @@
 // One TC file panel: drive bar, path row, current-path bar, virtual list, status line.
 
 import {
+  quickSearchFind,
+  remoteArchiveOf,
   archiveKindOf,
-  archiveOf,
   archiveLeave,
   displayLocation,
-  colorClass,
+  compileTypeRules,
   connectionLabel,
   displayName,
   formatDate,
@@ -14,6 +15,8 @@ import {
   fullyVisibleRows,
   freeLine,
   groupThousands,
+  iconKind,
+  isSearchLocation,
   joinLocation,
   lastComponent,
   markSummary,
@@ -25,10 +28,13 @@ import {
   remoteRoot,
   sideJump,
   refreshTarget,
+  NOT_MOUNTED,
+  resultFolder,
+  rowStyle,
   visibleRange,
 } from "./lib.mjs";
 
-export const VOLUME_ICON = { root: "💻", home: "🏠", volume: "💾", network: "🌐" };
+export const VOLUME_ICON = { root: "💻", home: "🏠", volume: "💾", network: "🌐", server: "☁️" };
 const UP = Object.freeze({ name: "..", isDir: true, up: true, size: 0, hidden: false });
 
 function el(tag, cls, text) {
@@ -38,18 +44,19 @@ function el(tag, cls, text) {
   return e;
 }
 
-function rowIcon(e, cls) {
+function rowIcon(e) {
   if (e.up) return "⬆";
   if (e.isDir) return "📁";
-  if (cls === "arc") return "🗜";
-  if (cls === "med") return "🎬";
+  const kind = iconKind(e);
+  if (kind === "arc") return "🗜";
+  if (kind === "med") return "🎬";
   if (/\.pdf$/i.test(e.name)) return "📕";
   return "📄";
 }
 
-/** The volume containing `location` (longest path prefix), or null (also on a server). */
+/** The volume containing `location` (longest path prefix), or null (also on a server and for search results). */
 export function volumeFor(volumes, location) {
-  if (parseRemote(location)) return null;
+  if (parseRemote(location) || isSearchLocation(location)) return null;
   let best = null;
   for (const v of volumes) {
     const p = v.path;
@@ -66,8 +73,11 @@ export function volumeFor(volumes, location) {
  *   openDefault(path, onFolder?) (onFolder: run instead of the error when a server link's
  *   target is a folder),
  *   showHidden() -> bool, onActivate(panel), onNavigated(panel),
- *   onError(panel, error, target), onDriveMenu(panel), onCursorMoved(panel),
- *   onRowPress(panel, index, mouseEvent) (left button on a row: a drag may follow)
+ *   onError(panel, error, target), onDriveMenu(panel), onDrive(panel, path) (a drive or
+ *   connection button), onCursorMoved(panel),
+ *   onRowPress(panel, index, mouseEvent) (left button on a row: a drag may follow),
+ *   results(panel) -> {entries, query, back: {location, cursorName}} | null (the search
+ *   results this panel shows at SEARCH_LOCATION; `listDir` lists them)
  * }
  */
 export class Panel {
@@ -95,6 +105,9 @@ export class Panel {
     this.rendered = { start: 0, end: 0 };
     /** Row highlighted as a drop target (-1: none). */
     this.dropRow = -1;
+    /** Settings colors and their compiled file-type matcher (see `setColors`). */
+    this.colors = null;
+    this.typeMatcher = compileTypeRules([]);
     this.build(root);
   }
 
@@ -120,6 +133,10 @@ export class Panel {
     this.stDate = el("span", "d");
     this.stMode = el("span", "m");
     this.statusEl.append(this.stName, this.stSize, this.stDate, this.stMode);
+    // Quick search box (TC Alt+letters): shown over the status line while typing.
+    this.qsEl = el("div", "quicksearch");
+    this.qsEl.hidden = true;
+    this.statusEl.append(this.qsEl);
     root.append(this.drivesEl, pathRow, this.curEl, this.listEl, this.statusEl);
 
     root.addEventListener("mousedown", () => this.focus());
@@ -128,7 +145,7 @@ export class Panel {
     upBtn.addEventListener("click", () => this.goParent());
     this.drivesEl.addEventListener("click", (ev) => {
       const b = ev.target.closest("[data-path]");
-      if (b) this.go(b.dataset.path);
+      if (b) this.api.onDrive(this, b.dataset.path);
     });
     this.rowsEl.addEventListener("mousedown", (ev) => {
       const r = ev.target.closest("[data-i]");
@@ -161,6 +178,7 @@ export class Panel {
    * A later go() supersedes an earlier one; refresh() never supersedes a user navigation.
    */
   async go(location, cursorName, { refresh = false } = {}) {
+    if (!refresh) this.quickSearchEnd();
     const token = ++this.navToken;
     if (!refresh) this.pendingTarget = location;
     const r = await navigate(this, location, this.api.listDir, {
@@ -202,8 +220,9 @@ export class Panel {
   rebuild(cursorName = this.cursorName, fallbackIndex = this.cursorIndex) {
     const showHidden = this.api.showHidden();
     const shown = showHidden ? this.raw : this.raw.filter((e) => !e.hidden);
-    // No "[..]" where there is no parent: "/" and a server root.
-    this.entries = this.location === "/" || parentLocation(this.location) === null ? shown : [UP, ...shown];
+    // No "[..]" where there is no parent: "/" and a server root. The results list has one (back).
+    const noParent = this.location === "/" || parentLocation(this.location) === null;
+    this.entries = noParent && !isSearchLocation(this.location) ? shown : [UP, ...shown];
     const names = new Set(shown.map((e) => e.name));
     for (const n of this.marked) if (!names.has(n)) this.marked.delete(n);
     let i = cursorName == null ? -1 : this.entries.findIndex((e) => !e.up && e.name === cursorName);
@@ -231,9 +250,19 @@ export class Panel {
   }
 
   setActive(on) {
+    if (!on) this.quickSearchEnd();
     this.active = on;
     this.root.classList.toggle("active", on);
     this.curEl.classList.toggle("active", on);
+    // The cursor row is drawn differently in the active and the inactive panel.
+    this.renderRows();
+  }
+
+  /** New panel colors; `matcher` is `compileTypeRules(colors.typeRules)`, compiled once by the caller. */
+  setColors(colors, matcher) {
+    this.colors = colors;
+    this.typeMatcher = matcher;
+    this.renderRows();
   }
 
   setRowHeight(px) {
@@ -288,8 +317,17 @@ export class Panel {
     return Math.max(1, Math.floor(this.listEl.clientHeight / this.rowH) - 1);
   }
 
-  /** Backspace / [..]: nothing at "/" or at a server root. */
+  /** The search results this panel shows, or null (not a results panel). */
+  get results() {
+    return isSearchLocation(this.location) ? (this.api.results?.(this) ?? null) : null;
+  }
+
+  /** Backspace / [..]: nothing at "/" or at a server root; the results list goes back where it came from. */
   goParent() {
+    if (isSearchLocation(this.location)) {
+      const back = this.results?.back;
+      return back ? this.go(back.location, back.cursorName ?? undefined) : undefined;
+    }
     // The root of a server archive's copy goes back to the server folder, not the temp folder.
     const left = archiveLeave(this.location, remoteArchives);
     if (left) return this.go(left.location, left.cursor);
@@ -299,9 +337,11 @@ export class Panel {
 
   /** Root of the current volume ("/" for the home folder and the boot disk), or of the server. */
   rootLocation() {
-    const server = remoteRoot(this.location);
+    // The results list: the root of the folder it came from.
+    const here = isSearchLocation(this.location) ? (this.results?.back.location ?? "/") : this.location;
+    const server = remoteRoot(here);
     if (server) return server;
-    const v = volumeFor(this.volumes, this.location);
+    const v = volumeFor(this.volumes, here);
     return v && v.kind !== "home" ? v.path : "/";
   }
 
@@ -313,10 +353,12 @@ export class Panel {
     const e = this.cursorEntry;
     if (!e) return;
     if (e.up) return this.goParent();
+    // A search result (file or folder): its folder, cursor on it (TC).
+    if (isSearchLocation(this.location)) return this.goToResult();
     const path = joinLocation(this.location, e.name);
     if (e.isDir) return this.go(path);
-    // An archive opens as a folder; inside an archive (nested) it is a plain file.
-    if (archiveKindOf(e.name) && !archiveOf(this.location)) {
+    // An archive opens as a folder, also one inside an archive (nested).
+    if (archiveKindOf(e.name)) {
       if (!parseRemote(this.location)) return this.go(path);
       return this.enterRemoteArchive(path);
     }
@@ -329,6 +371,18 @@ export class Panel {
     return this.api.openDefault(path);
   }
 
+  /**
+   * Enter / Ctrl+PgUp in the results list: the cursor item's folder with the cursor on it
+   * (an archive entry: the folder inside the archive).
+   */
+  goToResult() {
+    const e = this.cursorEntry;
+    if (!isSearchLocation(this.location) || !e || e.up || !e.path) return;
+    if (e.mounted === false) return this.setMessage(NOT_MOUNTED);
+    const { folder, name } = resultFolder(e);
+    return this.go(folder, name);
+  }
+
   /** Enter on an archive on a server: a tracked local copy is downloaded and entered. */
   async enterRemoteArchive(path) {
     if (this.downloading) return null;
@@ -339,7 +393,8 @@ export class Panel {
       this.api.status?.(`Downloading ${lastComponent(path)}…`);
       local = await this.api.openRemoteArchive(path);
     } catch (e) {
-      this.api.onError(this, e, path);
+      if (String(e?.message ?? e) === "Download cancelled") this.setMessage(`Download of ${lastComponent(path)} cancelled`);
+      else this.api.onError(this, e, path);
       return null;
     } finally {
       this.downloading = false;
@@ -348,6 +403,60 @@ export class Panel {
     if (this.location !== parent) return null;
     remoteArchives.set(local, parent);
     return this.go(local);
+  }
+
+  // ---- quick search (TC Alt+letters) ----
+
+  /** True while the quick search box is open. */
+  get quickSearching() {
+    return this.qsText != null;
+  }
+
+  /**
+   * Adds `ch` to the quick search text and puts the cursor on the first name starting with
+   * it. A character that matches nothing is not added (TC); the box shows the miss.
+   */
+  quickSearchType(ch) {
+    const text = (this.qsText ?? "") + ch;
+    const i = quickSearchFind(this.entries, text);
+    if (i >= 0) {
+      this.qsText = text;
+      this.setCursor(i);
+    } else if (this.qsText == null) {
+      this.qsText = "";
+    }
+    this.quickSearchShow(i < 0 ? text : null);
+  }
+
+  /** Backspace: drops the last character; the cursor goes to the first match of the rest. */
+  quickSearchBack() {
+    if (!this.qsText) return this.quickSearchShow();
+    this.qsText = this.qsText.slice(0, -1);
+    const i = quickSearchFind(this.entries, this.qsText);
+    if (i >= 0) this.setCursor(i);
+    this.quickSearchShow();
+  }
+
+  /** Up/Down: the previous/next name with the same start, wrapping. */
+  quickSearchStep(dir) {
+    const i = quickSearchFind(this.entries, this.qsText ?? "", this.cursorIndex, dir);
+    if (i >= 0) this.setCursor(i);
+    this.quickSearchShow();
+  }
+
+  quickSearchEnd() {
+    clearTimeout(this.qsTimer);
+    this.qsText = null;
+    if (this.qsEl) this.qsEl.hidden = true;
+  }
+
+  /** Shows the box (`missed`: typed text that matched nothing); a 3 s pause closes it. */
+  quickSearchShow(missed = null) {
+    this.qsEl.textContent = missed ?? this.qsText;
+    this.qsEl.classList.toggle("miss", missed != null);
+    this.qsEl.hidden = false;
+    clearTimeout(this.qsTimer);
+    this.qsTimer = setTimeout(() => this.quickSearchEnd(), 3000);
   }
 
   /** Fixed panel keys (not remappable). Returns true when handled. */
@@ -379,7 +488,7 @@ export class Panel {
       if (this.marked.has(e.name)) this.marked.delete(e.name);
       else {
         this.marked.add(e.name);
-        if (e.isDir) this.queueDirSize(e.name);
+        if (e.isDir) this.queueDirSize(e);
       }
     }
     this.setCursor(this.cursorIndex + 1);
@@ -406,14 +515,16 @@ export class Panel {
       if (!on) this.marked.delete(e.name);
       else if (!this.marked.has(e.name)) {
         this.marked.add(e.name);
-        if (e.isDir) this.queueDirSize(e.name);
+        if (e.isDir) this.queueDirSize(e);
       }
     }
     this.render();
   }
 
-  queueDirSize(name) {
-    this.sizeQueue.push({ location: this.location, name });
+  /** `entry`: a marked folder; a search result is sized at its own path. */
+  queueDirSize(entry) {
+    const path = entry.path ?? joinLocation(this.location, entry.name);
+    this.sizeQueue.push({ location: this.location, name: entry.name, path });
     if (!this.sizing) this.drainDirSizes();
   }
 
@@ -421,9 +532,9 @@ export class Panel {
   async drainDirSizes() {
     this.sizing = true;
     while (this.sizeQueue.length) {
-      const { location, name } = this.sizeQueue.shift();
+      const { location, name, path } = this.sizeQueue.shift();
       try {
-        const [bytes] = await this.api.dirSize(joinLocation(location, name), this.side);
+        const [bytes] = await this.api.dirSize(path, this.side);
         if (location === this.location) {
           this.dirSizes.set(name, bytes);
           this.renderStatus();
@@ -453,14 +564,17 @@ export class Panel {
   }
 
   renderHeader() {
-    const vol = volumeFor(this.volumes, this.location);
-    const server = parseRemote(this.location)?.server ?? null;
+    // Inside the local copy of an archive from a server: the drive is that server.
+    const where = remoteArchiveOf(this.location, remoteArchives)?.parent ?? this.location;
+    const vol = parseRemote(where) ? null : volumeFor(this.volumes, where);
+    const server = parseRemote(where)?.server ?? null;
     const conn = this.connections.find((c) => c.name === server) ?? null;
     this.drivesEl.replaceChildren(
       ...this.volumes.map((v) => {
         const b = el("span", v === vol ? "drive on" : "drive", `${VOLUME_ICON[v.kind] ?? "💾"} ${v.name}`);
         b.dataset.path = v.path;
-        b.title = v.path;
+        // A saved SMB share that is not mounted has no folder yet.
+        b.title = v.smb && !v.mounted ? "Not mounted: click to mount the share" : v.path;
         return b;
       }),
       // One button per open connection; it opens the server's root.
@@ -484,7 +598,9 @@ export class Panel {
       this.comboEl.textContent = "";
       this.freeEl.textContent = "";
     }
-    this.curEl.textContent = joinLocation(displayLocation(this.location, remoteArchives), "*.*");
+    this.curEl.textContent = isSearchLocation(this.location)
+      ? displayLocation(this.location, remoteArchives, this.results)
+      : joinLocation(displayLocation(this.location, remoteArchives), "*.*");
   }
 
   ensureVisible() {
@@ -498,25 +614,40 @@ export class Panel {
   rowClass(i) {
     const e = this.entries[i];
     let c = "r";
-    const color = colorClass(e);
-    if (color) c += ` ${color}`;
     if (!e.up && this.marked.has(e.name)) c += " mark";
     if (i === this.cursorIndex) c += " sel";
     if (i === this.dropRow) c += " droptarget";
     return c;
   }
 
-  /** Draws the rows in view; when the range and the data are unchanged only classes are updated. */
+  /** Class and inline colors of row element `r` showing entry `i`; touches the DOM only on change. */
+  paintRow(r, i) {
+    const c = this.rowClass(i);
+    if (r.className !== c) r.className = c;
+    if (!this.colors) return;
+    const e = this.entries[i];
+    const st = rowStyle(
+      e,
+      { marked: !e.up && this.marked.has(e.name), cursor: i === this.cursorIndex, active: this.active, index: i },
+      this.colors,
+      this.typeMatcher,
+    );
+    const key = `${st.color}|${st.background}|${st.outline}`;
+    if (r.colorKey === key) return;
+    r.colorKey = key;
+    r.style.color = st.color;
+    r.style.backgroundColor = st.background;
+    r.style.outline = st.outline;
+  }
+
+  /** Draws the rows in view; when the range and the data are unchanged only classes and colors are updated. */
   renderRows() {
     const list = this.listEl;
     const count = this.entries.length;
     const { start, end } = visibleRange(list.scrollTop, this.rowH, list.clientHeight, count);
     if (!this.rowsDirty && start === this.rendered.start && end === this.rendered.end) {
       const rows = this.rowsEl.children;
-      for (let i = start; i < end; i++) {
-        const c = this.rowClass(i);
-        if (rows[i - start].className !== c) rows[i - start].className = c;
-      }
+      for (let i = start; i < end; i++) this.paintRow(rows[i - start], i);
       return;
     }
     this.rowsDirty = false;
@@ -526,9 +657,10 @@ export class Panel {
     const rows = [];
     for (let i = start; i < end; i++) {
       const e = this.entries[i];
-      const r = el("div", this.rowClass(i));
+      const r = el("div");
+      this.paintRow(r, i);
       r.dataset.i = i;
-      r.append(el("i", null, rowIcon(e, colorClass(e))), document.createTextNode(e.up ? "[..]" : displayName(e)));
+      r.append(el("i", null, rowIcon(e)), document.createTextNode(e.up ? "[..]" : displayName(e)));
       rows.push(r);
     }
     this.rowsEl.replaceChildren(...rows);

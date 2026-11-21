@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import * as lib from "./lib.mjs";
 
 test("smoke", () => {
@@ -64,18 +65,119 @@ test("displayName", () => {
   assert.equal(lib.displayName({ name: "a.txt", isDir: false }), "a.txt");
 });
 
-test("colorClass", () => {
-  const f = (name, hidden = name.startsWith(".")) => lib.colorClass({ name, isDir: false, hidden });
-  assert.equal(f(".DS_Store"), "hid");
+test("iconKind", () => {
+  const f = (name) => lib.iconKind({ name, isDir: false, hidden: name.startsWith(".") });
   assert.equal(f("a.tgz"), "arc");
-  assert.equal(f(".x.zip"), "hid");
+  assert.equal(f(".x.zip"), "arc");
   assert.equal(f("B.TAR"), "arc");
   assert.equal(f("film.MKV"), "med");
   assert.equal(f("song.mp3"), "med");
   assert.equal(f("notes.txt"), "");
   assert.equal(f("zip"), "");
-  assert.equal(lib.colorClass({ name: "x.zip", isDir: true, hidden: false }), "");
-  assert.equal(f("flagged.txt", true), "hid");
+  assert.equal(lib.iconKind({ name: "x.zip", isDir: true, hidden: false }), "");
+});
+
+const DEFAULT_COLORS = JSON.parse(
+  readFileSync(new URL("../tests/fixtures/default_colors.json", import.meta.url), "utf8"),
+);
+const file = (name, extra = {}) => ({ name, isDir: false, hidden: false, ...extra });
+const dir = (name, extra = {}) => ({ name, isDir: true, hidden: false, ...extra });
+
+test("compileTypeRules: ';' and spaces, case, NFD names, first match wins", () => {
+  const m = lib.compileTypeRules([
+    { masks: "*.txt  *.MD;;", color: "#111111" },
+    { masks: "č*", color: "#222222" },
+    { masks: "*.txt", color: "#333333" },
+    { masks: "", color: "#444444" },
+  ]);
+  assert.equal(m("a.txt"), "#111111");
+  assert.equal(m("README.md"), "#111111");
+  assert.equal(m("čapek.doc"), "#222222");
+  assert.equal(m("čapek.doc".normalize("NFD")), "#222222");
+  assert.equal(m("čapek.txt"), "#111111");
+  assert.equal(m("x.bin"), null);
+  assert.equal(lib.compileTypeRules([])("a.txt"), null);
+  assert.equal(lib.compileTypeRules(undefined)("a.txt"), null);
+});
+
+test("entryColor: each default group, folders, hidden fallback, byType off", () => {
+  const c = DEFAULT_COLORS;
+  const m = lib.compileTypeRules(c.typeRules);
+  const e = (entry, colors = c) => lib.entryColor(entry, colors, m);
+  assert.equal(e(file("notes.TXT")), "#c8c8c8");
+  assert.equal(e(file("doc.pdf")), "#c8c8c8");
+  assert.equal(e(file("Install.pkg")), "#5fd35f");
+  assert.equal(e(file("run.sh")), "#5fd35f");
+  assert.equal(e(file("photo.JPG")), "#ffff4d");
+  assert.equal(e(file("a.7z")), "#ff6a4d");
+  assert.equal(e(file("disk.dmg")), "#ff6a4d");
+  assert.equal(e(file("film.mkv")), "#8a8aff");
+  assert.equal(e(file("song.flac")), "#8a8aff");
+  assert.equal(e(file("Makefile")), null);
+  // Folders are matched too (TC): an app bundle is green.
+  assert.equal(e(dir("Safari.app")), "#5fd35f");
+  // A matching rule beats hidden; hidden is the fallback.
+  assert.equal(e(file(".notes.txt", { hidden: true })), "#c8c8c8");
+  assert.equal(e(file(".DS_Store", { hidden: true })), c.hidden);
+  assert.equal(e(dir(".git", { hidden: true })), c.hidden);
+  // The ".." row is never colored by a rule.
+  assert.equal(e({ name: "..", isDir: true, up: true, hidden: false }), null);
+  const off = { ...c, byType: false };
+  assert.equal(e(file("a.7z"), off), null);
+  assert.equal(e(file(".a.7z", { hidden: true }), off), c.hidden);
+});
+
+test("entryColor: a folder mask without an extension", () => {
+  const m = lib.compileTypeRules([{ masks: "www*", color: "#00ffff" }]);
+  const c = { ...DEFAULT_COLORS, typeRules: [{ masks: "www*", color: "#00ffff" }] };
+  assert.equal(lib.entryColor(dir("www-root"), c, m), "#00ffff");
+  assert.equal(lib.entryColor(dir("html"), c, m), null);
+});
+
+test("rowStyle precedence: cursor > marked > rule > hidden > font", () => {
+  const c = { ...DEFAULT_COLORS, background2: "#0a0a0a" };
+  const m = lib.compileTypeRules(c.typeRules);
+  const st = (entry, state, colors = c) =>
+    lib.rowStyle(entry, { marked: false, cursor: false, active: true, index: 0, ...state }, colors, m);
+  // Plain rows alternate the backgrounds and use rule / hidden / font colors.
+  assert.deepEqual(st(file("a.zip"), {}), { color: "#ff6a4d", background: "#000000", outline: "" });
+  assert.deepEqual(st(file("Makefile"), { index: 1 }), { color: "#ffffff", background: "#0a0a0a", outline: "" });
+  assert.equal(st(file(".DS_Store", { hidden: true }), {}).color, c.hidden);
+  // Marked beats the rule.
+  assert.equal(st(file("a.zip"), { marked: true }).color, c.mark);
+  // Cursor in the active panel with an inverted cursor: a bar with cursorFont.
+  assert.deepEqual(st(file("a.zip"), { cursor: true, index: 1 }), {
+    color: c.cursorFont,
+    background: c.cursor,
+    outline: "",
+  });
+  // Selected+Cursor: mark text on the cursor bar.
+  assert.deepEqual(st(file("a.zip"), { cursor: true, marked: true }), {
+    color: c.mark,
+    background: c.cursor,
+    outline: "",
+  });
+  // Empty cursorFont: the entry keeps its own color on the bar.
+  const keep = { ...c, cursorFont: "" };
+  assert.equal(st(file("a.zip"), { cursor: true }, keep).color, "#ff6a4d");
+  assert.equal(st(file("Makefile"), { cursor: true }, keep).color, c.font);
+  // Not inverted: no fill, a frame in the cursor color, the text keeps its color.
+  const frame = { ...c, invertedCursor: false };
+  assert.deepEqual(st(file("a.zip"), { cursor: true, index: 1 }, frame), {
+    color: "#ff6a4d",
+    background: "#0a0a0a",
+    outline: `1px solid ${c.cursor}`,
+  });
+  assert.equal(st(file("a.zip"), { cursor: true, marked: true }, frame).color, c.mark);
+  // Inactive panel: only a dashed frame, whatever invertedCursor says.
+  for (const colors of [c, frame]) {
+    assert.deepEqual(st(file("a.zip"), { cursor: true, active: false }, colors), {
+      color: "#ff6a4d",
+      background: "#000000",
+      outline: lib.INACTIVE_CURSOR_OUTLINE,
+    });
+  }
+  assert.equal(st(file("a.zip"), { cursor: true, active: false, marked: true }).color, c.mark);
 });
 
 test("matchMask", () => {
@@ -629,7 +731,7 @@ test("playerStrip texts", () => {
     state: "playing", name: "c.wav", position: 61.5, duration: 123,
     info: { codec: "GSM 6.10", sampleRate: 8000, channels: 1 },
   });
-  assert.deepEqual(s, { text: "c.wav", clock: "1:01 / 2:03", codec: "GSM 6.10, 8000 Hz, mono", progress: 0.5 });
+  assert.deepEqual(s, { paused: false, text: "c.wav", clock: "1:01 / 2:03", codec: "GSM 6.10, 8000 Hz, mono", progress: 0.5 });
   assert.equal(lib.playerStrip({ state: "playing", name: "s", position: 3, duration: null }).clock, "0:03 / -:--");
 });
 
@@ -770,6 +872,17 @@ test("samePaths: order-insensitive set equality", () => {
   assert.equal(lib.samePaths(["/a", "/b"], ["/b", "/a"]), true);
   assert.equal(lib.samePaths(["/a"], ["/a", "/b"]), false);
   assert.equal(lib.samePaths([], []), false);
+});
+
+test("ownDropPaths: local drags by their paths, promised drags by carrying none", () => {
+  const local = { paths: ["/a", "/b"], promised: false };
+  assert.deepEqual(lib.ownDropPaths(local, ["/b", "/a"]), ["/a", "/b"]);
+  assert.equal(lib.ownDropPaths(local, ["/a"]), null);
+  assert.equal(lib.ownDropPaths(local, []), null);
+  const promised = { paths: ["sftp://h/x", "sftp://h/y"], promised: true };
+  assert.deepEqual(lib.ownDropPaths(promised, []), promised.paths);
+  assert.equal(lib.ownDropPaths(promised, ["/Users/me/x"]), null);
+  assert.equal(lib.ownDropPaths(null, []), null);
 });
 
 // ---------------------------------------------------------------- servers (Task 11)
@@ -913,8 +1026,57 @@ test("newServerEntry: SFTP defaults with the given id", () => {
   assert.deepEqual(lib.newServerEntry("id1"), {
     kind: "server", id: "id1", name: "", protocol: "sftp", host: "", port: 22, user: "",
     auth: "password", keyPath: null, savePassword: false, remoteDir: null, localDir: null,
-    legacyAlgorithms: false, ftpPassive: true, ftpEncoding: "utf8",
+    legacyAlgorithms: false, ftpPassive: true, ftpEncoding: "utf8", share: "",
   });
+});
+
+test("SMB: port 445, share required, only the SMB fields", () => {
+  assert.deepEqual(lib.serverDefaults("smb"), { port: 445, auth: "password" });
+  assert.equal(lib.portAfterProtocolChange("sftp", "smb", "22"), 445);
+  assert.equal(lib.portAfterProtocolChange("smb", "ftp", "445"), 21);
+  const ok = { name: "nas", host: "nas.local", protocol: "smb", share: "data", auth: "password", keyPath: null };
+  assert.equal(lib.validateServer(ok, []), null);
+  assert.equal(lib.validateServer({ ...ok, share: " " }, []), "Share is required");
+  assert.equal(lib.validateServer({ ...ok, share: undefined }, []), "Share is required");
+  assert.equal(lib.validateServer({ ...ok, share: "a/b" }, []), "Share cannot contain '/'");
+  // A key login left over from SFTP does not matter for SMB.
+  assert.equal(lib.validateServer({ ...ok, auth: "key" }, []), null);
+  const f = lib.fieldsFor("smb");
+  for (const k of ["name", "protocol", "host", "port", "user", "share", "kerberos", "savePassword", "remoteDir", "autoConnect"]) assert.ok(f.has(k), k);
+  assert.ok(!lib.fieldsFor("sftp").has("kerberos"));
+  for (const k of ["auth", "keyPath", "legacyAlgorithms", "ftpPassive", "ftpEncoding", "localDir"]) assert.ok(!f.has(k), k);
+  assert.ok(!lib.fieldsFor("sftp").has("share"));
+  assert.ok(!lib.fieldsFor("sftp").has("autoConnect"));
+});
+
+test("mergeShares: a mounted share replaces its /Volumes row, in the manager's order", () => {
+  const vols = [
+    { name: "Macintosh HD", path: "/", kind: "root", total: 100, free: 50 },
+    { name: "~", path: "/Users/zb", kind: "home", total: 100, free: 50 },
+    { name: "Data", path: "/Volumes/Data", kind: "network", total: 9, free: 3 },
+    { name: "USB", path: "/Volumes/USB", kind: "volume", total: 8, free: 1 },
+  ];
+  const shares = [
+    { name: "office", mount: null, total: 0, free: 0 },
+    { name: "nas data", mount: "/Volumes/Data", total: 9, free: 3 },
+  ];
+  const m = lib.mergeShares(vols, shares);
+  assert.deepEqual(
+    m.map((v) => v.name),
+    ["Macintosh HD", "~", "USB", "office", "nas data"],
+  );
+  assert.deepEqual(m[3], {
+    name: "office", path: "smb://office/", kind: "network", total: 0, free: 0, smb: "office", mounted: false,
+  });
+  assert.deepEqual(m[4], {
+    name: "nas data", path: "/Volumes/Data", kind: "network", total: 9, free: 3, smb: "nas data", mounted: true,
+  });
+  // No shares (no SMB entries, as SFTP/FTP servers are never in `smb_shares`): volumes as they are.
+  assert.deepEqual(lib.mergeShares(vols, []), vols);
+  // An unmounted share is never a disk of a local folder.
+  assert.equal(lib.diskFor(m, "/Users/zb/x").path, "/");
+  // A mounted share is the disk of its folders, so picking it again goes where it was.
+  assert.equal(lib.diskFor(m, "/Volumes/Data/docs").smb, "nas data");
 });
 
 test("urlDisplayName: userinfo ends at the last @ as in parse_url", () => {
@@ -1169,6 +1331,21 @@ test("outputOptions: system default first, then the devices in order", () => {
   assert.deepEqual(lib.outputOptions(["Speakers"], ""), [def, { value: "Speakers", label: "Speakers" }]);
 });
 
+test("outputOptions tells devices with one name apart by id", () => {
+  const devs = [
+    { name: "DAC", id: "coreaudio:a" },
+    { name: "Speakers", id: "coreaudio:s" },
+    { name: "DAC", id: "coreaudio:b" },
+  ];
+  assert.deepEqual(lib.outputOptions(devs, "coreaudio:b"), [
+    { value: "", label: "System default" },
+    { value: "coreaudio:a", label: "DAC (1)" },
+    { value: "Speakers", label: "Speakers" },
+    { value: "coreaudio:b", label: "DAC (2)" },
+  ]);
+  // Saved by name before the second one connected: kept, it means the first.
+  assert.deepEqual(lib.outputOptions(devs, "DAC").at(-1), { value: "DAC", label: "DAC (first)" });
+});
 test("outputOptions keeps a saved device that is not connected", () => {
   assert.deepEqual(lib.outputOptions(["Speakers"], "Headphones"), [
     { value: "", label: "System default" },
@@ -1213,10 +1390,11 @@ test("packArchiveName: one entry, several entries, root", () => {
   assert.equal(lib.packArchiveName(three, "/"), "archive.zip");
 });
 
-test("packTargetDir: the other panel when it is a local folder, else the active one", () => {
+test("packTargetDir: the other panel, also on a server or in an archive", () => {
   assert.equal(lib.packTargetDir("/a", "/b"), "/b");
-  assert.equal(lib.packTargetDir("/a", "sftp://web/var"), "/a");
-  assert.equal(lib.packTargetDir("/a", "/b/x.zip/inner"), "/a");
+  assert.equal(lib.packTargetDir("/a", "sftp://web/var"), "sftp://web/var");
+  assert.equal(lib.packTargetDir("/a", "/b/x.zip/inner"), "/b/x.zip/inner");
+  assert.equal(lib.packTargetDir(lib.SEARCH_LOCATION, lib.SEARCH_LOCATION, "/c"), "/c");
   assert.equal(lib.isLocalFolder("/b"), true);
   assert.equal(lib.isLocalFolder("/b/x.tar"), false);
   assert.equal(lib.isLocalFolder("ftp://h/"), false);
@@ -1252,7 +1430,7 @@ test("modifierMap: defaults, saved choice, unusable values", () => {
   assert.deepEqual(lib.modifierMap({}), { alt: "option", ctrl: "control" });
   assert.deepEqual(lib.modifierMap(null), { alt: "option", ctrl: "control" });
   assert.deepEqual(lib.modifierMap({ modifiers: { alt: "option", ctrl: "command" } }), CMD_CTRL);
-  assert.deepEqual(lib.modifierMap({ modifiers: { alt: "fn", ctrl: "command" } }), CMD_CTRL);
+  assert.deepEqual(lib.modifierMap({ modifiers: { alt: "hyper", ctrl: "command" } }), CMD_CTRL);
   assert.deepEqual(lib.modifierMap({ modifiers: { alt: "command", ctrl: "command" } }), { alt: "option", ctrl: "control" });
 });
 
@@ -1318,6 +1496,26 @@ test("tcModifiers", () => {
   assert.equal(lib.tcModifiers(ev("KeyW", { shiftKey: true }), lib.DEFAULT_MODIFIERS).any, false);
 });
 
+test("Fn as Alt: the native Fn state makes the combo", () => {
+  const FN_ALT = { alt: "fn", ctrl: "control" };
+  assert.deepEqual(lib.modifierMap({ modifiers: FN_ALT }), FN_ALT);
+  const f5 = { code: "F5", ctrlKey: false, altKey: false, metaKey: false, shiftKey: false };
+  assert.equal(lib.comboFromEvent(f5, FN_ALT), "F5");
+  lib.setFnHeld(true);
+  try {
+    assert.equal(lib.comboFromEvent(f5, FN_ALT), "Alt+F5");
+    // Option is neither Alt nor Ctrl now: a stray key.
+    assert.equal(lib.comboFromEvent({ ...f5, altKey: true }, FN_ALT), null);
+    // Fn held while Fn is not mapped changes nothing.
+    assert.equal(lib.comboFromEvent(f5), "F5");
+  } finally {
+    lib.setFnHeld(false);
+  }
+  assert.equal(lib.comboFromEvent({ ...f5, fnKey: true }, FN_ALT), "Alt+F5");
+  assert.equal(lib.comboLabel("Alt+F5", FN_ALT), "fn F5");
+  assert.equal(lib.physicalCombo("Ctrl+Alt+X", FN_ALT), "Fn+Ctrl+X");
+  assert.equal(lib.comboLabel("Ctrl+Alt+X", { alt: "option", ctrl: "fn" }), "fn ⌥X");
+});
 test("comboLabel and physicalCombo show the keys in use", () => {
   assert.equal(lib.comboLabel("Alt+F5"), "⌥F5");
   assert.equal(lib.comboLabel("Alt+F5", { alt: "command", ctrl: "control" }), "⌘F5");
@@ -1344,4 +1542,686 @@ test("textEditKey: Command+A/C/V/X/Z stay with a text field when Command is Alt 
   assert.equal(lib.textEditKey(ev("KeyA", { ctrlKey: true }), CMD_CTRL), false);
   // With Command unmapped Cmd+A is not a TC combo anyway (Cmd+A).
   assert.equal(lib.textEditKey(ev("KeyA", { metaKey: true }), lib.DEFAULT_MODIFIERS), false);
+});
+
+test("driveTarget follows the other panel and remembers each drive", () => {
+  const vols = [
+    { name: "Macintosh HD", path: "/", kind: "root" },
+    { name: "~", path: "/Users/x", kind: "home" },
+    { name: "USB", path: "/Volumes/USB", kind: "volume" },
+  ];
+  const [hd, home, usb] = vols;
+  assert.equal(lib.diskFor(vols, "/Users/x/Desktop").path, "/");
+  assert.equal(lib.diskFor(vols, "/Volumes/USB/a").path, "/Volumes/USB");
+  assert.equal(lib.diskFor(vols, "sftp://m/var"), null);
+  const last = new Map();
+  // Panel on USB, other panel on the Desktop: Macintosh HD goes to the Desktop.
+  assert.equal(lib.driveTarget(hd, { volumes: vols, here: "/Volumes/USB/a", other: "/Users/x/Desktop", last }), "/Users/x/Desktop");
+  // Other panel elsewhere: the last folder visited on that drive, else its root.
+  last.set("/", "/Users/x/Projects");
+  assert.equal(lib.driveTarget(hd, { volumes: vols, here: "/Volumes/USB/a", other: "/Volumes/USB/b", last }), "/Users/x/Projects");
+  assert.equal(lib.driveTarget(usb, { volumes: vols, here: "/Users/x", other: "/Users/x/Desktop", last }), "/Volumes/USB");
+  // Already on that drive (e.g. in the home folder): still the other panel's folder there.
+  assert.equal(lib.driveTarget(hd, { volumes: vols, here: "/Users/x", other: "/Users/x/Desktop", last }), "/Users/x/Desktop");
+  // Already on that drive, other panel elsewhere or in the same folder: the drive's root.
+  assert.equal(lib.driveTarget(hd, { volumes: vols, here: "/Users/x/Desktop", other: "/Volumes/USB", last }), "/");
+  assert.equal(lib.driveTarget(hd, { volumes: vols, here: "/Users/x/Desktop", other: "/Users/x/Desktop", last }), "/");
+  // The home shortcut always goes home.
+  assert.equal(lib.driveTarget(home, { volumes: vols, here: "/Volumes/USB", other: "/Users/x/Desktop", last }), "/Users/x");
+  // The other panel on a server does not count.
+  assert.equal(lib.driveTarget(usb, { volumes: vols, here: "/", other: "sftp://m/Volumes/USB", last: new Map() }), "/Volumes/USB");
+});
+
+test("serverDrives lists saved non-SMB servers in tree order and marks connected ones", () => {
+  const nodes = [
+    { kind: "server", name: "web", protocol: "sftp" },
+    { kind: "folder", name: "Work", children: [
+      { kind: "server", name: "nas", protocol: "smb" },
+      { kind: "server", name: "old", protocol: "scp" },
+      { kind: "server", name: "files", protocol: "ftps" },
+    ] },
+  ];
+  const d = lib.serverDrives(nodes, [{ name: "old", root: "scp://old/" }]);
+  assert.deepEqual(d.map((x) => [x.name, x.path, x.connected]), [
+    ["web", "sftp://web/", false],
+    ["old", "scp://old/", true],
+    ["files", "ftps://files/", false],
+  ]);
+  assert.ok(d.every((x) => x.kind === "server" && x.server === x.name));
+});
+
+test("serverTarget follows the other panel and remembers each server", () => {
+  const web = { path: "sftp://web/", connected: true };
+  const last = new Map([["sftp://web/", "sftp://web/var/log"]]);
+  assert.equal(lib.serverTarget({ ...web, connected: false }, { here: "/Users/x", other: "sftp://web/etc", last }), null);
+  assert.equal(lib.serverTarget(web, { here: "/Users/x", other: "sftp://web/etc", last }), "sftp://web/etc");
+  assert.equal(lib.serverTarget(web, { here: "sftp://web/tmp", other: "/Users/x", last }), "sftp://web/");
+  assert.equal(lib.serverTarget(web, { here: "/Users/x", other: "/tmp", last }), "sftp://web/var/log");
+  assert.equal(lib.serverTarget(web, { here: "/Users/x", other: "/tmp", last: new Map() }), "sftp://web/");
+});
+
+test("search location is not remote", () => { assert.equal(lib.parseRemote(lib.SEARCH_LOCATION), null); assert.ok(lib.isSearchLocation(lib.SEARCH_LOCATION)); assert.ok(!lib.isSearchLocation("/d")); });
+test("equal names stay separate rows", () => { const e = lib.resultEntries([{path:"/Users/x/a/notes.txt",name:"notes.txt"},{path:"/Users/x/b/notes.txt",name:"notes.txt"}], "/Users/x"); assert.deepEqual(e.map(x=>x.name), ["~/a/notes.txt","~/b/notes.txt"]); });
+test("resultEntries maps item fields", () => { const [e] = lib.resultEntries([{path:"/p/a.tar/i.txt",isDir:false,size:5,mtime:7,inArchive:true,mounted:true}], "/h"); assert.deepEqual(e, {name:"/p/a.tar/i.txt",path:"/p/a.tar/i.txt",isDir:false,size:5,mtime:7,hidden:false,inArchive:true,mounted:true,mode:0,isSymlink:false}); });
+test("operationPaths uses entry path", () => { const e = lib.resultEntries([{path:"/v/a/x.txt"}], "/h"); assert.deepEqual(lib.operationPaths(lib.SEARCH_LOCATION, e), {cwd:"/v/a", paths:["/v/a/x.txt"]}); });
+test("operationPaths unchanged for folders", () => { assert.deepEqual(lib.operationPaths("/d", [{name:"f"}]), {cwd:"/d", paths:["/d/f"]}); });
+test("archive entries allow view, copy and drag only", () => { assert.deepEqual(lib.resultOps([{inArchive:true}]), {view:true, edit:false, copy:true, move:false, del:false, drag:true}); assert.equal(lib.resultOps([{inArchive:true},{}]).view, false); assert.equal(lib.resultOps([{inArchive:true},{}]).drag, false); });
+test("unmounted entries allow nothing", () => { assert.equal(lib.resultOps([{mounted:false}]).copy, false); assert.equal(lib.resultOps([{mounted:false,inArchive:true}]).view, false); });
+test("normal entries allow everything", () => { assert.deepEqual(lib.resultOps([{mounted:true},{}]), {view:true,edit:true,copy:true,move:true,del:true,drag:true}); });
+test("dropMissing", () => { assert.deepEqual(lib.dropMissing([{path:"/a"},{path:"/b"}], new Set(["/b"])).map(e=>e.path), ["/b"]); });
+test("homeDisplay", () => { assert.equal(lib.homeDisplay("/Users/x/D/a", "/Users/x"), "~/D/a"); assert.equal(lib.homeDisplay("/Users/x", "/Users/x"), "~"); assert.equal(lib.homeDisplay("/Users/xy/a", "/Users/x"), "/Users/xy/a"); assert.equal(lib.homeDisplay("/Volumes/M/a", "/Users/x"), "/Volumes/M/a"); assert.equal(lib.homeDisplay("/a", ""), "/a"); });
+test("resultRow", () => {
+  assert.deepEqual(lib.resultRow({ name: "a.txt", folder: "/Users/x/D", mtime: 0, size: 1234 }, "/Users/x"), {
+    name: "a.txt", folder: "~/D", size: "1.234", date: lib.formatDate(0),
+  });
+  assert.equal(lib.resultRow({ name: "D", folder: "/", mtime: 0, isDir: true }, "/Users/x").size, "<DIR>");
+  assert.equal(lib.resultRow({ name: "x", folder: "/", mtime: 0 }, "/Users/x").size, "");
+});
+
+test("result columns: defaults, saved widths and hidden columns; Name always shown", () => {
+  const d = lib.resultColumns(undefined);
+  assert.deepEqual(d.map((c) => c.id), ["name", "folder", "size", "date"]);
+  assert.ok(d.every((c) => !c.hidden));
+  const s = lib.resultColumns([{ id: "name", width: 5, hidden: true }, { id: "size", hidden: true }, { id: "date", width: 99.6 }, null, { id: "x" }]);
+  assert.equal(s[0].width, lib.RESULT_COLUMN_MIN);
+  assert.equal(s[0].hidden, false);
+  assert.equal(s[2].hidden, true);
+  assert.equal(s[3].width, 100);
+  assert.equal(lib.resultGridTemplate(s), `${lib.RESULT_COLUMN_MIN}px 280px 100px 1fr`);
+});
+
+test("result clicks: plain, Cmd/Ctrl toggle, Shift range", () => {
+  const rows = ["a", "b", "c", "d"].map((p) => ({ path: p }));
+  let r = lib.resultClick(rows, new Set(), null, 1);
+  assert.deepEqual([...r.marked], ["b"]);
+  r = lib.resultClick(rows, r.marked, r.anchor, 3, { toggle: true });
+  assert.deepEqual([...r.marked].sort(), ["b", "d"]);
+  r = lib.resultClick(rows, r.marked, r.anchor, 1, { toggle: true });
+  assert.deepEqual([...r.marked], ["d"]);
+  // The last toggled row (b) is the anchor of a Shift range.
+  r = lib.resultClick(rows, r.marked, r.anchor, 3, { range: true });
+  assert.deepEqual([...r.marked].sort(), ["b", "c", "d"]);
+  assert.equal(r.anchor, 1);
+  r = lib.resultClick(rows, new Set(["a"]), 0, 2, { range: true, toggle: true });
+  assert.deepEqual([...r.marked].sort(), ["a", "b", "c"]);
+  assert.deepEqual(lib.feedItems(rows, new Set(["d", "b"])).map((x) => x.path), ["b", "d"]);
+  assert.equal(lib.feedItems(rows, new Set(["b"])).length, 4);
+  assert.equal(lib.feedItems(rows, new Set()).length, 4);
+});
+
+// ---------------------------------------------------------------- Find files window (Task 10)
+
+const item = (path, extra = {}) => ({ path, name: path.slice(path.lastIndexOf("/") + 1), folder: path.slice(0, path.lastIndexOf("/")) || "/", mtime: 0, size: 1, isDir: false, inArchive: false, mounted: true, ...extra });
+const started = (id, prev = lib.searchWindowState(undefined, { type: "clear" })) =>
+  lib.searchWindowState(lib.searchWindowState(prev, { type: "start" }), { type: "started", id });
+
+test("batch of old id ignored", () => {
+  const s = { rows: [item("/a")], total: 1, done: false, id: 2 };
+  assert.equal(lib.searchWindowState(s, { id: 1, items: [item("/b")], total: 1, done: true }), s);
+});
+test("walk batches append", () => {
+  let s = started(2);
+  s = lib.searchWindowState(s, { id: 2, items: [item("/a")], total: 1, done: false });
+  s = lib.searchWindowState(s, { id: 2, items: [item("/b")], total: 2, done: false });
+  s = lib.searchWindowState(s, { id: 2, items: [], total: 2, done: true });
+  assert.deepEqual(s.rows.map((r) => r.path), ["/a", "/b"]);
+  assert.equal(s.total, 2);
+  assert.equal(s.done, true);
+});
+test("index batch replaces", () => {
+  let s = started(1);
+  s = lib.searchWindowState(s, { id: 1, items: [item("/old")], total: 1, done: true });
+  s = started(2, s);
+  assert.deepEqual(s.rows.map((r) => r.path), ["/old"], "old rows stay until the first batch");
+  s = lib.searchWindowState(s, { id: 2, items: [item("/new")], total: 1, done: true });
+  assert.deepEqual(s.rows.map((r) => r.path), ["/new"]);
+  assert.equal(s.done, true);
+});
+test("batches that arrive before search_start returns are kept", () => {
+  let s = lib.searchWindowState(lib.searchWindowState(undefined, { type: "clear" }), { type: "start" });
+  s = lib.searchWindowState(s, { id: 5, items: [item("/early")], total: 1, done: true });
+  assert.deepEqual(s.rows, []);
+  s = lib.searchWindowState(s, { type: "started", id: 5 });
+  assert.deepEqual(s.rows.map((r) => r.path), ["/early"]);
+  assert.equal(s.done, true);
+});
+test("early batches of a superseded start are dropped", () => {
+  let s = lib.searchWindowState(lib.searchWindowState(undefined, { type: "clear" }), { type: "start" });
+  s = lib.searchWindowState(s, { id: 5, items: [item("/stale")], total: 1, done: true });
+  s = lib.searchWindowState(s, { type: "started", id: 6 });
+  s = lib.searchWindowState(s, { id: 6, items: [item("/x")], total: 1, done: true });
+  assert.deepEqual(s.rows.map((r) => r.path), ["/x"]);
+});
+test("clear empties rows and ignores the old search's batches", () => {
+  let s = lib.searchWindowState(started(3), { id: 3, items: [item("/a")], total: 1, done: false });
+  s = lib.searchWindowState(s, { type: "clear" });
+  assert.deepEqual(s.rows, []);
+  assert.equal(lib.searchWindowState(s, { id: 3, items: [item("/b")], total: 2, done: false }), s);
+});
+test("failed start stops waiting", () => {
+  let s = lib.searchWindowState(started(1), { id: 1, items: [item("/old")], total: 1, done: true });
+  s = lib.searchWindowState(s, { type: "start" });
+  s = lib.searchWindowState(s, { type: "failed" });
+  assert.equal(s.pending, false);
+  assert.deepEqual(s.rows, []);
+  assert.equal(s.done, true);
+  assert.equal(lib.searchWindowState(s, { id: 9, items: [item("/b")], total: 1, done: true }), s);
+});
+test("remove drops one row and lowers the total", () => {
+  let s = lib.searchWindowState(started(1), { id: 1, items: [item("/a"), item("/b")], total: 2, done: true });
+  s = lib.searchWindowState(s, { type: "remove", path: "/a" });
+  assert.deepEqual(s.rows.map((r) => r.path), ["/b"]);
+  assert.equal(s.total, 1);
+});
+test("rows are capped at the display limit", () => {
+  const many = Array.from({ length: 1200 }, (_, i) => item(`/f${i}`));
+  const s = lib.searchWindowState(started(1), { id: 1, items: many, total: 1200, done: true });
+  assert.equal(s.rows.length, lib.SEARCH_LIMIT);
+  assert.equal(lib.SEARCH_LIMIT, 1000);
+});
+
+test("cap note", () => {
+  assert.equal(lib.statusText({ total: 1500, shown: 1000 }), "1,500 found · showing first 1,000");
+});
+test("statusText index states", () => {
+  assert.equal(lib.statusText({ total: 3, shown: 3, state: "ready", entries: 1842310 }), "3 found · index: 1,842,310 files, up to date");
+  assert.equal(lib.statusText({ total: 0, shown: 0, state: "building" }), "0 found · building index…");
+  assert.equal(lib.statusText({ total: 2, shown: 2, state: "ready", walking: true }), "2 found · searching folder…");
+  assert.equal(
+    lib.statusText({ total: 1, shown: 1, state: "ready", entries: 5, stale: { name: "Data", date: "01.11.2026 10:00" } }),
+    "1 found · volume Data last refreshed 01.11.2026 10:00",
+  );
+  assert.equal(lib.statusText({ state: "ready", entries: 10 }), "index: 10 files, up to date");
+  assert.equal(lib.statusText({ state: "off" }), "", "the window shows the off note itself");
+  assert.equal(lib.statusText({ state: "notAsked" }), "index not built");
+  assert.equal(lib.statusText({}), "");
+});
+test("staleVolume picks an enabled unmounted volume", () => {
+  const status = { volumes: [
+    { path: "/", name: "Macintosh HD", kind: "startup", enabled: true, mounted: true, refreshed: 1, state: "ready" },
+    { path: "/Volumes/Off", name: "Off", kind: "network", enabled: false, mounted: false, refreshed: 1, state: "off" },
+    { path: "/Volumes/Data", name: "Data", kind: "network", enabled: true, mounted: false, refreshed: 0, state: "stale" },
+  ] };
+  assert.deepEqual(lib.staleVolume(status, "UTC"), { name: "Data", date: "never" });
+  status.volumes[2].refreshed = 1762000000;
+  assert.deepEqual(lib.staleVolume(status, "UTC"), { name: "Data", date: lib.formatDate(1762000000, "UTC") });
+  assert.equal(lib.staleVolume({ volumes: [status.volumes[0]] }), null);
+  assert.equal(lib.staleVolume(null), null);
+});
+test("searchScopes follow the index state", () => {
+  assert.deepEqual(lib.searchScopes("ready"), { everywhere: true, note: null });
+  assert.deepEqual(lib.searchScopes("building"), { everywhere: false, note: null });
+  assert.deepEqual(lib.searchScopes("off"), { everywhere: false, note: "Index is off (Options → Search)" });
+  assert.deepEqual(lib.searchScopes("notAsked"), { everywhere: false, note: null });
+});
+test("searchRequest", () => {
+  assert.equal(lib.searchRequest({ query: "   ", scope: "everywhere", location: "/x", archives: false }), null);
+  assert.deepEqual(lib.searchRequest({ query: " scope work ", scope: "everywhere", location: "/x", archives: true }), { query: "scope work", under: null, archives: true, limit: 1000 });
+  assert.deepEqual(lib.searchRequest({ query: "a", scope: "folder", location: "/x/y", archives: false }), { query: "a", under: "/x/y", archives: false, limit: 1000 });
+});
+test("searchUnder: servers and the results list cannot be searched", () => {
+  assert.equal(lib.searchUnder("/Users/x"), "/Users/x");
+  assert.equal(lib.searchUnder("sftp://web/var"), null);
+  assert.equal(lib.searchUnder(lib.SEARCH_LOCATION), null);
+});
+test("goTarget: folder and cursor name of a result", () => {
+  assert.deepEqual(lib.goTarget(item("/x/a.txt")), { folder: "/x", name: "a.txt" });
+  assert.deepEqual(lib.goTarget({ path: "/x/pack.tar/docs/a.txt", name: "pack.tar ▸ docs/a.txt", folder: "/x/pack.tar/docs", inArchive: true }), { folder: "/x/pack.tar/docs", name: "a.txt" });
+});
+test("volumeOf picks the longest volume prefix", () => {
+  const vols = [{ path: "/", name: "HD" }, { path: "/Volumes/Data", name: "Data" }, { path: "/Volumes/Data2", name: "Data2" }];
+  assert.equal(lib.volumeOf("/Volumes/Data/a/b", vols).name, "Data");
+  assert.equal(lib.volumeOf("/Volumes/Data2/a", vols).name, "Data2");
+  assert.equal(lib.volumeOf("/Users/x/a", vols).name, "HD");
+  assert.equal(lib.volumeOf("/Volumes/Gone/a", [{ path: "/Volumes/Data", name: "Data" }]), null);
+  assert.equal(lib.volumeOf("/Volumes/Gone/a", vols), null, "the startup disk does not hold /Volumes");
+});
+test("volumeName falls back to the /Volumes component", () => {
+  assert.equal(lib.volumeName("/Volumes/Gone/a/b", null), "Gone");
+  assert.equal(lib.volumeName("/x/a", { name: "HD" }), "HD");
+  assert.equal(lib.volumeName("/x/a", null), "/");
+});
+test("smbServerForVolume matches a saved SMB share by mount name", () => {
+  const nodes = [
+    { kind: "server", name: "web", protocol: "sftp", share: "" },
+    { kind: "folder", name: "Home", children: [
+      { kind: "server", name: "NAS data", protocol: "smb", share: "Data" },
+      { kind: "server", name: "NAS media", protocol: "smb", share: "media" },
+    ] },
+  ];
+  assert.equal(lib.smbServerForVolume({ path: "/Volumes/Data", kind: "network" }, nodes), "NAS data");
+  assert.equal(lib.smbServerForVolume({ path: "/Volumes/MEDIA", kind: "network" }, nodes), "NAS media");
+  assert.equal(lib.smbServerForVolume({ path: "/Volumes/Data-1", kind: "network" }, nodes), "NAS data");
+  assert.equal(lib.smbServerForVolume({ path: "/Volumes/web", kind: "network" }, nodes), null);
+  assert.equal(lib.smbServerForVolume({ path: "/Volumes/Data", kind: "local" }, nodes), null);
+  assert.equal(lib.smbServerForVolume(null, nodes), null);
+});
+test("smbServerForVolume prefers the mount source's host and share", () => {
+  const nodes = [
+    { kind: "server", name: "Old NAS", protocol: "smb", host: "old.example.com", share: "Data" },
+    { kind: "server", name: "NAS", protocol: "smb", host: "nas.example.com", share: "Data" },
+    { kind: "server", name: "Media", protocol: "smb", host: "nas.example.com", share: "My Media" },
+  ];
+  const net = (path, source) => ({ path, kind: "network", source });
+  assert.equal(lib.smbServerForVolume(net("/Volumes/Data", "//joe@NAS.example.com/Data"), nodes), "NAS");
+  // Mounted under another name: the source still finds it.
+  assert.equal(lib.smbServerForVolume(net("/Volumes/x", "//DOMAIN;joe@nas.example.com:445/My%20Media"), nodes), "Media");
+  // Unknown host: the share name decides (first in order).
+  assert.equal(lib.smbServerForVolume(net("/Volumes/y", "//other.example.com/data"), nodes), "Old NAS");
+  assert.equal(lib.smbServerForVolume(net("/Volumes/Data", null), nodes), "Old NAS");
+  assert.deepEqual(lib.parseMountSource("//h/s"), { host: "h", share: "s" });
+  assert.equal(lib.parseMountSource("/dev/disk3s1"), null);
+  assert.equal(lib.parseMountSource("//h/s/sub"), null);
+});
+test("mountedAt: the share must come back where the index has it", () => {
+  assert.ok(lib.mountedAt("/Volumes/Data", "/Volumes/Data"));
+  assert.ok(lib.mountedAt("/Volumes/Data/sub", "/Volumes/Data"));
+  assert.ok(!lib.mountedAt("/Volumes/Data-1", "/Volumes/Data"));
+});
+test("moveIndex for Up/Down/PgUp/PgDn", () => {
+  assert.equal(lib.moveIndex(0, "ArrowDown", 5, 3), 1);
+  assert.equal(lib.moveIndex(4, "ArrowDown", 5, 3), 4);
+  assert.equal(lib.moveIndex(0, "ArrowUp", 5, 3), 0);
+  assert.equal(lib.moveIndex(1, "PageDown", 5, 3), 4);
+  assert.equal(lib.moveIndex(4, "PageUp", 5, 3), 1);
+  assert.equal(lib.moveIndex(0, "PageUp", 5, 3), 0);
+  assert.equal(lib.moveIndex(0, "ArrowDown", 0, 3), -1);
+  assert.equal(lib.moveIndex(-1, "ArrowDown", 3, 3), 0);
+});
+
+test("missingAction: a missing result is forgotten only on a mounted volume", () => {
+  assert.equal(lib.missingAction({ listOk: true, found: true, volumeMounted: true }), "go");
+  assert.equal(lib.missingAction({ listOk: true, found: false, volumeMounted: true }), "forget");
+  assert.equal(lib.missingAction({ listOk: false, found: false, volumeMounted: true }), "forget");
+  // The volume was ejected after the search: never forget, offer the mount instead.
+  assert.equal(lib.missingAction({ listOk: false, found: false, volumeMounted: false }), "mount");
+  assert.equal(lib.missingAction({ listOk: true, found: false, volumeMounted: false }), "mount");
+});
+test("volumeMounted: a /Volumes path the status does not list is not mounted", () => {
+  const vols = [{ path: "/", mounted: true }, { path: "/Volumes/Data", mounted: true }, { path: "/Volumes/Net", mounted: false }];
+  assert.equal(lib.volumeMounted("/Users/x/a", vols), true);
+  assert.equal(lib.volumeMounted("/Volumes/Data/a", vols), true);
+  assert.equal(lib.volumeMounted("/Volumes/Net/a", vols), false);
+  assert.equal(lib.volumeMounted("/Volumes/Ejected/a", vols), false);
+  assert.equal(lib.volumeMounted("/Volumes/Ejected/a", []), false);
+});
+
+// ---------------------------------------------------------------- Feed to listbox (results panel)
+
+test("displayLocation: the results panel shows its query", () => {
+  assert.equal(lib.displayLocation(lib.SEARCH_LOCATION, { query: "fxfm" }), "Search results: fxfm");
+  assert.equal(lib.displayLocation(lib.SEARCH_LOCATION, new Map(), { query: "a b" }), "Search results: a b");
+  assert.equal(lib.displayLocation(lib.SEARCH_LOCATION, new Map()), "Search results");
+  assert.equal(lib.displayLocation("/a/b", new Map(), { query: "x" }), "/a/b");
+});
+
+test("parentLocation: the results location has no parent", () => {
+  assert.equal(lib.parentLocation(lib.SEARCH_LOCATION), null);
+});
+
+test("diskFor: the results location is on no disk", () => {
+  const vols = [{ path: "/", kind: "root" }, { path: "/Users/x", kind: "home" }];
+  assert.equal(lib.diskFor(vols, lib.SEARCH_LOCATION), null);
+  assert.equal(lib.diskFor(vols, "/Users/x/a").path, "/");
+});
+
+test("sessionLocation: a results panel saves the folder it came from", () => {
+  const results = { query: "q", entries: [], back: { location: "/Users/x/Docs", cursorName: "a.txt" } };
+  assert.deepEqual(lib.sessionLocation({ location: lib.SEARCH_LOCATION, cursorName: "~/b/c.txt" }, results, new Map()), {
+    location: "/Users/x/Docs",
+    cursorName: "a.txt",
+  });
+  assert.equal(lib.sessionLocation({ location: lib.SEARCH_LOCATION, cursorName: null }, null, new Map()), null);
+  assert.deepEqual(lib.sessionLocation({ location: "/a", cursorName: "b" }, null, new Map()), { location: "/a", cursorName: "b" });
+  assert.equal(lib.sessionLocation({ location: "", cursorName: null }, null, new Map()), null);
+  // A server archive's temp copy saves the server folder (also as the results' way back).
+  const arcs = new Map([["/tmp/fxfm/1/p.zip", "sftp://m/www"]]);
+  assert.deepEqual(lib.sessionLocation({ location: "/tmp/fxfm/1/p.zip/d", cursorName: "x" }, null, arcs), {
+    location: "sftp://m/www",
+    cursorName: "p.zip",
+  });
+  const back = { query: "q", entries: [], back: { location: "/tmp/fxfm/1/p.zip", cursorName: "x" } };
+  assert.deepEqual(lib.sessionLocation({ location: lib.SEARCH_LOCATION, cursorName: null }, back, arcs), {
+    location: "sftp://m/www",
+    cursorName: "p.zip",
+  });
+});
+
+test("resultFolder: the item's folder and name (inside an archive: the inner folder)", () => {
+  assert.deepEqual(lib.resultFolder({ path: "/Users/x/a/notes.txt" }), { folder: "/Users/x/a", name: "notes.txt" });
+  assert.deepEqual(lib.resultFolder({ path: "/Users/x/a", isDir: true }), { folder: "/Users/x", name: "a" });
+  assert.deepEqual(lib.resultFolder({ path: "/x/pack.tar/docs/a.txt", inArchive: true }), { folder: "/x/pack.tar/docs", name: "a.txt" });
+  assert.deepEqual(lib.resultFolder({ path: "/x/pack.zip/a.txt", inArchive: true }), { folder: "/x/pack.zip", name: "a.txt" });
+  assert.deepEqual(lib.resultFolder({ path: "/a.txt" }), { folder: "/", name: "a.txt" });
+});
+
+test("resultOpRefusal: archive entries and unmounted volumes", () => {
+  const [plain, arc, gone] = [
+    { path: "/a", inArchive: false, mounted: true },
+    { path: "/p.zip/b", inArchive: true, mounted: true },
+    { path: "/Volumes/N/c", inArchive: false, mounted: false },
+  ];
+  assert.equal(lib.resultOpRefusal([plain], "move"), null);
+  assert.equal(lib.resultOpRefusal([], "del"), null);
+  assert.equal(lib.resultOpRefusal([plain, arc], "move"), "Not available for items inside archives");
+  assert.equal(lib.resultOpRefusal([arc], "edit"), "Not available for items inside archives");
+  assert.equal(lib.resultOpRefusal([arc], "copy"), null);
+  assert.equal(lib.resultOpRefusal([arc], "view"), null);
+  assert.equal(lib.resultOpRefusal([gone], "view"), "Not available for items on a volume that is not mounted");
+  assert.equal(lib.resultOpRefusal([arc, gone], "copy"), "Not available for items on a volume that is not mounted");
+});
+
+test("results recheck: unmounted entries are never checked nor dropped", () => {
+  const entries = [
+    { path: "/a", mounted: true },
+    { path: "/b", mounted: true },
+    { path: "/Volumes/N/c", mounted: false },
+  ];
+  assert.deepEqual(lib.pathsToCheck(entries), ["/a", "/b"]);
+  assert.deepEqual(lib.keepExisting(entries, ["/b"]).map((e) => e.path), ["/b", "/Volumes/N/c"]);
+});
+
+test("copyTargetDefault: a result entry targets its file name, not the shown path", () => {
+  const [e] = lib.resultEntries([{ path: "/Users/x/a/notes.txt" }], "/Users/x");
+  assert.equal(lib.copyTargetDefault("/dst", [e]), "/dst/notes.txt");
+  assert.equal(lib.copyTargetDefault("/dst", [{ name: "n.txt" }]), "/dst/n.txt");
+});
+
+test("maskSelects: a result entry matches by its file name", () => {
+  const [f, d] = lib.resultEntries([{ path: "/Users/x/a/notes.txt" }, { path: "/Users/x/abc", isDir: true }], "/Users/x");
+  assert.ok(lib.maskSelects(f, "notes*"));
+  assert.ok(!lib.maskSelects(f, "a*"));
+  assert.ok(lib.maskSelects(d, "ab*/"));
+});
+
+test("marks of equal file names from different folders stay separate", () => {
+  const e = lib.resultEntries([{ path: "/Users/x/a/notes.txt" }, { path: "/Users/x/b/notes.txt" }], "/Users/x");
+  const marked = new Set([e[1].name]);
+  assert.deepEqual(lib.operationSources(e, marked, 0).map((s) => s.path), ["/Users/x/b/notes.txt"]);
+  assert.deepEqual(lib.dragSelection(e, marked, e[1].name), ["~/b/notes.txt"]);
+});
+
+test("packTargetDir: a results list in the other panel is no target folder", () => {
+  assert.equal(lib.isLocalFolder(lib.SEARCH_LOCATION), false);
+  assert.equal(lib.packTargetDir("/a", lib.SEARCH_LOCATION), "/a");
+});
+
+test("groupSources: local items in one group, each archive's entries in their own", () => {
+  assert.deepEqual(
+    lib.groupSources(["/a/x.txt", "/p/one.zip/d/i.txt", "/b/y.txt", "/q/two.tar/j.txt", "/p/one.zip/k.txt", "/c/three.zip"], "/a"),
+    [
+      { paths: ["/a/x.txt", "/b/y.txt", "/c/three.zip"], cwd: "/a" },
+      { paths: ["/p/one.zip/d/i.txt", "/p/one.zip/k.txt"], cwd: "/a" },
+      { paths: ["/q/two.tar/j.txt"], cwd: "/a" },
+    ],
+  );
+  // A normal panel's sources share a folder: always one group, unchanged.
+  assert.deepEqual(lib.groupSources(["/p/one.zip/d/a", "/p/one.zip/d/b"], "/p/one.zip/d"), [
+    { paths: ["/p/one.zip/d/a", "/p/one.zip/d/b"], cwd: "/p/one.zip/d" },
+  ]);
+  assert.deepEqual(lib.groupSources(["sftp://m/a", "sftp://m/b"], "sftp://m/"), [{ paths: ["sftp://m/a", "sftp://m/b"], cwd: "sftp://m/" }]);
+  assert.deepEqual(lib.groupSources([], "/a"), []);
+});
+
+test("panelFolder: a results list uses the folder it came from (hotlist, command line)", () => {
+  const results = { query: "q", entries: [], back: { location: "/Users/x/Docs", cursorName: null } };
+  assert.equal(lib.panelFolder(lib.SEARCH_LOCATION, results, "/Users/x"), "/Users/x/Docs");
+  assert.equal(lib.panelFolder(lib.SEARCH_LOCATION, null, "/Users/x"), "/Users/x");
+  assert.equal(lib.panelFolder("/tmp/a", results, "/Users/x"), "/tmp/a");
+  assert.equal(lib.pickerStart("", "/Users/x", lib.panelFolder(lib.SEARCH_LOCATION, results, "/Users/x")), "/Users/x/Docs");
+});
+
+test("searchSettingsPatch: a volume is added, then updated in place", () => {
+  const s = { search: { volumes: [], gzLimitMb: 500, networkRefreshHours: 24 } };
+  const a = lib.searchSettingsPatch(s, { volume: { path: "/Volumes/A", enabled: true } });
+  assert.deepEqual(a.volumes, [{ path: "/Volumes/A", enabled: true }]);
+  assert.deepEqual(s.search.volumes, []); // the input is not changed
+  const b = lib.searchSettingsPatch({ search: a }, { volume: { path: "/Volumes/A", enabled: false } });
+  assert.deepEqual(b.volumes, [{ path: "/Volumes/A", enabled: false }]);
+});
+
+test("searchSettingsPatch: gz limit must be an integer MB >= 1, else the old value stays", () => {
+  const s = { search: { gzLimitMb: 500 } };
+  assert.equal(lib.searchSettingsPatch(s, { gzLimitMb: "abc" }).gzLimitMb, 500);
+  assert.equal(lib.searchSettingsPatch(s, { gzLimitMb: "0" }).gzLimitMb, 500);
+  assert.equal(lib.searchSettingsPatch(s, { gzLimitMb: "" }).gzLimitMb, 500);
+  assert.equal(lib.searchSettingsPatch(s, { gzLimitMb: "250" }).gzLimitMb, 250);
+});
+
+test("searchSettingsPatch: 0 hours is kept (manual only); junk keeps the old value", () => {
+  const s = { search: { networkRefreshHours: 24 } };
+  assert.equal(lib.searchSettingsPatch(s, { networkRefreshHours: "0" }).networkRefreshHours, 0);
+  assert.equal(lib.searchSettingsPatch(s, { networkRefreshHours: "6" }).networkRefreshHours, 6);
+  assert.equal(lib.searchSettingsPatch(s, { networkRefreshHours: "-1" }).networkRefreshHours, 24);
+  assert.equal(lib.searchSettingsPatch(s, { networkRefreshHours: "x" }).networkRefreshHours, 24);
+});
+
+test("searchSettingsPatch: excludes are added once and removed; flags and index are set", () => {
+  let s = { search: { exclude: ["/a"] } };
+  s = { search: lib.searchSettingsPatch(s, { addExclude: "/b" }) };
+  s = { search: lib.searchSettingsPatch(s, { addExclude: "/a" }) };
+  assert.deepEqual(s.search.exclude, ["/a", "/b"]);
+  s = { search: lib.searchSettingsPatch(s, { removeExclude: "/a" }) };
+  assert.deepEqual(s.search.exclude, ["/b"]);
+  assert.equal(lib.searchSettingsPatch(s, { archives: true }).archives, true);
+  assert.equal(lib.searchSettingsPatch(s, { networkArchives: true }).networkArchives, true);
+  assert.equal(lib.searchSettingsPatch(s, { index: false }).index, false);
+});
+
+test("index button follows the index state", () => {
+  assert.deepEqual(lib.indexButton("notAsked"), { label: "Build index", action: "build", disabled: false });
+  assert.deepEqual(lib.indexButton("off"), { label: "Build index", action: "build", disabled: false });
+  assert.deepEqual(lib.indexButton("ready"), { label: "Rebuild index", action: "rebuild", disabled: false });
+  assert.equal(lib.indexButton("building").disabled, true);
+});
+
+test("quick search mode defaults to Command and rejects unknown values", () => {
+  assert.equal(lib.quickSearchMode({}), "command");
+  assert.equal(lib.quickSearchMode({ quickSearch: "bogus" }), "command");
+  assert.equal(lib.quickSearchMode({ quickSearch: "off" }), "off");
+  assert.equal(lib.quickSearchMode({ quickSearch: "letters" }), "letters");
+});
+
+test("quick search chars follow the chosen keys", () => {
+  const k = (code, key, mods = {}) => ({ code, key, ...mods });
+  assert.equal(lib.quickSearchChar(k("KeyL", "l", { metaKey: true }), "command"), "l");
+  assert.equal(lib.quickSearchChar(k("KeyL", "L", { metaKey: true, shiftKey: true }), "command"), "l");
+  assert.equal(lib.quickSearchChar(k("KeyL", "l"), "command"), null);
+  assert.equal(lib.quickSearchChar(k("KeyL", "l", { metaKey: true, altKey: true }), "command"), null);
+  assert.equal(lib.quickSearchChar(k("KeyQ", "q", { metaKey: true }), "command"), null);
+  assert.equal(lib.quickSearchChar(k("KeyH", "h", { metaKey: true }), "command"), null);
+  assert.equal(lib.quickSearchChar(k("KeyL", "l", { metaKey: true, ctrlKey: true }), "controlCommand"), "l");
+  assert.equal(lib.quickSearchChar(k("KeyL", "¬", { altKey: true }), "option"), "l");
+  assert.equal(lib.quickSearchChar(k("KeyL", "l"), "letters"), "l");
+  assert.equal(lib.quickSearchChar(k("Space", " "), "letters"), null);
+  assert.equal(lib.quickSearchChar(k("KeyL", "l", { metaKey: true }), "off"), null);
+  // Layout characters: z/y swap on a Croatian layout, č from its own key.
+  assert.equal(lib.quickSearchChar(k("KeyY", "z", { metaKey: true }), "command"), "z");
+  assert.equal(lib.quickSearchChar(k("Semicolon", "č", { metaKey: true }), "command"), "č");
+  assert.equal(lib.quickSearchChar(k("Digit2", "2", { metaKey: true }), "command"), "2");
+  assert.equal(lib.quickSearchChar(k("Period", ".", { metaKey: true }), "command"), ".");
+  assert.equal(lib.quickSearchChar(k("Minus", "_", { metaKey: true, shiftKey: true }), "command"), "_");
+  assert.equal(lib.quickSearchChar(k("F5", "F5", { metaKey: true }), "command"), null);
+});
+
+test("quick search finds name prefixes, skips .. and wraps", () => {
+  const es = [{ up: true, name: ".." }, { name: "Apps" }, { name: "lib" }, { name: "Logs" }, { name: "Čitaj" }, { name: "lzma" }];
+  assert.equal(lib.quickSearchFind(es, "l"), 2);
+  assert.equal(lib.quickSearchFind(es, "LO"), 3);
+  assert.equal(lib.quickSearchFind(es, "."), -1);
+  assert.equal(lib.quickSearchFind(es, "č"), 4);
+  assert.equal(lib.quickSearchFind(es, "x"), -1);
+  assert.equal(lib.quickSearchFind(es, "l", 2, 1), 3);
+  assert.equal(lib.quickSearchFind(es, "l", 5, 1), 2);
+  assert.equal(lib.quickSearchFind(es, "l", 2, -1), 5);
+  assert.equal(lib.quickSearchFind([], "l"), -1);
+});
+
+test("multi-rename: extension split", () => {
+  assert.deepEqual(lib.splitExtension("a.tar.gz"), { base: "a.tar", ext: "gz" });
+  assert.deepEqual(lib.splitExtension(".bashrc"), { base: ".bashrc", ext: "" });
+  assert.deepEqual(lib.splitExtension("noext"), { base: "noext", ext: "" });
+  assert.deepEqual(lib.splitExtension("dir.d", true), { base: "dir.d", ext: "" });
+  assert.deepEqual(lib.splitExtension("trail."), { base: "trail.", ext: "" });
+});
+
+test("multi-rename: mask placeholders", () => {
+  const t = new Date(2026, 10, 20, 9, 5, 7).getTime() / 1000;
+  const v = { base: "Holiday", ext: "jpg", counter: "007", parent: "Pics", mtime: t };
+  assert.equal(lib.expandRenameMask("[N]", v), "Holiday");
+  assert.equal(lib.expandRenameMask("[N2-4]", v), "oli");
+  assert.equal(lib.expandRenameMask("[N3]", v), "l");
+  assert.equal(lib.expandRenameMask("[N5-]", v), "day");
+  assert.equal(lib.expandRenameMask("[P]_[C]", v), "Pics_007");
+  assert.equal(lib.expandRenameMask("[Y]-[M]-[D] [h].[m].[s]", v), "2026-11-20 09.05.07");
+  assert.equal(lib.expandRenameMask("[E1]", v), "j");
+  assert.equal(lib.expandRenameMask("[[x] [Q]", v), "[x] [Q]");
+  assert.equal(lib.expandRenameMask("[N2-3]", { base: "čšž", ext: "" }), "šž");
+});
+
+test("multi-rename: names with counter, replace and case", () => {
+  const o = (x) => ({ ...lib.MULTI_RENAME_DEFAULTS, ...x });
+  const e = { name: "IMG_0001.JPG", isDir: false, mtime: 0 };
+  assert.equal(lib.multiRenameName(e, 0, o({}), "P"), "IMG_0001.JPG");
+  assert.equal(lib.multiRenameName(e, 2, o({ name: "photo_[C]", start: 5, step: 2, digits: 3 }), "P"), "photo_009.JPG");
+  assert.equal(lib.multiRenameName(e, 0, o({ case: "lower" }), "P"), "img_0001.jpg");
+  assert.equal(lib.multiRenameName(e, 0, o({ search: "img_", replace: "Pic-" }), "P"), "Pic-0001.JPG");
+  assert.equal(lib.multiRenameName(e, 0, o({ search: "img_", replace: "x", matchCase: true }), "P"), "IMG_0001.JPG");
+  assert.equal(lib.multiRenameName(e, 0, o({ search: "(\\d+)", replace: "<$1>", regex: true }), "P"), "IMG_<0001>.JPG");
+  assert.equal(lib.multiRenameName(e, 0, o({ search: "IMG", replace: "$1" }), "P"), "$1_0001.JPG");
+  assert.equal(lib.multiRenameName({ name: "my song-name.mp3", mtime: 0 }, 0, o({ case: "words" }), "P"), "My Song-Name.Mp3");
+  assert.equal(lib.multiRenameName({ name: "my song.mp3", mtime: 0 }, 0, o({ case: "first" }), "P"), "My song.mp3");
+  assert.equal(lib.multiRenameName(e, 0, o({ ext: "" }), "P"), "IMG_0001");
+  assert.equal(lib.multiRenameName({ name: "Dir.d", isDir: true, mtime: 0 }, 0, o({ name: "[N]_x" }), "P"), "Dir.d_x");
+});
+
+test("multi-rename: plan finds duplicates, existing names and bad input", () => {
+  const o = (x) => ({ ...lib.MULTI_RENAME_DEFAULTS, ...x });
+  const es = ["a.txt", "b.txt"].map((name) => ({ name, mtime: 0, folder: "/d" }));
+  let p = lib.multiRenamePlan(es, o({ name: "x" }));
+  assert.equal(p.ok, false);
+  assert.deepEqual(p.rows.map((r) => r.error), ["Same name twice", "Same name twice"]);
+  p = lib.multiRenamePlan(es, o({ name: "[N]_[C]" }), () => ["a_1.txt", "keep"]);
+  assert.deepEqual(p.rows.map((r) => r.to), ["a_1.txt", "b_2.txt"]);
+  assert.deepEqual(p.rows.map((r) => r.error), ["Already exists", null]);
+  // Shifting names inside the batch is fine: b.txt leaves before a.txt takes its name.
+  const sw = lib.multiRenamePlan(es, o({ search: "a", replace: "b" }), () => ["a.txt", "b.txt"]);
+  assert.deepEqual(sw.rows.map((r) => r.error), ["Same name twice", "Same name twice"]);
+  const shift = lib.multiRenamePlan([{ name: "a", mtime: 0, folder: "/d" }, { name: "b", mtime: 0, folder: "/d" }], o({ name: "[N]", search: "", case: "same" }), () => ["a", "b"]);
+  assert.equal(shift.ok, false); // nothing changes
+  const swap = lib.multiRenamePlan([{ name: "a", mtime: 0, folder: "/d" }], o({ name: "b" }), () => ["a", "b"]);
+  assert.equal(swap.rows[0].error, "Already exists");
+  p = lib.multiRenamePlan(es, o({ name: "", ext: "" }));
+  assert.equal(p.rows[0].error, "Invalid name");
+  p = lib.multiRenamePlan(es, o({ search: "(", regex: true }));
+  assert.match(p.error, /^Search:/);
+  p = lib.multiRenamePlan([{ name: "a", mtime: 0, folder: "/d" }], o({ case: "upper" }), () => ["a"]);
+  assert.equal(p.ok, true);
+  p = lib.multiRenamePlan([{ name: "a", mtime: 0, folder: "/d" }, { name: "b", mtime: 0, folder: "/d" }], o({ name: "[N]x" }), () => ["a", "b", "bx"]);
+  assert.deepEqual(p.rows.map((r) => r.error), [null, "Already exists"]);
+});
+
+test("pack formats: names, suffixes and form checks", () => {
+  const f = (name) => ({ name, isDir: false });
+  assert.equal(lib.packArchiveName([f("report.pdf")], "/x", ".tar.gz"), "report.tar.gz");
+  assert.equal(lib.packArchiveName([f("report.pdf")], "/x", ".gz"), "report.pdf.gz");
+  assert.equal(lib.packFormatOf("a.TGZ"), "tgz");
+  assert.equal(lib.packFormatOf("a.tar.gz"), "tgz");
+  assert.equal(lib.packFormatOf("a.gz"), "gz");
+  assert.equal(lib.packFormatOf("a.rar"), null);
+  assert.equal(lib.withPackFormat("/x/site.zip", "7z"), "/x/site.7z");
+  assert.equal(lib.withPackFormat("/x/site.tar.gz", "tar"), "/x/site.tar");
+  assert.equal(lib.withPackFormat("/x/site", "zip"), "/x/site.zip");
+  assert.equal(lib.packFormError({ target: "a.rar" }), "The name must end in .zip, .tar, .tar.gz, .tgz, .tar.bz2, .tar.xz, .gz or .7z.");
+  assert.equal(lib.packFormatOf("x.tar.xz"), "txz");
+  assert.equal(lib.withPackFormat("/x/a.tar.bz2", "zip"), "/x/a.zip");
+  assert.equal(lib.archiveKindOf("x.TBZ2"), "tbz2");
+  assert.equal(lib.archiveKindOf("x.tar.xz"), "txz");
+  assert.equal(lib.archiveKindOf("x.xz"), null);
+  assert.equal(lib.packFormError({ target: "a.tar", encrypt: true, password: "x", repeat: "x" }), "Only ZIP archives can have a password.");
+  assert.match(lib.packFormError({ target: "a.gz", sources: [f("a"), f("b")] }), /exactly one file/);
+  assert.equal(lib.packFormError({ target: "a.gz", sources: [f("a")] }), null);
+  assert.equal(lib.packedText({ done: 2 }, "/x/a.zip", true), "Added 2 item(s) to a.zip");
+});
+
+test("player: paused is active and shows in the strip", () => {
+  assert.equal(lib.audioActive({ state: "paused" }), true);
+  const v = lib.playerStrip({ state: "paused", name: "s.mp3", position: 3, duration: 10 });
+  assert.equal(v.paused, true);
+  assert.equal(v.text, "s.mp3");
+  assert.equal(lib.playerStrip({ state: "playing", name: "s", position: 0, duration: 1 }).paused, false);
+});
+
+test("multi-rename: counter per folder", () => {
+  const o = { ...lib.MULTI_RENAME_DEFAULTS, name: "[P]_[C]", digits: 2, perFolder: true };
+  const es = [
+    { name: "a.jpg", mtime: 0, folder: "/x/A" },
+    { name: "b.jpg", mtime: 0, folder: "/x/B" },
+    { name: "c.jpg", mtime: 0, folder: "/x/A" },
+  ];
+  assert.deepEqual(lib.multiRenamePlan(es, o).rows.map((r) => r.to), ["A_01.jpg", "B_01.jpg", "A_02.jpg"]);
+  assert.deepEqual(lib.multiRenamePlan(es, { ...o, perFolder: false }).rows.map((r) => r.to), ["A_01.jpg", "B_02.jpg", "A_03.jpg"]);
+});
+
+test("multi-rename: names from a file", () => {
+  assert.deepEqual(lib.namesFromText("\uFEFFone.txt\r\ntwo.txt\n\n"), ["one.txt", "two.txt"]);
+  const o = { ...lib.MULTI_RENAME_DEFAULTS, names: ["x.txt", "y.txt"] };
+  const es = ["a", "b", "c"].map((name) => ({ name, mtime: 0, folder: "/d" }));
+  assert.deepEqual(lib.multiRenamePlan(es, o).rows.map((r) => r.to), ["x.txt", "y.txt", "c"]);
+  assert.deepEqual(lib.multiRenamePlan(es, { ...o, case: "upper" }).rows.map((r) => r.to), ["X.TXT", "Y.TXT", "C"]);
+  assert.equal(lib.multiRenamePlan(es, { ...o, names: ["", "y"] }).rows[0].error, "Invalid name");
+});
+
+test("realLocation maps a shown server archive path back to its copy", () => {
+  const m = new Map([["/tmp/fxfm/edit-3/a.zip", "sftp://web/var"]]);
+  assert.equal(lib.displayLocation("/tmp/fxfm/edit-3/a.zip/in", m), "sftp://web/var/a.zip/in");
+  assert.equal(lib.realLocation("sftp://web/var/a.zip/in", m), "/tmp/fxfm/edit-3/a.zip/in");
+  assert.equal(lib.realLocation("sftp://web/var/a.zip", m), "/tmp/fxfm/edit-3/a.zip");
+  assert.equal(lib.realLocation("sftp://web/var/a.zipx", m), "sftp://web/var/a.zipx");
+  assert.equal(lib.realLocation("/Users/x", m), "/Users/x");
+});
+
+test("smbHostLabel: Bonjour host name or NetBIOS address next to the name", () => {
+  assert.equal(lib.smbHostLabel({ name: "studio", host: "studio", address: null }), "studio");
+  assert.equal(lib.smbHostLabel({ name: "My NAS", host: "my-nas.local", address: null }), "My NAS (my-nas.local)");
+  assert.equal(lib.smbHostLabel({ name: "PC-ANA", host: "PC-ANA", address: "192.168.1.20" }), "PC-ANA (192.168.1.20)");
+});
+
+test("Find files bridge: actions are built and parsed", () => {
+  const a = lib.findFilesAction("s1:1", "go", { folder: "/x", cursor: "a" });
+  assert.deepEqual(a, { id: "s1:1", action: "go", args: { folder: "/x", cursor: "a" } });
+  assert.deepEqual(lib.parseFindFilesAction(JSON.parse(JSON.stringify(a))), a);
+  assert.deepEqual(lib.findFilesAction("s1:2", "context").args, {});
+  assert.throws(() => lib.findFilesAction("s1:3", "rm"));
+  assert.throws(() => lib.findFilesAction("", "go"));
+  assert.equal(lib.parseFindFilesAction({ id: "x", action: "delete" }), null);
+  assert.equal(lib.parseFindFilesAction({ id: 7, action: "go" }), null);
+  assert.equal(lib.parseFindFilesAction(null), null);
+  assert.deepEqual(lib.parseFindFilesAction({ id: "x", action: "feed", args: [1] }).args, {});
+});
+
+test("Find files bridge: replies and commands", () => {
+  assert.deepEqual(lib.findFilesReply("a", { location: "/Volumes/s" }), { id: "a", ok: true, value: { location: "/Volumes/s" } });
+  assert.deepEqual(lib.findFilesReply("a"), { id: "a", ok: true, value: null });
+  assert.deepEqual(lib.findFilesReply("a", null, new Error("boom")), { id: "a", ok: false, error: "boom" });
+  assert.deepEqual(lib.findFilesReply("a", null, "no"), { id: "a", ok: false, error: "no" });
+  assert.deepEqual(lib.parseFindFilesReply({ id: "a", ok: true }), { id: "a", ok: true, value: null });
+  assert.deepEqual(lib.parseFindFilesReply({ id: "a", ok: false }), { id: "a", ok: false, error: "failed" });
+  assert.equal(lib.parseFindFilesReply({ id: "a" }), null);
+  assert.equal(lib.parseFindFilesReply({ ok: true }), null);
+  assert.deepEqual(lib.parseFindFilesCommand({ cmd: "focus", location: "/x" }), { cmd: "focus", location: "/x" });
+  assert.equal(lib.parseFindFilesCommand({ cmd: "quit" }), null);
+  assert.equal(lib.parseFindFilesCommand("focus"), null);
+});
+
+test("findFilesGeometry keeps a usable size and a complete position", () => {
+  assert.equal(lib.findFilesGeometry(null), null);
+  assert.equal(lib.findFilesGeometry({}), null);
+  assert.equal(lib.findFilesGeometry({ width: 300, height: 600 }), null);
+  assert.equal(lib.findFilesGeometry({ width: "900", height: 600 }), null);
+  assert.deepEqual(lib.findFilesGeometry({ width: 900.4, height: 600, columns: [] }), { width: 900, height: 600, maximized: false });
+  assert.deepEqual(lib.findFilesGeometry({ width: 900, height: 600, x: -1200.2, y: 40, maximized: true }), {
+    width: 900, height: 600, maximized: true, x: -1200, y: 40,
+  });
+  assert.deepEqual(lib.findFilesGeometry({ width: 900, height: 600, x: 10 }), { width: 900, height: 600, maximized: false });
 });

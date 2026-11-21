@@ -1,14 +1,20 @@
 // Modal dialogs and the TC file operations behind them (F5/F6/F7/F8, Alt+F5, rename, masks).
 
 import {
+  remoteArchives,
+  realLocation,
+  displayLocation,
   archiveOf,
+  CHOOSE_FOLDER,
   copyTargetDefault,
   deleteConfirmText,
   editTexts,
   firstComponent,
   formatDate,
   isLocalFolder,
+  isSearchLocation,
   formatK,
+  groupSources,
   groupThousands,
   jobErrorBox,
   jobServers,
@@ -19,8 +25,10 @@ import {
   newNameError,
   operationPaths,
   operationSources,
-  PACK_LOCAL_ONLY,
   packArchiveName,
+  PACK_FORMATS,
+  packFormatOf,
+  withPackFormat,
   packCursor,
   packDialogText,
   packedText,
@@ -28,10 +36,12 @@ import {
   packTargetDir,
   parentLocation,
   parseRemote,
+  connectionLost,
   passwordArchive,
   permanentConfirmText,
   renameDecision,
   renameSelection,
+  resultOpRefusal,
   suggestRename,
   uploadSucceeded,
 } from "./lib.mjs";
@@ -225,7 +235,9 @@ export async function askPassword(error, ctl) {
     ctl,
   });
   if (!r || !r.text) return false;
-  await ctx.invoke("set_archive_password", { archive, password: r.text });
+  // Other windows (Find files) use the prompts without initDialogs.
+  const invoke = ctx?.invoke ?? window.__TAURI__.core.invoke;
+  await invoke("set_archive_password", { archive, password: r.text });
   return true;
 }
 
@@ -276,6 +288,8 @@ class Job {
     this.question = null; // ctl of the open conflict/error dialog
     this.followUp = null; // job request to run after this one ends
     this.timer = 0;
+    /** Shared by the jobs of one F5/F6 from a results list: an "all" answer holds for all. */
+    this.shared = null;
   }
 
   /** Runs the job; resolves with the job://done payload. */
@@ -384,7 +398,8 @@ class Job {
 
   async askConflict(info) {
     const fileLine = (label, size, mtime) => `${label}: ${groupThousands(size)} bytes, ${formatDate(mtime)}`;
-    let answer = null;
+    // An earlier job of the same operation was told "Overwrite all" / "Skip all" / "Overwrite older".
+    let answer = this.shared?.all ?? null;
     while (!answer) {
       const r = await this.ask({
         title: "File exists",
@@ -413,6 +428,7 @@ class Job {
         answer = { kind: r ?? "cancel" };
       }
     }
+    if (this.shared && ["overwriteAll", "skipAll", "overwriteAllOlder"].includes(answer.kind)) this.shared.all = answer;
     ctx.invoke("answer_conflict", { job: this.id, answer }).catch((e) => console.error("fxfm: answer_conflict", e));
   }
 
@@ -499,27 +515,35 @@ const OVERWRITE_CANCEL = [
 /**
  * Runs `req`, then refreshes both panels; the source panel's marks (if a panel
  * is given) are cleared only when the job ran to the end. Resolves with the last
- * job's `job://done` payload, or null when no job ran.
+ * job's `job://done` payload, or null when no job ran. `recheck: false` leaves the search
+ * results lists alone after a move/delete (the caller rechecks once at its end).
  */
-async function runJob(req, source) {
-  // A pack target is never a server (the backend refuses it), so it connects nothing.
-  const servers = jobServers([...(req.sources ?? req.paths ?? []), req.dest, req.cwd]);
+async function runJob(req, source, { recheck = true, shared = null } = {}) {
+  // A pack target may be on a server too: it is connected first like a copy's destination.
+  const servers = jobServers([...(req.sources ?? req.paths ?? []), req.dest, req.cwd, req.target]);
   const connected = await connectServers(servers);
   if (!connected) return null;
   const job = new Job(req);
+  job.shared = shared;
   const done = await job.run();
   if (jobSucceeded(done)) source?.clearMarks();
+  // Moved or deleted items vanish from the search results lists (also after a partial job).
+  if (recheck && (req.kind === "move" || req.kind === "delete")) ctx.recheckResults?.();
   await Promise.all(ctx.panels().map((p) => p.refresh()));
   const err = done.error;
   // Password needed (or wrong): ask and run the same request again.
-  if (err && passwordArchive(err.message) && (await askPassword(err))) return runJob(req, source);
-  // Packing never replaces an archive without asking.
+  if (err && passwordArchive(err.message) && (await askPassword(err))) return runJob(req, source, { recheck });
+  // Packing never replaces an archive without asking; it can also add to it.
   if (err?.kind === "exists" && req.kind === "pack") {
-    const r = await dialog({ title: "Pack files", text: `"${lastComponent(req.target)}" already exists.`, buttons: OVERWRITE_CANCEL });
-    if (r !== "overwrite") return done;
-    const again = { ...req, overwrite: true };
+    const canAdd = !req.password && packFormatOf(req.target) !== "gz";
+    const buttons = canAdd ? [{ label: "Add to archive", value: "add", default: true }, ...OVERWRITE_CANCEL.map((b) => ({ ...b, default: false }))] : OVERWRITE_CANCEL;
+    const r = await dialog({ title: "Pack files", text: `"${lastComponent(req.target)}" already exists.`, buttons });
+    if (r !== "overwrite" && r !== "add") return done;
+    const again = r === "add" ? { ...req, add: true } : { ...req, overwrite: true };
     try {
-      return await runJob(again, source);
+      const res = await runJob(again, source, { recheck });
+      if (r === "add" && res) res.added = true;
+      return res;
     } finally {
       again.password = null;
     }
@@ -532,7 +556,7 @@ async function runJob(req, source) {
   }
   if (job.followUp) {
     const r = await dialog({ title: "Delete", text: permanentConfirmText(job.followUp.paths), buttons: YES_NO });
-    if (r === "yes") return runJob(job.followUp, source);
+    if (r === "yes") return runJob(job.followUp, source, { recheck });
   }
   return done;
 }
@@ -561,8 +585,23 @@ async function askUpload({ id, location, name }) {
     buttons: YES_NO,
   });
   if (r !== "yes") return confirmEdit(id, false);
+  const server = parseRemote(location ?? "")?.server ?? null;
+  /** A server file whose connection is gone: offers to reconnect; true = try the upload again. */
+  const reconnect = async (why) => {
+    if (!server) return false;
+    const r2 = await dialog({
+      title: "Edit",
+      text: `"${name}" was not uploaded: ${why}`,
+      buttons: [
+        { label: "Reconnect and upload", value: "again", default: true },
+        { label: "Not now", value: null },
+      ],
+    });
+    if (r2 !== "again") return false;
+    return Boolean(await connectServers([server]));
+  };
   let done;
-  for (let force = false; !done; force = true) {
+  for (let force = false; !done; ) {
     try {
       done = await new Job({ kind: "upload" }, () => ctx.invoke("upload_back", { id, force })).run();
     } catch (e) {
@@ -573,11 +612,21 @@ async function askUpload({ id, location, name }) {
           text: texts.conflict,
           buttons: YES_NO,
         });
-        if (overwrite === "yes") continue;
+        if (overwrite === "yes") {
+          force = true;
+          continue;
+        }
         return confirmEdit(id, false);
       }
+      if (text.startsWith("Not connected to ") && (await reconnect(text))) continue;
       await confirmEdit(id, false);
+      if (server && text.startsWith("Not connected to ")) return null;
       return message("Error", `"${name}" was not uploaded: ${text}`);
+    }
+    // The connection broke during the upload: the same offer, then a new attempt.
+    if (!uploadSucceeded(done) && server && connectionLost(done.error?.message) && (await reconnect(done.error.message))) {
+      done = null;
+      continue;
     }
   }
   const ok = uploadSucceeded(done);
@@ -595,6 +644,14 @@ function sourcesOf(panel) {
   return operationSources(panel.entries, panel.marked, panel.cursorIndex);
 }
 
+/** In a results list: says why `op` is refused for `sources` and returns true; else false. */
+function refusedInResults(panel, sources, op) {
+  if (!isSearchLocation(panel.location)) return false;
+  const why = resultOpRefusal(sources, op);
+  if (why) panel.setMessage(why);
+  return Boolean(why);
+}
+
 const countText = (sources, files) =>
   sources.length === 1 ? `"${sources[0].name}"` : `${sources.length} ${files}`;
 
@@ -605,6 +662,12 @@ export async function copyMove(kind) {
   const src = ctx.active();
   const sources = sourcesOf(src);
   if (!sources.length) return;
+  // A results list is no folder to copy into.
+  if (isSearchLocation(ctx.other().location)) {
+    src.setMessage(CHOOSE_FOLDER);
+    return;
+  }
+  if (refusedInResults(src, sources, kind)) return;
   // Snapshot before awaiting: a refresh may move the panel while the dialog is open.
   const { cwd, paths } = operationPaths(src.location, sources);
   await copyMoveTo(kind, { paths, cwd, dest: copyTargetDefault(ctx.other().location, sources), source: src });
@@ -624,16 +687,48 @@ export async function copyMoveTo(kind, { paths, cwd, dest, source = null, switch
   const buttons = switchable
     ? [OK_CANCEL[0], { label: `${VERB[otherKind]} instead`, value: "switch" }, OK_CANCEL[1]]
     : OK_CANCEL;
-  const r = await dialog({ title: verb, text: `${verb} ${countText(sources, "file(s)")} to:`, input: dest, buttons });
-  const target = r?.text.trim();
+  // A server archive's copy shows as its place on the server; the job writes into the copy
+  // (and the edit watcher offers the upload).
+  const r = await dialog({ title: verb, text: `${verb} ${countText(sources, "file(s)")} to:`, input: displayLocation(dest, remoteArchives), buttons });
+  const target = r?.text.trim() ? realLocation(r.text.trim(), remoteArchives) : "";
   if (!target) return;
-  await runJob({ kind: r.value === "switch" ? otherKind : kind, sources: paths, dest: target, cwd }, source);
+  const jobKind = r.value === "switch" ? otherKind : kind;
+  // A search results list can mix local items and entries of several archives; one job takes
+  // one archive (or none), so each group gets its own job, one after the other.
+  const groups = groupSources(paths, cwd);
+  if (groups.length <= 1) {
+    await runJob({ kind: jobKind, sources: paths, dest: target, cwd }, source);
+    return;
+  }
+  // One answer "for all" holds for every group's job.
+  const shared = {};
+  try {
+    for (let i = 0; i < groups.length; i++) {
+      const g = groups[i];
+      // Marks go only when the last group finished too.
+      const last = i === groups.length - 1;
+      const done = await runJob({ kind: jobKind, sources: g.paths, dest: target, cwd: g.cwd }, last ? source : null, {
+        recheck: false,
+        shared,
+      });
+      // A cancelled, failed or never started job stops the rest.
+      if (!done || !jobSucceeded(done)) break;
+    }
+  } finally {
+    if (jobKind === "move") {
+      ctx.recheckResults?.();
+      await Promise.all(ctx.panels().map((p) => p.refresh()));
+    }
+  }
 }
 
 /**
  * The Pack files dialog. Resolves with {target, password (or null), encryption} or null.
  * Enter = OK (unless Cancel has focus), Escape = Cancel.
  */
+/** The format of the last Pack files dialog, for the next one's default name (this session). */
+let lastPackFormat = "zip";
+
 function packDialog(sources, initial) {
   return new Promise((resolve) => {
     const { backdrop, box, body, row } = frame("Pack files");
@@ -648,9 +743,25 @@ function packDialog(sources, initial) {
       return l;
     };
     const format = el("select");
-    const zipOpt = el("option", null, "ZIP");
-    zipOpt.value = "zip";
-    format.append(zipOpt);
+    for (const [id, label] of PACK_FORMATS) {
+      const o = el("option", null, label);
+      o.value = id;
+      format.append(o);
+    }
+    format.value = packFormatOf(initial) ?? "zip";
+    // Picking a format renames the target; typing another suffix picks its format.
+    format.addEventListener("change", () => {
+      target.value = withPackFormat(target.value.trim(), format.value);
+      lastPackFormat = format.value;
+      showPw();
+    });
+    target.addEventListener("input", () => {
+      const f = packFormatOf(target.value.trim());
+      if (f && f !== format.value) {
+        format.value = f;
+        showPw();
+      }
+    });
     const encrypt = el("input");
     encrypt.type = "checkbox";
     const encryptLabel = el("label", "check gap");
@@ -681,6 +792,9 @@ function packDialog(sources, initial) {
     const error = el("p", "error");
     error.hidden = true;
     const showPw = () => {
+      // Only ZIP can be encrypted.
+      encryptLabel.hidden = format.value !== "zip";
+      if (encryptLabel.hidden) encrypt.checked = false;
       pwBox.hidden = !encrypt.checked;
       for (const f of [password, repeat, method]) f.disabled = !encrypt.checked;
     };
@@ -700,7 +814,7 @@ function packDialog(sources, initial) {
       resolve(value);
     };
     const accept = () => {
-      const problem = packFormError({ target: target.value, encrypt: encrypt.checked, password: password.value, repeat: repeat.value });
+      const problem = packFormError({ target: target.value, encrypt: encrypt.checked, password: password.value, repeat: repeat.value, sources });
       if (problem) {
         error.textContent = problem;
         error.hidden = false;
@@ -743,14 +857,13 @@ export async function packFiles() {
   const src = ctx.active();
   const sources = sourcesOf(src);
   if (!sources.length) return;
-  if (!isLocalFolder(src.location)) {
-    await message("Pack files", PACK_LOCAL_ONLY);
-    return;
-  }
+  if (refusedInResults(src, sources, "copy")) return;
   // Snapshot before awaiting: a refresh may move the panel while the dialog is open.
   const { cwd, paths } = operationPaths(src.location, sources);
-  const dir = packTargetDir(src.location, ctx.other().location);
-  const r = await packDialog(sources, joinLocation(dir, packArchiveName(sources, src.location)));
+  const dir = packTargetDir(src.location, ctx.other().location, cwd);
+  const ext = PACK_FORMATS.find(([id]) => id === lastPackFormat)?.[2] ?? ".zip";
+  const fmt = lastPackFormat === "gz" && (sources.length !== 1 || sources[0].isDir) ? ".zip" : ext;
+  const r = await packDialog(sources, joinLocation(dir, packArchiveName(sources, src.location, fmt)));
   if (!r) return;
   const req = { kind: "pack", sources: paths, cwd, target: r.target, password: r.password, encryption: r.encryption };
   r.password = null;
@@ -758,12 +871,12 @@ export async function packFiles() {
   req.password = null;
   if (!done?.summary || done.summary.cancelled || done.error) return;
   // The cursor goes to the new archive in the panel showing its folder (the target panel first).
-  const target = r.target.startsWith("/") ? r.target : joinLocation(cwd, r.target);
+  const target = r.target.startsWith("/") || r.target.includes("://") ? r.target : joinLocation(cwd, r.target);
   const folder = parentLocation(target);
   const name = lastComponent(target);
   const panel = [ctx.other(), src].find((p) => p.location === folder);
   if (panel) await panel.go(folder, name, { refresh: true });
-  src.setMessage(packedText(done.summary, target));
+  src.setMessage(packedText(done.summary, target, Boolean(done.added)));
 }
 
 /** F8 (Trash) / Shift+F8 (permanent). */
@@ -771,11 +884,12 @@ export async function deleteItems(toTrash) {
   const src = ctx.active();
   const sources = sourcesOf(src);
   if (!sources.length) return;
+  if (refusedInResults(src, sources, "del")) return;
   const { paths } = operationPaths(src.location, sources);
   // The backend ignores toTrash inside archives and on servers (always permanent); for
-  // archives it also decides the wording.
+  // archives it also decides the wording. Results lists hold no archive entries here.
   let inArchive = false;
-  if (!parseRemote(src.location)) {
+  if (!parseRemote(src.location) && !isSearchLocation(src.location)) {
     try {
       inArchive = await ctx.invoke("location_in_archive", { location: src.location });
     } catch {
@@ -905,7 +1019,8 @@ export async function markByMask(on) {
 
 /**
  * c: {invoke, listen, active() -> Panel, other() -> Panel, panels() -> Panel[],
- *     connectFlow(request, opts) -> Promise<location|null>}.
+ *     connectFlow(request, opts) -> Promise<location|null>, recheckResults()} (`recheckResults`:
+ *     the search results lists drop vanished items at their next listing).
  * Subscribes to the job events.
  */
 export async function initDialogs(c) {

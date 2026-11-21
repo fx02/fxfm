@@ -36,12 +36,23 @@ function keyFromCode(code) {
 /** Which Mac key acts as TC's Alt and Ctrl (settings `modifiers`); the TC default. */
 export const DEFAULT_MODIFIERS = Object.freeze({ alt: "option", ctrl: "control" });
 
-/** Mac keys that can act as Alt or Ctrl, with their names. Fn is not offered: WebKit never reports it. */
+/**
+ * Mac keys that can act as Alt or Ctrl, with their names. WebKit never reports Fn, so the app
+ * tracks it natively (`keys://fn` → `setFnHeld`).
+ */
 export const MAC_KEYS = [
   ["option", "Option"],
   ["control", "Control"],
   ["command", "Command"],
+  ["fn", "Fn (globe)"],
 ];
+
+let fnHeld = false;
+
+/** The Fn key went down or up (`keys://fn` from the native monitor). */
+export function setFnHeld(down) {
+  fnHeld = Boolean(down);
+}
 
 const MAC_KEY_IDS = MAC_KEYS.map(([id]) => id);
 
@@ -67,7 +78,7 @@ export function modifierChoiceError(alt, ctrl) {
  * neither (it makes no TC combo); `any` is any of Control, Option or Command held.
  */
 export function tcModifiers(e, map = DEFAULT_MODIFIERS) {
-  const held = { control: Boolean(e.ctrlKey), option: Boolean(e.altKey), command: Boolean(e.metaKey) };
+  const held = { control: Boolean(e.ctrlKey), option: Boolean(e.altKey), command: Boolean(e.metaKey), fn: Boolean(e.fnKey ?? fnHeld) };
   const mapped = (k) => k === map.alt || k === map.ctrl;
   return {
     ctrl: held[map.ctrl] ?? false,
@@ -122,18 +133,19 @@ export function captureRefusal(e, map = DEFAULT_MODIFIERS) {
   return null;
 }
 
-/** Splits a canonical combo into {ctrl, alt, shift, cmd, key}. */
+/** Splits a canonical combo into {fn, ctrl, alt, shift, cmd, key}. */
 function splitCombo(combo) {
   const parts = combo.split("+");
   // "Ctrl++" does not occur (the key is "=" / "-" / NumAdd), but a trailing "+" would be the key.
   const key = parts.pop() || "+";
   const has = (m) => parts.includes(m);
-  return { ctrl: has("Ctrl"), alt: has("Alt"), shift: has("Shift"), cmd: has("Cmd"), key };
+  return { fn: has("Fn"), ctrl: has("Ctrl"), alt: has("Alt"), shift: has("Shift"), cmd: has("Cmd"), key };
 }
 
 /**
  * The physical keys of a TC combo under `map`, written like a combo with Ctrl = Control,
- * Alt = Option, Cmd = Command (what macOS's reserved shortcuts are listed in).
+ * Alt = Option, Cmd = Command (what macOS's reserved shortcuts are listed in) and a leading
+ * "Fn+" when Fn is held.
  */
 export function physicalCombo(combo, map = DEFAULT_MODIFIERS) {
   const c = splitCombo(combo);
@@ -142,6 +154,7 @@ export function physicalCombo(combo, map = DEFAULT_MODIFIERS) {
   if (c.alt) held.add(map.alt);
   if (c.cmd) held.add("command");
   return (
+    (held.has("fn") ? "Fn+" : "") +
     (held.has("control") ? "Ctrl+" : "") +
     (held.has("option") ? "Alt+" : "") +
     (c.shift ? "Shift+" : "") +
@@ -155,7 +168,7 @@ const ARROWS = { Up: "↑", Down: "↓", Left: "←", Right: "→" };
 /** Label of a TC combo with the Mac keys in use, as macOS menus write it: "⌥F5", "⌃⇧F". */
 export function comboLabel(combo, map = DEFAULT_MODIFIERS) {
   const p = splitCombo(physicalCombo(combo, map));
-  return (p.ctrl ? "⌃" : "") + (p.alt ? "⌥" : "") + (p.shift ? "⇧" : "") + (p.cmd ? "⌘" : "") + (ARROWS[p.key] ?? p.key);
+  return (p.fn ? "fn " : "") + (p.ctrl ? "⌃" : "") + (p.alt ? "⌥" : "") + (p.shift ? "⇧" : "") + (p.cmd ? "⌘" : "") + (ARROWS[p.key] ?? p.key);
 }
 
 /**
@@ -234,9 +247,8 @@ export function displayName(entry) {
 const ARCHIVE_EXT = new Set(["zip", "tar", "tgz", "gz", "7z", "bz2", "xz", "rar", "tbz2", "txz"]);
 const MEDIA_EXT = new Set(["mp4", "mkv", "mov", "avi", "webm", "mp3", "flac", "wav", "m4a", "ogg", "aac"]);
 
-/** CSS class for the entry's color: "hid" | "arc" | "med" | "" (hidden wins). */
-export function colorClass(entry) {
-  if (entry.hidden) return "hid";
+/** Which icon a file gets: "arc" | "med" | "" (colors come from the file-type rules). */
+export function iconKind(entry) {
   if (entry.isDir) return "";
   const dot = entry.name.lastIndexOf(".");
   if (dot <= 0) return "";
@@ -261,12 +273,60 @@ function maskRegex(pattern) {
 /** TC file mask match: masks separated by ";" or spaces, "*" and "?", case- and NFC-insensitive. */
 export function matchMask(name, mask) {
   const n = name.normalize("NFC").toLowerCase();
-  return mask
+  return maskRegexes(mask).some((re) => re.test(n));
+}
+
+/** Splits TC masks (";" or spaces) into compiled regexes. */
+function maskRegexes(mask) {
+  return String(mask ?? "")
     .normalize("NFC")
     .toLowerCase()
     .split(/[;\s]+/)
     .filter(Boolean)
-    .some((p) => maskRegex(p).test(n));
+    .map(maskRegex);
+}
+
+/**
+ * Compiles "Define colors by file type" rules once: returns `(name) => color | null`, the
+ * color of the first rule with a matching mask (case- and NFC-insensitive).
+ */
+export function compileTypeRules(rules) {
+  const compiled = (rules ?? []).map((r) => ({ res: maskRegexes(r.masks), color: r.color }));
+  return (name) => {
+    const n = name.normalize("NFC").toLowerCase();
+    for (const r of compiled) if (r.res.some((re) => re.test(n))) return r.color;
+    return null;
+  };
+}
+
+/** An entry's own color: the first matching file-type rule (when on), else hidden, else null (font). */
+export function entryColor(entry, colors, matcher) {
+  if (entry.up) return null;
+  if (colors.byType) {
+    const c = matcher(entry.name);
+    if (c) return c;
+  }
+  return entry.hidden ? colors.hidden : null;
+}
+
+/** The cursor in the inactive panel: only this frame. */
+export const INACTIVE_CURSOR_OUTLINE = "1px dashed #8a8a8a";
+
+/**
+ * Inline style of a panel row, {color, background, outline}. Text: marked > cursorFont on the
+ * cursor bar (unless empty) > entry color > font. Rows alternate background / background2; the
+ * active panel's cursor is a bar (inverted cursor) or a frame in the cursor color, the
+ * inactive panel's cursor only a dashed frame.
+ */
+export function rowStyle(entry, { marked, cursor, active, index }, colors, matcher) {
+  const bar = cursor && active && colors.invertedCursor;
+  let color;
+  if (marked) color = colors.mark;
+  else if (bar && colors.cursorFont) color = colors.cursorFont;
+  else color = entryColor(entry, colors, matcher) ?? colors.font;
+  const background = bar ? colors.cursor : index % 2 ? colors.background2 : colors.background;
+  const outline = !cursor || bar ? "" : active ? `1px solid ${colors.cursor}` : INACTIVE_CURSOR_OUTLINE;
+  return { color, background, outline };
 }
 
 /** Rows to render for a virtual list: [start, end) including `overscan` rows each side. */
@@ -306,8 +366,12 @@ function trimSlash(loc) {
   return loc.length > 1 && loc.endsWith("/") ? loc.replace(/\/+$/, "") || "/" : loc;
 }
 
-/** "/a/b" -> "/a"; "/" stays "/". On a server: "sftp://m/a" -> "sftp://m/", and the root -> null. */
+/**
+ * "/a/b" -> "/a"; "/" stays "/". On a server: "sftp://m/a" -> "sftp://m/", and the root -> null.
+ * The search results list has no parent folder (its [..] goes back where the panel was).
+ */
 export function parentLocation(loc) {
+  if (isSearchLocation(loc)) return null;
   const r = parseRemote(loc);
   if (r) {
     const path = r.path.replace(/\/{2,}/g, "/");
@@ -436,7 +500,12 @@ export function renameSelection(name, isDir = false) {
 /** F5/F6 target: the other panel's folder with a trailing "/", plus the name of a single file. */
 export function copyTargetDefault(otherLoc, sources) {
   const dir = otherLoc.endsWith("/") ? otherLoc : `${otherLoc}/`;
-  return sources.length === 1 && !sources[0].isDir ? dir + sources[0].name : dir;
+  return sources.length === 1 && !sources[0].isDir ? dir + fileName(sources[0]) : dir;
+}
+
+/** An entry's own file name: a search result's `name` is its shown path, its `path` the real one. */
+function fileName(entry) {
+  return entry.path ? lastComponent(entry.path) : entry.name;
 }
 
 /** Entries an operation works on: the marked ones, else the one under the cursor; never "[..]". */
@@ -459,13 +528,438 @@ export function maskSelects(entry, mask) {
       const dirPattern = p.endsWith("/");
       if (dirPattern !== Boolean(entry.isDir)) return false;
       const pattern = dirPattern ? p.replace(/\/+$/, "") : p;
-      return pattern !== "" && matchMask(entry.name, pattern);
+      return pattern !== "" && matchMask(fileName(entry), pattern);
     });
 }
 
 /** Folder and full source paths of an operation, taken before any dialog is awaited. */
 export function operationPaths(location, sources) {
-  return { cwd: location, paths: sources.map((e) => joinLocation(location, e.name)) };
+  if (sources.length && sources.every((e) => e.path)) {
+    // A results list: entries carry full paths; cwd is the folder of the first one.
+    return { cwd: parentLocation(sources[0].path) ?? location, paths: sources.map((e) => e.path) };
+  }
+  return { cwd: location, paths: sources.map((e) => e.path ?? joinLocation(location, e.name)) };
+}
+
+/** Pseudo-location of the "Feed to listbox" search results panel (never matches parseRemote). */
+export const SEARCH_LOCATION = "search:results";
+
+export function isSearchLocation(loc) {
+  return loc === SEARCH_LOCATION;
+}
+
+/** "/Users/x/Docs/a" -> "~/Docs/a"; only an exact `home` prefix followed by "/" or the end counts. */
+export function homeDisplay(path, home) {
+  if (!home || home === "/") return path;
+  if (path === home) return "~";
+  return path.startsWith(home + "/") ? "~" + path.slice(home.length) : path;
+}
+
+/** Search `Item`s -> panel entries. `name` is the home-shortened full path: unique per path, so marks stay separate. */
+export function resultEntries(items, home) {
+  return items.map((it) => ({
+    name: homeDisplay(it.path, home),
+    path: it.path,
+    isDir: Boolean(it.isDir),
+    size: it.size,
+    mtime: it.mtime,
+    hidden: false,
+    inArchive: Boolean(it.inArchive),
+    mounted: it.mounted !== false,
+    mode: 0,
+    isSymlink: false,
+  }));
+}
+
+/**
+ * Operations allowed on the selected result entries:
+ * - any entry with `mounted === false` -> everything false;
+ * - else any entry `inArchive` -> only `copy` (true), `view` (true only when exactly one entry)
+ *   and `drag` (true when every entry is in an archive: they go out as file promises);
+ * - otherwise everything true.
+ */
+export function resultOps(entries) {
+  if (entries.some((e) => e.mounted === false)) {
+    return { view: false, edit: false, copy: false, move: false, del: false, drag: false };
+  }
+  if (entries.some((e) => e.inArchive)) {
+    return { view: entries.length === 1, edit: false, copy: true, move: false, del: false, drag: entries.every((e) => e.inArchive) };
+  }
+  return { view: true, edit: true, copy: true, move: true, del: true, drag: true };
+}
+
+/** Keeps the entries whose path is in `existsSet` (after F6/F8). */
+export function dropMissing(entries, existsSet) {
+  return entries.filter((e) => existsSet.has(e.path));
+}
+
+/** Ops refused in a results panel ("Feed to listbox"), and F5/F6 into a results panel. */
+export const NOT_IN_ARCHIVES = "Not available for items inside archives";
+export const NOT_MOUNTED = "Not available for items on a volume that is not mounted";
+export const NOT_IN_RESULTS = "Not available in search results";
+export const CHOOSE_FOLDER = "Choose a folder in the other panel.";
+
+/**
+ * Why `op` ("view" | "edit" | "copy" | "move" | "del" | "drag", see `resultOps`) is refused for
+ * the selected result `entries`, or null when it is allowed (also for no entries).
+ */
+export function resultOpRefusal(entries, op) {
+  if (!entries.length || resultOps(entries)[op]) return null;
+  return entries.some((e) => e.mounted === false) ? NOT_MOUNTED : NOT_IN_ARCHIVES;
+}
+
+/** Enter / Ctrl+PgUp on a result: its folder (inside an archive: the inner folder) and its name. */
+export function resultFolder(entry) {
+  return { folder: parentLocation(entry.path), name: lastComponent(entry.path) };
+}
+
+/** Result paths a recheck asks `paths_exist` about: not those on an unmounted volume. */
+export function pathsToCheck(entries) {
+  return entries.filter((e) => e.mounted !== false).map((e) => e.path);
+}
+
+/** The entries left after a recheck: `existing` paths, plus those on an unmounted volume (never dropped). */
+export function keepExisting(entries, existing) {
+  const keep = new Set(existing);
+  for (const e of entries) if (e.mounted === false) keep.add(e.path);
+  return dropMissing(entries, keep);
+}
+
+/**
+ * What the session saves for a panel ({location, cursorName}, or null for an empty panel):
+ * - a results panel saves the folder it came from (`results.back`);
+ * - a server archive's temp copy saves the server folder, cursor on the archive.
+ */
+export function sessionLocation(panel, results, archives = remoteArchives) {
+  if (isSearchLocation(panel.location)) {
+    const back = results?.back;
+    if (!back?.location) return null;
+    return sessionLocation({ location: back.location, cursorName: back.cursorName ?? null }, null, archives);
+  }
+  const r = remoteArchiveOf(panel.location ?? "", archives);
+  if (r) return { location: r.parent, cursorName: lastComponent(r.archive) };
+  return panel.location ? { location: panel.location, cursorName: panel.cursorName } : null;
+}
+
+/**
+ * The folder panel `location` stands for: a results list stands for the folder it came from
+ * (`results.back`, else `home`). Hotlist entries and the command line use it.
+ */
+export function panelFolder(location, results, home) {
+  if (!isSearchLocation(location)) return location;
+  return results?.back?.location || home;
+}
+
+/**
+ * F5/F6 sources split into the groups one copy/move job can take (the backend wants all items
+ * from one archive, or none from an archive): the local items as one group, then one group per
+ * archive, in order of first appearance. By name, like `archiveOf`; an archive file itself is a
+ * local item. Every group keeps `cwd`, so a relative target means the same folder for all.
+ */
+export function groupSources(paths, cwd) {
+  const groups = new Map();
+  for (const p of paths) {
+    const plain = p.length > 1 ? p.replace(/\/+$/, "") : p;
+    const archive = archiveOf(plain);
+    const key = archive && archive !== plain ? archive : "";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(p);
+  }
+  return [...groups.values()].map((g) => ({ paths: g, cwd }));
+}
+
+/** Row of the search window: name, folder (home-shortened) and date. */
+export function resultRow(item, home) {
+  return {
+    name: item.name,
+    folder: homeDisplay(item.folder ?? "", home),
+    size: item.size == null && !item.isDir ? "" : formatSize(item),
+    date: formatDate(item.mtime),
+  };
+}
+
+/** Columns of the Find files result list, in order, with their default widths (px). */
+export const RESULT_COLUMNS = [
+  { id: "name", label: "Name", width: 250 },
+  { id: "folder", label: "Folder", width: 280 },
+  { id: "size", label: "Size", width: 90 },
+  { id: "date", label: "Date", width: 140 },
+];
+
+/** Narrowest a result column can be dragged (px). */
+export const RESULT_COLUMN_MIN = 40;
+
+/**
+ * The result list's column layout from a saved one (junk tolerated): [{id, width, hidden}]
+ * in RESULT_COLUMNS order. Name is never hidden.
+ */
+export function resultColumns(saved) {
+  const byId = new Map((Array.isArray(saved) ? saved : []).filter((c) => c && typeof c.id === "string").map((c) => [c.id, c]));
+  return RESULT_COLUMNS.map((d) => {
+    const c = byId.get(d.id) ?? {};
+    const w = Number.isFinite(c.width) ? Math.round(c.width) : d.width;
+    return { id: d.id, width: Math.max(RESULT_COLUMN_MIN, w), hidden: d.id !== "name" && c.hidden === true };
+  });
+}
+
+/**
+ * CSS grid-template-columns of the visible columns at their widths, plus an empty track that
+ * takes the spare width (so a column is never squeezed: a wide layout scrolls sideways).
+ */
+export function resultGridTemplate(layout) {
+  return [...layout.filter((c) => !c.hidden).map((c) => `${c.width}px`), "1fr"].join(" ");
+}
+
+/**
+ * A click on result row `i` (Finder/TC listbox rules): plain selects only it; `toggle`
+ * (Cmd/Ctrl) adds or removes it; `range` (Shift) selects from the anchor to it. `marked` is a
+ * Set of paths; returns {marked, anchor} (new Set).
+ */
+export function resultClick(rows, marked, anchor, i, { toggle = false, range = false } = {}) {
+  const path = rows[i]?.path;
+  if (path == null) return { marked: new Set(marked), anchor };
+  if (range) {
+    const a = anchor != null && anchor >= 0 && anchor < rows.length ? anchor : i;
+    const [lo, hi] = a <= i ? [a, i] : [i, a];
+    const next = toggle ? new Set(marked) : new Set();
+    for (let k = lo; k <= hi; k++) next.add(rows[k].path);
+    return { marked: next, anchor: a };
+  }
+  if (toggle) {
+    const next = new Set(marked);
+    if (next.has(path)) next.delete(path);
+    else next.add(path);
+    return { marked: next, anchor: i };
+  }
+  return { marked: new Set([path]), anchor: i };
+}
+
+/** Feed to listbox: the selected rows (in list order) when more than one is selected, else all. */
+export function feedItems(rows, marked) {
+  if (marked.size < 2) return rows.slice();
+  return rows.filter((r) => marked.has(r.path));
+}
+
+// ---------------------------------------------------------------- Find files window
+
+/** Results shown by the Find files window (the backend's `limit`). */
+export const SEARCH_LIMIT = 1000;
+
+const commas = (n) => Math.trunc(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+
+/**
+ * Reducer of the Find files window's results: {rows, total, done, id, pending, fresh, early, floor}.
+ * Events:
+ * - `{type: "start"}`: `search_start` was called; its id is not known yet. Batches with an id
+ *   above `floor` are kept in `early` (the search thread may emit before the call returns).
+ * - `{type: "started", id}`: the id came back; the kept batches of that id are applied.
+ * - `{type: "failed"}`: the call failed; the rows go and nothing is awaited any more.
+ * - `{type: "clear"}`: empty query; rows go and late batches of the old search are ignored.
+ * - `{type: "remove", path}`: drops one row (a result that no longer exists).
+ * - a `search://batch` payload `{id, items, total, done}`: ignored unless `id` is current. The
+ *   first batch of a search replaces the rows; later ones (a walk) append.
+ */
+export function searchWindowState(prev, event) {
+  const s = prev ?? { rows: [], total: 0, done: true, id: null, pending: false, fresh: false, early: [], floor: 0 };
+  switch (event.type) {
+    case "start":
+      return { ...s, pending: true, early: [] };
+    case "started": {
+      let next = { ...s, id: event.id, floor: Math.max(s.floor ?? 0, event.id), pending: false, fresh: true, done: false, early: [] };
+      for (const b of s.early ?? []) if (b.id === event.id) next = searchWindowState(next, b);
+      return next;
+    }
+    case "failed":
+      return { ...s, rows: [], total: 0, id: null, pending: false, fresh: false, done: true, early: [] };
+    case "clear":
+      return { ...s, rows: [], total: 0, id: null, pending: false, fresh: false, done: true, early: [] };
+    case "remove": {
+      const rows = s.rows.filter((r) => r.path !== event.path);
+      return rows.length === s.rows.length ? s : { ...s, rows, total: Math.max(0, s.total - 1) };
+    }
+    default: {
+      if (s.pending) {
+        return event.id > (s.floor ?? 0) ? { ...s, early: [...(s.early ?? []), event] } : s;
+      }
+      if (s.id == null || event.id !== s.id) return s;
+      const rows = (s.fresh ? event.items : s.rows.concat(event.items)).slice(0, SEARCH_LIMIT);
+      return { ...s, rows, total: event.total, done: event.done, fresh: false };
+    }
+  }
+}
+
+/**
+ * The Find files status line: "N found" (plus "· showing first 1,000" when `total` > `shown`),
+ * then the index state: "searching folder…" while `walking`, "building index…", "volume <name>
+ * last refreshed <date>" (`stale`, see `staleVolume`), "index: N files, up to date"
+ * (`entries`) or "index not built"; nothing when the index is off (the window shows that note).
+ * `total` undefined: no search, no count.
+ */
+export function statusText({ total, shown, state, walking, entries, stale }) {
+  const parts = [];
+  if (total != null) {
+    let found = `${commas(total)} found`;
+    if (shown != null && total > shown) found += ` · showing first ${commas(shown)}`;
+    parts.push(found);
+  }
+  if (walking) parts.push("searching folder…");
+  else if (state === "building") parts.push("building index…");
+  else if (state === "ready" && stale) parts.push(`volume ${stale.name} last refreshed ${stale.date}`);
+  else if (state === "ready") parts.push(`index: ${commas(entries ?? 0)} files, up to date`);
+  else if (state === "notAsked") parts.push("index not built");
+  return parts.join(" · ");
+}
+
+const SEARCH_OFF_NOTE = "Index is off (Options → Search)";
+
+/** The first enabled, unmounted volume of a `search_status` answer as {name, date}, or null. */
+export function staleVolume(status, tz) {
+  const v = status?.volumes?.find((x) => x.enabled && !x.mounted);
+  if (!v) return null;
+  return { name: v.name, date: v.refreshed > 0 ? formatDate(v.refreshed, tz) : "never" };
+}
+
+/**
+ * Which "In" choices the window offers for the index state, and the note it shows. Everywhere
+ * needs a complete startup-disk index ("ready"); while it builds, Current folder walks.
+ */
+export function searchScopes(state) {
+  const everywhere = state === "ready";
+  return { everywhere, note: state === "off" ? SEARCH_OFF_NOTE : null };
+}
+
+/**
+ * The index button at the bottom of the Find files window for an index state: "Build index"
+ * before the index exists or while it is off, "Rebuild index" when it is ready, disabled while
+ * it is being built.
+ */
+export function indexButton(state) {
+  if (state === "ready") return { label: "Rebuild index", action: "rebuild", disabled: false };
+  if (state === "building") return { label: "Building index…", action: null, disabled: true };
+  return { label: "Build index", action: "build", disabled: false };
+}
+
+/** The folder "Current folder" searches for a panel location, or null (servers, the results list). */
+export function searchUnder(location) {
+  if (!location || isSearchLocation(location) || parseRemote(location)) return null;
+  return location;
+}
+
+/** The `search_start` request, or null for an empty query (the window clears its rows then). */
+export function searchRequest({ query, scope, location, archives }) {
+  const q = query.trim();
+  if (!q) return null;
+  return { query: q, under: scope === "folder" ? location : null, archives: Boolean(archives), limit: SEARCH_LIMIT };
+}
+
+/** Where Enter on a result goes: its folder (inside an archive: the inner parent) and the cursor name. */
+export function goTarget(item) {
+  return { folder: item.folder, name: item.path.slice(item.path.lastIndexOf("/") + 1) };
+}
+
+/**
+ * The `search_status` volume holding `path` (the longest prefix), or null. "/" holds everything
+ * but /Volumes/<x> (the startup index excludes /Volumes; such a path is another volume's).
+ */
+export function volumeOf(path, volumes) {
+  let best = null;
+  const otherVolume = /^\/Volumes\/[^/]+/.test(path);
+  for (const v of volumes ?? []) {
+    const inside = v.path === "/" ? !otherVolume : path === v.path || path.startsWith(`${v.path}/`);
+    if (inside && (!best || v.path.length > best.path.length)) best = v;
+  }
+  return best;
+}
+
+/** Name of the volume of `path` for messages: `vol.name`, else the /Volumes/<name> component. */
+export function volumeName(path, vol) {
+  if (vol?.name) return vol.name;
+  const m = /^\/Volumes\/([^/]+)/.exec(path);
+  return m ? m[1] : "/";
+}
+
+/**
+ * {host, share} of an SMB `mntfrom` ("//[DOMAIN;][user@]host[:port]/share", the share
+ * percent-encoded), lower case; null for anything else.
+ */
+export function parseMountSource(source) {
+  const m = /^\/\/(?:[^@/]*@)?([^/:]+)(?::\d+)?\/([^/]+)\/?$/.exec(source ?? "");
+  if (!m) return null;
+  let share = m[2];
+  try {
+    share = decodeURIComponent(share);
+  } catch {
+    // Keep the raw text.
+  }
+  return { host: m[1].toLowerCase(), share: share.toLowerCase() };
+}
+
+/**
+ * The saved SMB entry (its name, for `connectFlow`) that mounts the network volume `vol`, or
+ * null. When the volume's `source` (mntfrom) is known, an entry with the same host and share
+ * wins, so a share mounted under another name is still found. Otherwise macOS mounts a share
+ * at /Volumes/<share>, or /Volumes/<share>-N when that name is taken, so the mount point's
+ * last component is compared with each entry's `share`, ignoring case. The first match in the
+ * connection manager's order wins.
+ */
+export function smbServerForVolume(vol, nodes) {
+  if (!vol || vol.kind !== "network") return null;
+  const find = (pred) => {
+    let found = null;
+    const walk = (list) => {
+      for (const n of list ?? []) {
+        if (found) return;
+        if (n.kind === "folder") walk(n.children);
+        else if (n.kind === "server" && n.protocol === "smb" && pred(n)) found = n.name;
+      }
+    };
+    walk(nodes);
+    return found;
+  };
+  const src = parseMountSource(vol.source);
+  const shareOf = (n) => (n.share ?? "").trim().toLowerCase();
+  if (src) {
+    const byHost = find((n) => (n.host ?? "").trim().toLowerCase() === src.host && shareOf(n) === src.share);
+    if (byHost) return byHost;
+  }
+  const base = vol.path.slice(vol.path.lastIndexOf("/") + 1).toLowerCase();
+  for (const pass of [src?.share, base, base.replace(/-\d+$/, "")]) {
+    if (!pass) continue;
+    const found = find((n) => shareOf(n) === pass);
+    if (found) return found;
+  }
+  return null;
+}
+
+/**
+ * Whether the volume holding `path` is mounted now (`search_status` volumes). A path that no
+ * listed volume holds (an ejected /Volumes/<x>) is not mounted.
+ */
+export function volumeMounted(path, volumes) {
+  const v = volumeOf(path, volumes);
+  return Boolean(v) && v.mounted !== false;
+}
+
+/**
+ * What Enter does after listing the result's folder: "go" when it is there; otherwise "forget"
+ * only when its volume is still mounted (the file is really gone), else "mount" (the volume
+ * went away after the search; its index entries stay).
+ */
+export function missingAction({ listOk, found, volumeMounted }) {
+  if (listOk && found) return "go";
+  return volumeMounted ? "forget" : "mount";
+}
+
+/** True when a share mounted at `location` (`connectFlow`'s answer) is the volume `volPath`. */
+export function mountedAt(location, volPath) {
+  return location === volPath || location.startsWith(`${volPath}/`);
+}
+
+/** The selected row after Up/Down/PgUp/PgDn (`page` rows per page); -1 when there are no rows. */
+export function moveIndex(sel, key, count, page) {
+  if (count <= 0) return -1;
+  const step = { ArrowUp: -1, ArrowDown: 1, PageUp: -Math.max(1, page), PageDown: Math.max(1, page) }[key] ?? 0;
+  return Math.min(count - 1, Math.max(0, sel + step));
 }
 
 /** Activation/dismissal keys ignored for this long after a modal opens (stray Enter from the previous one). */
@@ -543,6 +1037,80 @@ export function hexLines(bytes, offset) {
 /** Viewer status line, e.g. `UTF-8 · 12.345 bytes (truncated)`. */
 export function formatViewStatus(encoding, bytes, truncated) {
   return `${encoding} · ${groupThousands(bytes)} bytes${truncated ? " (truncated)" : ""}`;
+}
+
+// ---------------------------------------------------------------- Find files window bridge
+
+/**
+ * The Find files window (search.html, label `findfiles`) and the main window talk over three
+ * broadcast events:
+ * - `findfiles://action` (window → main) `{id, action, args}`: the main window runs `action`
+ *   (one of FIND_FILES_ACTIONS) and answers with
+ * - `findfiles://reply` (main → window) `{id, ok, value}` or `{id, ok: false, error}`;
+ * - `findfiles://command` (main → window) `{cmd, ...}`: `focus {location}` (Alt+F7 again),
+ *   `feedAll` (Commands → Feed search results to listbox), `settings {archives}`.
+ * Actions: `context` → `{home, location, mods, archives, memory, state}`; `go {folder, cursor}`;
+ * `feed {items, query}`; `play {path}` (F3 on audio: the main window's player); `connect
+ * {server}` → the mounted location or null; `indexOn` (the index was turned on); `closed
+ * {memory, items, query}`. Commands without a main window (search_*, list_dir, open_viewer)
+ * are invoked by the window itself.
+ */
+export const FIND_FILES_ACTION = "findfiles://action";
+export const FIND_FILES_REPLY = "findfiles://reply";
+export const FIND_FILES_COMMAND = "findfiles://command";
+export const FIND_FILES_ACTIONS = ["context", "go", "feed", "play", "connect", "indexOn", "closed"];
+export const FIND_FILES_COMMANDS = ["focus", "feedAll", "settings"];
+
+const isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+const validId = (id) => typeof id === "string" && id.length > 0 && id.length <= 64;
+
+/** A `findfiles://action` payload; throws on an unknown action or a bad id. */
+export function findFilesAction(id, action, args = {}) {
+  if (!validId(id)) throw new Error(`bad request id: ${id}`);
+  if (!FIND_FILES_ACTIONS.includes(action)) throw new Error(`unknown Find files action: ${action}`);
+  return { id, action, args: isPlainObject(args) ? args : {} };
+}
+
+/** A received `findfiles://action` payload as `{id, action, args}`, or null when malformed. */
+export function parseFindFilesAction(p) {
+  if (!isPlainObject(p) || !validId(p.id) || !FIND_FILES_ACTIONS.includes(p.action)) return null;
+  return { id: p.id, action: p.action, args: isPlainObject(p.args) ? p.args : {} };
+}
+
+/** The `findfiles://reply` to request `id`: `value` on success, else the error's text. */
+export function findFilesReply(id, value, error) {
+  if (error !== undefined) return { id, ok: false, error: String(error?.message ?? error) };
+  return { id, ok: true, value: value ?? null };
+}
+
+/** A received `findfiles://reply` as `{id, ok, value, error}`, or null when malformed. */
+export function parseFindFilesReply(p) {
+  if (!isPlainObject(p) || !validId(p.id) || typeof p.ok !== "boolean") return null;
+  return p.ok ? { id: p.id, ok: true, value: p.value ?? null } : { id: p.id, ok: false, error: String(p.error ?? "failed") };
+}
+
+/** A received `findfiles://command` as `{cmd, ...}`, or null when malformed. */
+export function parseFindFilesCommand(p) {
+  if (!isPlainObject(p) || !FIND_FILES_COMMANDS.includes(p.cmd)) return null;
+  return p;
+}
+
+/** Smallest Find files window (logical pixels); `open_find_files` uses the same. */
+export const FIND_FILES_MIN = { width: 520, height: 380 };
+
+/**
+ * The kept Find files window geometry (`{x, y, width, height, maximized}` in logical pixels,
+ * from browser storage) for `open_find_files`: null without a usable size; the position only
+ * when both coordinates are numbers (Rust drops it when it is off every screen).
+ */
+export function findFilesGeometry(saved) {
+  if (!isPlainObject(saved)) return null;
+  const num = (v) => typeof v === "number" && Number.isFinite(v);
+  const { width, height } = saved;
+  if (!num(width) || !num(height) || width < FIND_FILES_MIN.width || height < FIND_FILES_MIN.height) return null;
+  const g = { width: Math.round(width), height: Math.round(height), maximized: saved.maximized === true };
+  if (num(saved.x) && num(saved.y)) Object.assign(g, { x: Math.round(saved.x), y: Math.round(saved.y) });
+  return g;
 }
 
 // ---------------------------------------------------------------- hotlist (mirrors crates/core hotlist.rs)
@@ -726,6 +1294,8 @@ export function keyRows(commands, keymap) {
 export function archiveKindOf(name) {
   const n = name.toLowerCase();
   if (n.endsWith(".tar.gz") || n.endsWith(".tgz")) return "tgz";
+  if (n.endsWith(".tar.bz2") || n.endsWith(".tbz2") || n.endsWith(".tbz")) return "tbz2";
+  if (n.endsWith(".tar.xz") || n.endsWith(".txz")) return "txz";
   if (n.endsWith(".gz")) return "gz";
   if (n.endsWith(".tar")) return "tar";
   if (n.endsWith(".zip")) return "zip";
@@ -772,12 +1342,34 @@ export function archiveLeave(location, remoteArchives) {
   return { location: up, cursor: lastComponent(remoteArchiveOf(location, remoteArchives).archive) };
 }
 
-/** What the panel shows as path: inside a server archive's copy, the server location. */
-export function displayLocation(location, remoteArchives) {
+/**
+ * What the panel shows as path: inside a server archive's copy, the server location. The
+ * results list shows "Search results: <query>"; its `{query}` is the third argument (or the
+ * second, in place of `remoteArchives`).
+ */
+export function displayLocation(location, remoteArchives, results) {
+  if (isSearchLocation(location)) {
+    const query = (results ?? remoteArchives)?.query ?? "";
+    return query ? `Search results: ${query}` : "Search results";
+  }
   const r = remoteArchiveOf(location, remoteArchives);
   if (!r) return location;
   const rest = location.slice(r.archive.length).replace(/\/+$/, "");
   return joinLocation(r.parent, lastComponent(r.archive)) + rest;
+}
+
+/**
+ * The reverse of `displayLocation` for a server archive's copy: a location shown as
+ * `<server folder>/<archive>[/inner]` becomes the local copy's path; anything else stays.
+ */
+export function realLocation(location, remoteArchives) {
+  const loc = location.length > 1 ? location.replace(/\/+$/, "") : location;
+  for (const [archive, parent] of remoteArchives) {
+    const shown = joinLocation(parent, lastComponent(archive));
+    if (loc === shown) return archive;
+    if (loc.startsWith(`${shown}/`)) return archive + loc.slice(shown.length);
+  }
+  return location;
 }
 
 /** Archive path from "password required: <path>" / "wrong password: <path>", else null. */
@@ -855,7 +1447,7 @@ export function acceptAudioEvent(player, ev) {
 
 /** Loading or playing: F3 on that file again, or Escape, stops it. */
 export function audioActive(player) {
-  return player.state === "loading" || player.state === "playing";
+  return player.state === "loading" || player.state === "playing" || player.state === "paused";
 }
 
 /** What F3 on `path` does: "stop" when that file is the one loading or playing, else "play". */
@@ -877,9 +1469,10 @@ export function playerStrip(player) {
   const { state, name, position = 0, duration = null } = player;
   if (state === "loading") return { text: `Loading ${name}…`, clock: "", codec: "", progress: null };
   if (state === "error") return { text: player.message ?? "", clock: "", codec: "", progress: null, error: true };
-  if (state !== "playing") return null;
+  if (state !== "playing" && state !== "paused") return null;
   const total = duration ?? null;
   return {
+    paused: state === "paused",
     text: name,
     clock: `${formatClock(position)} / ${total == null ? "-:--" : formatClock(total)}`,
     // A note from the player (the chosen output device is missing) takes the codec's place.
@@ -889,19 +1482,34 @@ export function playerStrip(player) {
 }
 
 /**
- * Options → Audio → Output device: `System default` (value "") first, then each device name
- * once in the system's order; a saved device that is not connected stays as
+ * Options → Audio → Output device: `System default` (value "") first, then each device in the
+ * system's order. `devices`: `audio_outputs` items ({name, id}) or plain names. A device with a
+ * unique name is saved by name; devices that share a name are saved by id and labeled
+ * `<name> (1)`, `<name> (2)`… A saved device that is not connected stays as
  * `<name> (not connected)`.
  */
 export function outputOptions(devices, saved) {
+  const list = (devices ?? []).map((d) => (typeof d === "string" ? { name: d, id: null } : d)).filter((d) => d.name);
+  const count = new Map();
+  for (const d of list) count.set(d.name, (count.get(d.name) ?? 0) + 1);
   const out = [{ value: "", label: "System default" }];
   const seen = new Set([""]);
-  for (const name of devices ?? []) {
-    if (seen.has(name)) continue;
-    seen.add(name);
-    out.push({ value: name, label: name });
+  const nth = new Map();
+  for (const d of list) {
+    const shared = count.get(d.name) > 1 && d.id;
+    const value = shared ? d.id : d.name;
+    if (seen.has(value)) continue;
+    seen.add(value);
+    const k = (nth.get(d.name) ?? 0) + 1;
+    nth.set(d.name, k);
+    out.push({ value, label: shared ? `${d.name} (${k})` : d.name });
   }
-  if (saved && !seen.has(saved)) out.push({ value: saved, label: `${saved} (not connected)` });
+  if (saved && !seen.has(saved)) {
+    // A name saved before its twin connected: the first device of that name.
+    const twin = list.find((d) => d.name === saved);
+    if (twin) out.push({ value: saved, label: `${saved} (first)` });
+    else out.push({ value: saved, label: `${saved} (not connected)` });
+  }
   return out;
 }
 
@@ -972,10 +1580,21 @@ export function samePaths(a, b) {
   return b.every((p) => s.has(p));
 }
 
+/**
+ * The paths of fxfm's own native drag `drag` ({paths, promised}, or null) when a drop that
+ * carries `dropPaths` is that drag, else null. File promises (archive and server entries)
+ * carry no paths, so a drop without paths is the promised drag's.
+ */
+export function ownDropPaths(drag, dropPaths) {
+  if (!drag) return null;
+  if (drag.promised) return dropPaths.length === 0 ? drag.paths : null;
+  return samePaths(dropPaths, drag.paths) ? drag.paths : null;
+}
+
 // ---------------------------------------------------------------- servers (mirrors crates/core servers.rs)
 
 const SSH_PROTOCOLS = new Set(["sftp", "scp"]);
-const DEFAULT_PORT = { sftp: 22, scp: 22, ftp: 21, ftps: 21 };
+const DEFAULT_PORT = { sftp: 22, scp: 22, ftp: 21, ftps: 21, smb: 445 };
 
 /** Port and login of a new server for `protocol`. */
 export function serverDefaults(protocol) {
@@ -1000,6 +1619,7 @@ export function newServerEntry(id) {
     legacyAlgorithms: false,
     ftpPassive: true,
     ftpEncoding: "utf8",
+    share: "",
   };
 }
 
@@ -1012,6 +1632,11 @@ export function validateServer(entry, allNames) {
   if (entry.name.includes("/")) return "Name cannot contain '/'";
   if (allNames.includes(entry.name)) return `Another server is already named '${entry.name}'`;
   if (!entry.host.trim()) return "Host is required";
+  if (entry.protocol === "smb") {
+    if (!entry.share?.trim()) return "Share is required";
+    if (entry.share.includes("/")) return "Share cannot contain '/'";
+    return null;
+  }
   if ((entry.auth === "key" || entry.auth === "keyPassphrase") && !entry.keyPath?.trim()) {
     return "Choose a key file";
   }
@@ -1020,6 +1645,10 @@ export function validateServer(entry, allNames) {
 
 /** The editor fields shown for `protocol`. */
 export function fieldsFor(protocol) {
+  // SMB: macOS mounts the share; the remote dir is a sub-folder inside it.
+  if (protocol === "smb") {
+    return new Set(["name", "protocol", "host", "port", "user", "share", "kerberos", "savePassword", "remoteDir", "autoConnect"]);
+  }
   const f = ["name", "protocol", "host", "port", "user", "savePassword", "remoteDir", "localDir"];
   if (SSH_PROTOCOLS.has(protocol)) f.push("auth", "keyPath", "legacyAlgorithms");
   else f.push("ftpPassive", "ftpEncoding");
@@ -1030,6 +1659,76 @@ export function fieldsFor(protocol) {
 export function portAfterProtocolChange(oldProto, newProto, port) {
   const n = Number(port);
   return n === serverDefaults(oldProto).port ? serverDefaults(newProto).port : n;
+}
+
+/**
+ * Browse… button label of a computer found on the network (`smb_browse`): its name, and the
+ * host name or (NetBIOS) address when that says more.
+ */
+export function smbHostLabel(h) {
+  const extra = h.address ?? (h.host !== h.name ? h.host : null);
+  return extra ? `${h.name} (${extra})` : h.name;
+}
+
+/** Drive-list path of a saved SMB share that is not mounted (never a real folder). */
+export function smbDrivePath(name) {
+  return `smb://${name}/`;
+}
+
+/**
+ * The drive list: `volumes` (`list_volumes`) followed by every saved SMB share (`smb_shares`,
+ * in the connection manager's order) as a network drive {name, path, kind, total, free, smb,
+ * mounted}. A mounted share takes its mount point and space, and the plain row of that mount
+ * point leaves the volume list (shown once, as the share). An unmounted share has a
+ * `smbDrivePath` and no space.
+ */
+export function mergeShares(volumes, shares) {
+  const mounted = new Set(shares.filter((s) => s.mount).map((s) => s.mount));
+  return [
+    ...volumes.filter((v) => !mounted.has(v.path)),
+    ...shares.map((s) => ({
+      name: s.name,
+      path: s.mount ?? smbDrivePath(s.name),
+      kind: "network",
+      total: s.mount ? s.total : 0,
+      free: s.mount ? s.free : 0,
+      smb: s.name,
+      mounted: !!s.mount,
+    })),
+  ];
+}
+
+/**
+ * Saved servers other than SMB shares (SFTP, SCP, FTP, FTPS) from `servers_load` nodes, in the
+ * connection manager's order, as drive-menu rows. `conns` (`list_connections`) marks the
+ * connected ones; `path` is the server root (`sftp://name/`).
+ */
+export function serverDrives(nodes, conns = []) {
+  const out = [];
+  const walk = (list) => {
+    for (const n of list ?? []) {
+      if (n.kind === "folder") walk(n.children);
+      else if (n.kind === "server" && n.protocol !== "smb") {
+        const c = conns.find((x) => x.name === n.name);
+        out.push({ name: n.name, kind: "server", server: n.name, connected: !!c, path: c?.root ?? `${n.protocol}://${n.name}/` });
+      }
+    }
+  };
+  walk(nodes);
+  return out;
+}
+
+/**
+ * Where picking the saved server `drive` (`serverDrives`) goes, like `driveTarget`: the other
+ * panel's folder when it is on that server, the root when this panel already is, else the last
+ * folder visited there (`last`: root -> location), else the root. Null when not connected yet
+ * (connecting opens the server's start folder).
+ */
+export function serverTarget(drive, { here, other, last }) {
+  if (!drive.connected) return null;
+  if (other !== here && remoteRoot(other) === drive.path) return other;
+  if (remoteRoot(here) === drive.path) return drive.path;
+  return last?.get(drive.path) ?? drive.path;
 }
 
 /** Drive-bar label of a connection from `list_connections`. */
@@ -1315,12 +2014,10 @@ export function secretChanges(before, entry, secret) {
 
 // ---------------------------------------------------------------- pack files (Alt+F5)
 
-/** Refusal for packing from or into archives and servers (backend: jobs.rs PACK_LOCAL_ONLY). */
-export const PACK_LOCAL_ONLY = "Packing works with local files for now.";
 
-/** A plain local folder: not on a server, not inside an archive (by name, like `archiveOf`). */
+/** A plain local folder: not on a server, not inside an archive (by name, like `archiveOf`), not search results. */
 export function isLocalFolder(location) {
-  return !parseRemote(location) && !archiveOf(location);
+  return !parseRemote(location) && !archiveOf(location) && !isSearchLocation(location);
 }
 
 /**
@@ -1328,18 +2025,64 @@ export function isLocalFolder(location) {
  * name (a leading dot is kept: ".config" -> ".config.zip"); several entries -> the name of
  * the folder they are in, "archive" at the root.
  */
-export function packArchiveName(entries, folderPath) {
+export function packArchiveName(entries, folderPath, ext = ".zip") {
   if (entries.length === 1) {
     const { name, isDir } = entries[0];
     const dot = name.lastIndexOf(".");
-    return `${!isDir && dot > 0 ? name.slice(0, dot) : name}.zip`;
+    // A .gz keeps the whole file name (report.pdf.gz), as gzip does.
+    if (ext === ".gz" && !isDir) return `${name}.gz`;
+    return `${!isDir && dot > 0 ? name.slice(0, dot) : name}${ext}`;
   }
-  return `${lastComponent(folderPath) || "archive"}.zip`;
+  return `${lastComponent(folderPath) || "archive"}${ext}`;
 }
 
-/** Folder the archive goes to (as in TC): the other panel's when it is a local folder. */
-export function packTargetDir(activeLocation, otherLocation) {
-  return isLocalFolder(otherLocation) ? otherLocation : activeLocation;
+/** Pack formats: [id, label, extension]. Only ZIP can be encrypted; GZ holds one file. */
+export const PACK_FORMATS = [
+  ["zip", "ZIP", ".zip"],
+  ["tar", "TAR", ".tar"],
+  ["tgz", "TAR.GZ", ".tar.gz"],
+  ["tbz2", "TAR.BZ2", ".tar.bz2"],
+  ["txz", "TAR.XZ", ".tar.xz"],
+  ["gz", "GZ (one file)", ".gz"],
+  ["7z", "7Z", ".7z"],
+];
+
+const PACK_SUFFIXES = [
+  [".tar.gz", "tgz"],
+  [".tgz", "tgz"],
+  [".tar.bz2", "tbz2"],
+  [".tbz2", "tbz2"],
+  [".tbz", "tbz2"],
+  [".tar.xz", "txz"],
+  [".txz", "txz"],
+  [".tar", "tar"],
+  [".zip", "zip"],
+  [".gz", "gz"],
+  [".7z", "7z"],
+];
+
+/** The pack format of an archive name by its suffix (case-insensitive), or null. */
+export function packFormatOf(name) {
+  const n = name.toLowerCase();
+  return PACK_SUFFIXES.find(([sfx]) => n.endsWith(sfx))?.[1] ?? null;
+}
+
+/** `target` with its archive suffix replaced by the one of `format` (appended when it has none). */
+export function withPackFormat(target, format) {
+  const ext = PACK_FORMATS.find(([id]) => id === format)?.[2] ?? ".zip";
+  const n = target.toLowerCase();
+  const sfx = PACK_SUFFIXES.find(([x]) => n.endsWith(x))?.[0];
+  return (sfx ? target.slice(0, target.length - sfx.length) : target) + ext;
+}
+
+/**
+ * Folder the archive goes to (as in TC): the other panel's folder (also inside an archive or
+ * on a server), unless it shows a results list; then the active panel's, and with results in
+ * both, the folder of the first source (`fallback`).
+ */
+export function packTargetDir(activeLocation, otherLocation, fallback = "/") {
+  if (!isSearchLocation(otherLocation)) return otherLocation;
+  return isSearchLocation(activeLocation) ? fallback : activeLocation;
 }
 
 /** The Pack files dialog's first line. */
@@ -1356,16 +2099,22 @@ export function packCursor(target) {
 }
 
 /** Why the Pack files dialog cannot be accepted yet, or null. */
-export function packFormError({ target, encrypt, password, repeat }) {
+export function packFormError({ target, encrypt, password, repeat, sources = null }) {
   if (!target.trim()) return "Enter the archive name.";
+  const format = packFormatOf(target.trim());
+  if (!format) return "The name must end in .zip, .tar, .tar.gz, .tgz, .tar.bz2, .tar.xz, .gz or .7z.";
+  if (encrypt && format !== "zip") return "Only ZIP archives can have a password.";
+  if (format === "gz" && sources && (sources.length !== 1 || sources[0].isDir)) {
+    return "A .gz file holds exactly one file; choose another format.";
+  }
   if (encrypt && !password) return "Enter a password.";
   if (encrypt && password !== repeat) return "The passwords do not match.";
   return null;
 }
 
 /** Status line after packing. */
-export function packedText(summary, target) {
-  return `Packed ${summary.done} file(s) into ${lastComponent(target)}`;
+export function packedText(summary, target, add = false) {
+  return add ? `Added ${summary.done} item(s) to ${lastComponent(target)}` : `Packed ${summary.done} file(s) into ${lastComponent(target)}`;
 }
 
 const TEXT_EDIT_CODES = new Set(["KeyA", "KeyC", "KeyV", "KeyX", "KeyZ"]);
@@ -1377,4 +2126,316 @@ const TEXT_EDIT_CODES = new Set(["KeyA", "KeyC", "KeyV", "KeyX", "KeyZ"]);
 export function textEditKey(e, map = DEFAULT_MODIFIERS) {
   const commandMapped = map.alt === "command" || map.ctrl === "command";
   return Boolean(e.metaKey) && commandMapped && TEXT_EDIT_CODES.has(e.code);
+}
+
+/**
+ * The disk a local location is on: the longest volume path containing it, ignoring the home
+ * shortcut (`kind: "home"`), so `~/Desktop` is on "Macintosh HD". Null on a server and for the search results list.
+ */
+export function diskFor(volumes, location) {
+  if (!location || parseRemote(location) || isSearchLocation(location)) return null;
+  let best = null;
+  for (const v of volumes) {
+    if (v.kind === "home") continue;
+    const p = v.path;
+    const inside = p === "/" || location === p || location.startsWith(`${p}/`);
+    if (inside && (!best || p.length > best.path.length)) best = v;
+  }
+  return best;
+}
+
+/**
+ * Where picking drive `vol` takes a panel (TC: each drive keeps a current folder):
+ * - the home shortcut always goes home;
+ * - the other panel's folder when it is on that drive (and not where this panel already is);
+ * - else the drive's root when this panel is already on it;
+ * - else the last folder visited on it (`last`: disk path -> location), else its root.
+ */
+export function driveTarget(vol, { volumes, here, other, last }) {
+  if (vol.kind === "home") return vol.path;
+  if (other !== here && diskFor(volumes, other)?.path === vol.path) return other;
+  if (diskFor(volumes, here)?.path === vol.path) return vol.path;
+  return last?.get(vol.path) ?? vol.path;
+}
+
+const SEARCH_DEFAULTS = { index: null, volumes: [], exclude: [], archives: false, gzLimitMb: 500, networkArchives: false, networkRefreshHours: 24 };
+
+/** A whole number from an input's text (at least `min`), else null. */
+function wholeNumber(text, min) {
+  const t = String(text ?? "").trim();
+  if (!/^\d+$/.test(t)) return null;
+  const n = Number.parseInt(t, 10);
+  return n >= min ? n : null;
+}
+
+/**
+ * The `search` part of the settings after one Options → Search change (the input is not modified).
+ * change: {index}, {volume: {path, enabled}}, {addExclude}, {removeExclude}, {archives}, {networkArchives},
+ * {gzLimitMb: text (integer >= 1)}, {networkRefreshHours: text (integer >= 0, 0 = by hand)}.
+ * Invalid number text keeps the previous value.
+ */
+export function searchSettingsPatch(settings, change) {
+  const s = { ...SEARCH_DEFAULTS, ...(settings?.search ?? {}) };
+  s.volumes = s.volumes.map((v) => ({ ...v }));
+  s.exclude = [...s.exclude];
+  if ("index" in change) s.index = change.index;
+  if (change.volume) {
+    const v = s.volumes.find((x) => x.path === change.volume.path);
+    if (v) v.enabled = change.volume.enabled;
+    else s.volumes.push({ path: change.volume.path, enabled: change.volume.enabled });
+  }
+  if (change.addExclude && !s.exclude.includes(change.addExclude)) s.exclude.push(change.addExclude);
+  if (change.removeExclude) s.exclude = s.exclude.filter((x) => x !== change.removeExclude);
+  if ("archives" in change) s.archives = Boolean(change.archives);
+  if ("networkArchives" in change) s.networkArchives = Boolean(change.networkArchives);
+  if ("gzLimitMb" in change) s.gzLimitMb = wholeNumber(change.gzLimitMb, 1) ?? s.gzLimitMb;
+  if ("networkRefreshHours" in change) s.networkRefreshHours = wholeNumber(change.networkRefreshHours, 0) ?? s.networkRefreshHours;
+  return s;
+}
+
+// ---------------------------------------------------------------- quick search
+
+/**
+ * Quick search (TC Alt+letters): which keys type into it. Settings `quickSearch`;
+ * "command" is the default because Command sits where TC's Alt is on a PC keyboard.
+ */
+export const QUICK_SEARCH_KEYS = [
+  ["command", "Command+letters"],
+  ["controlCommand", "Control+Command+letters"],
+  ["option", "Option+letters"],
+  ["letters", "Letters alone"],
+  ["off", "Off"],
+];
+
+/** The quick search key setting of `settings`; unknown values give "command". */
+export function quickSearchMode(settings) {
+  const v = settings?.quickSearch;
+  return QUICK_SEARCH_KEYS.some(([id]) => id === v) ? v : "command";
+}
+
+/** Command shortcuts macOS keeps (Quit, Hide) never type into the quick search. */
+const QUICK_SEARCH_RESERVED = new Set(["KeyQ", "KeyH"]);
+
+const QUICK_SEARCH_CODES = { Period: ".", Minus: "-", Space: " " };
+
+/**
+ * The character a key event types into the quick search under `mode`, or null when the
+ * event is not a quick search key. Letters and digits come from the physical key (Option
+ * changes what `key` reports); other layout characters (č, ž …) from `key`.
+ */
+export function quickSearchChar(e, mode) {
+  const held = { control: Boolean(e.ctrlKey), option: Boolean(e.altKey), command: Boolean(e.metaKey) };
+  const want = {
+    command: { control: false, option: false, command: true },
+    controlCommand: { control: true, option: false, command: true },
+    option: { control: false, option: true, command: false },
+    letters: { control: false, option: false, command: false },
+  }[mode];
+  if (!want) return null;
+  if (held.control !== want.control || held.option !== want.option || held.command !== want.command) return null;
+  if (held.command && QUICK_SEARCH_RESERVED.has(e.code)) return null;
+  let m;
+  if ((m = /^Key([A-Z])$/.exec(e.code ?? ""))) {
+    // Non-Latin layouts and Option report other characters; Latin layouts keep theirs (z/y).
+    const k = e.key ?? "";
+    return !held.option && k.length === 1 && /\p{L}/u.test(k) ? k.toLowerCase() : m[1].toLowerCase();
+  }
+  if ((m = /^Digit([0-9])$/.exec(e.code ?? ""))) return e.shiftKey ? null : m[1];
+  if (e.code === "Minus" && e.shiftKey && !held.option) return "_";
+  if (Object.hasOwn(QUICK_SEARCH_CODES, e.code) && !e.shiftKey) {
+    // Space alone stays the mark key.
+    if (e.code === "Space" && mode === "letters") return null;
+    return QUICK_SEARCH_CODES[e.code];
+  }
+  const k = e.key ?? "";
+  if (!held.option && k.length === 1 && /\p{L}/u.test(k)) return k.toLowerCase();
+  return null;
+}
+
+const qsFold = (s) => s.normalize("NFC").toLowerCase();
+
+/**
+ * Index of an entry whose name starts with `text` (case-insensitive), or -1. `dir` 0: the
+ * first from the top; 1 / -1: the next / previous after `from`, wrapping. The ".." entry
+ * never matches.
+ */
+export function quickSearchFind(entries, text, from = 0, dir = 0) {
+  const t = qsFold(text);
+  const n = entries.length;
+  const hit = (i) => !entries[i].up && qsFold(entries[i].name).startsWith(t);
+  if (!n || !t) return -1;
+  if (dir === 0) {
+    for (let i = 0; i < n; i++) if (hit(i)) return i;
+    return -1;
+  }
+  for (let s = 1; s <= n; s++) {
+    const i = (((from + dir * s) % n) + n) % n;
+    if (hit(i)) return i;
+  }
+  return -1;
+}
+
+// ---------------------------------------------------------------- multi-rename (Ctrl+M)
+
+/** Multi-rename options and their defaults. */
+export const MULTI_RENAME_DEFAULTS = Object.freeze({
+  name: "[N]",
+  ext: "[E]",
+  search: "",
+  replace: "",
+  regex: false,
+  matchCase: false,
+  /** "same", "lower", "upper", "first" (first letter), "words" (each word's first letter). */
+  case: "same",
+  start: 1,
+  step: 1,
+  digits: 1,
+  /** The counter starts again in each folder (a results list mixes folders). */
+  perFolder: false,
+});
+
+/** Placeholders of the name and extension masks, for the dialog's help line. */
+export const MULTI_RENAME_HELP =
+  "[N] name  [N2-5] chars 2–5  [N3-] from 3  [E] extension  [C] counter  [P] folder  [Y][M][D] date  [h][m][s] time  [[ = [";
+
+/** {base, ext} of a name: the last dot splits it; folders and dot-files (".bashrc") have no ext. */
+export function splitExtension(name, isDir = false) {
+  const dot = name.lastIndexOf(".");
+  if (isDir || dot <= 0 || dot === name.length - 1) return { base: name, ext: "" };
+  return { base: name.slice(0, dot), ext: name.slice(dot + 1) };
+}
+
+const pad2 = (n) => String(n).padStart(2, "0");
+
+/** Characters `from`..`to` (1-based, inclusive; `to` null = to the end) of `s`. */
+function charRange(s, from, to) {
+  const cs = Array.from(s);
+  return cs.slice(Math.max(0, from - 1), to == null ? cs.length : Math.max(0, to)).join("");
+}
+
+/**
+ * Expands a multi-rename mask. v: {base, ext, counter, parent, mtime (s)}. Unknown
+ * placeholders stay as written; "[[" is a literal "[".
+ */
+export function expandRenameMask(mask, v) {
+  const d = new Date((v.mtime ?? 0) * 1000);
+  const simple = {
+    C: v.counter ?? "",
+    P: v.parent ?? "",
+    Y: String(d.getFullYear()),
+    M: pad2(d.getMonth() + 1),
+    D: pad2(d.getDate()),
+    h: pad2(d.getHours()),
+    m: pad2(d.getMinutes()),
+    s: pad2(d.getSeconds()),
+  };
+  return mask.replace(/\[\[|\[([NE])(?:(\d+)(?:(-)(\d+)?)?)?\]|\[([CPYMDhms])\]/g, (all, ne, from, dash, to, other) => {
+    if (all === "[[") return "[";
+    if (other) return simple[other];
+    const src = ne === "N" ? v.base : v.ext;
+    if (from == null) return src;
+    const f = Number(from);
+    if (!dash) return charRange(src, f, f);
+    return charRange(src, f, to == null ? null : Number(to));
+  });
+}
+
+function applyCase(name, mode) {
+  switch (mode) {
+    case "lower": return name.toLowerCase();
+    case "upper": return name.toUpperCase();
+    case "first": return name.charAt(0).toUpperCase() + name.slice(1).toLowerCase();
+    case "words": return name.toLowerCase().replace(/(^|[\s_\-.([])(\p{L})/gu, (_, sep, c) => sep + c.toUpperCase());
+    default: return name;
+  }
+}
+
+const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** The search-and-replace step as a function, or {error} for a bad regular expression. */
+export function renameReplacer(opts) {
+  if (!opts.search) return (s) => s;
+  try {
+    const re = new RegExp(opts.regex ? opts.search : escapeRegExp(opts.search), opts.matchCase ? "g" : "gi");
+    // Plain text: "$" in the replacement is literal.
+    const rep = opts.regex ? opts.replace : opts.replace.replace(/\$/g, "$$$$");
+    return (s) => s.replace(re, rep);
+  } catch (e) {
+    return { error: `Search: ${e.message}` };
+  }
+}
+
+/**
+ * The new name of `entry` ({name, isDir, mtime}) as item `index` of the batch, in folder
+ * `parent` (its name only). `replacer` comes from renameReplacer.
+ */
+export function multiRenameName(entry, index, opts, parent, replacer = renameReplacer(opts)) {
+  // A names list (from a file) gives the whole new name; the rest of the list's rows keep theirs.
+  if (Array.isArray(opts.names)) {
+    let name = index < opts.names.length ? opts.names[index] : entry.name;
+    if (typeof replacer === "function") name = replacer(name);
+    return applyCase(name, opts.case);
+  }
+  const { base, ext } = splitExtension(entry.name, entry.isDir);
+  const n = Math.trunc(Number(opts.start) || 0) + index * Math.trunc(Number(opts.step) || 0);
+  const digits = Math.max(1, Math.min(10, Math.trunc(Number(opts.digits) || 1)));
+  const counter = n < 0 ? `-${String(-n).padStart(digits, "0")}` : String(n).padStart(digits, "0");
+  const v = { base, ext, counter, parent, mtime: entry.mtime };
+  const newBase = expandRenameMask(opts.name, v);
+  const newExt = expandRenameMask(opts.ext, v);
+  let name = newExt ? `${newBase}.${newExt}` : newBase;
+  if (typeof replacer === "function") name = replacer(name);
+  return applyCase(name, opts.case);
+}
+
+const nameKey = (s) => s.normalize("NFC").toLowerCase();
+
+/** New names from a text file: one per line (CR LF or LF), trailing empty lines dropped. */
+export function namesFromText(text) {
+  const lines = String(text).replace(/^\uFEFF/, "").split(/\r?\n/);
+  while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+  return lines;
+}
+
+/**
+ * Preview of a multi-rename: {rows: [{entry, from, to, error}], ok, error}. `ok`: something
+ * changes and no row has an error. entries: [{name, isDir, mtime, folder}] — `folder` is the
+ * path of the item's folder (a results list mixes folders). `others(folder)` gives the names
+ * in that folder (null when unknown; the backend checks again anyway).
+ */
+export function multiRenamePlan(entries, opts, others = () => null) {
+  const replacer = renameReplacer(opts);
+  if (replacer.error) {
+    return { rows: entries.map((e) => ({ entry: e, from: e.name, to: e.name, error: null })), ok: false, error: replacer.error };
+  }
+  const inFolder = new Map();
+  const rows = entries.map((e, i) => {
+    const parent = lastComponent(e.folder) ?? "";
+    const k = inFolder.get(e.folder) ?? 0;
+    inFolder.set(e.folder, k + 1);
+    const to = multiRenameName(e, opts.perFolder ? k : i, opts, parent, replacer);
+    let error = null;
+    if (!to || to === "." || to === ".." || to.includes("/") || to.includes("\0")) error = "Invalid name";
+    return { entry: e, from: e.name, to, error };
+  });
+  const seen = new Map();
+  for (const r of rows) {
+    if (r.error) continue;
+    const k = `${r.entry.folder}\0${nameKey(r.to)}`;
+    if (seen.has(k)) {
+      r.error = "Same name twice";
+      seen.get(k).error = "Same name twice";
+    } else seen.set(k, r);
+  }
+  const leaving = new Set(rows.filter((r) => r.from !== r.to).map((r) => `${r.entry.folder}\0${nameKey(r.from)}`));
+  for (const r of rows) {
+    if (r.error || r.from === r.to) continue;
+    const k = nameKey(r.to);
+    // A case-only change of the item itself is fine.
+    if (k === nameKey(r.from)) continue;
+    const names = others(r.entry.folder);
+    if (names?.some((n) => nameKey(n) === k) && !leaving.has(`${r.entry.folder}\0${k}`)) r.error = "Already exists";
+  }
+  const changed = rows.some((r) => r.from !== r.to);
+  return { rows, ok: changed && rows.every((r) => !r.error), error: null };
 }

@@ -18,6 +18,10 @@ pub fn build(kind: ArchiveKind, path: &Path, items: &[Item]) {
         ArchiveKind::Zip => make_zip(path, items),
         ArchiveKind::Tar => make_tar(path, items),
         ArchiveKind::TarGz => make_tgz(path, items),
+        k @ (ArchiveKind::TarBz2 | ArchiveKind::TarXz) => {
+            let sink = super::TarSink::new(k, File::create(path).unwrap()).unwrap();
+            tar_into(sink, items).finish().unwrap();
+        }
         ArchiveKind::SevenZ => make_7z(path, items),
         ArchiveKind::Gz => {
             let (name, data) = items[0];
@@ -139,4 +143,19 @@ pub fn make_7z(path: &Path, items: &[Item]) {
         }
     }
     w.finish().unwrap();
+}
+
+/// Archive `dir/<outer>` holding `docs/x.txt` and the archive `docs/<inner>` made of `items`
+/// (kinds by name). The nested archive's location is `<dir>/<outer>/docs/<inner>`.
+pub fn make_nested(dir: &Path, outer: &str, inner: &str, items: &[Item]) {
+    let src = tempfile::tempdir().unwrap();
+    let ip = src.path().join(inner);
+    build(ArchiveKind::from_name(inner).unwrap(), &ip, items);
+    let data = std::fs::read(&ip).unwrap();
+    let name = format!("docs/{inner}");
+    build(
+        ArchiveKind::from_name(outer).unwrap(),
+        &dir.join(outer),
+        &[("docs/x.txt", Some(b"x")), (&name, Some(&data))],
+    );
 }

@@ -24,6 +24,8 @@ pub enum ArchiveKind {
     Zip,
     Tar,
     TarGz,
+    TarBz2,
+    TarXz,
     Gz,
     SevenZ,
 }
@@ -34,6 +36,10 @@ impl ArchiveKind {
         let n = name.to_lowercase();
         if n.ends_with(".tar.gz") || n.ends_with(".tgz") {
             Some(ArchiveKind::TarGz)
+        } else if n.ends_with(".tar.bz2") || n.ends_with(".tbz2") || n.ends_with(".tbz") {
+            Some(ArchiveKind::TarBz2)
+        } else if n.ends_with(".tar.xz") || n.ends_with(".txz") {
+            Some(ArchiveKind::TarXz)
         } else if n.ends_with(".gz") {
             Some(ArchiveKind::Gz)
         } else if n.ends_with(".tar") {
@@ -48,12 +54,111 @@ impl ArchiveKind {
     }
 }
 
+impl ArchiveKind {
+    /// A tar archive, plain or compressed as a whole.
+    pub fn is_tar(self) -> bool {
+        matches!(
+            self,
+            ArchiveKind::Tar | ArchiveKind::TarGz | ArchiveKind::TarBz2 | ArchiveKind::TarXz
+        )
+    }
+
+    /// Compressed as one stream: reading anything means decompressing from the start.
+    pub fn is_stream_compressed(self) -> bool {
+        matches!(
+            self,
+            ArchiveKind::TarGz | ArchiveKind::TarBz2 | ArchiveKind::TarXz | ArchiveKind::Gz
+        )
+    }
+}
+
+/// The tar stream of a tar archive of `kind` read from `r` (decompressed as needed).
+pub(crate) fn tar_decoder<'a, R: std::io::Read + 'a>(
+    kind: ArchiveKind,
+    r: R,
+) -> Box<dyn std::io::Read + 'a> {
+    match kind {
+        ArchiveKind::TarGz => Box::new(flate2::read::GzDecoder::new(r)),
+        ArchiveKind::TarBz2 => Box::new(bzip2::read::MultiBzDecoder::new(r)),
+        ArchiveKind::TarXz => Box::new(lzma_rust2::XzReader::new(r, true)),
+        _ => Box::new(r),
+    }
+}
+
+/// A compressing writer for a tar archive of `kind`; `finish` ends the stream.
+pub(crate) enum TarSink<W: std::io::Write> {
+    Plain(W),
+    Gz(flate2::write::GzEncoder<W>),
+    Bz2(bzip2::write::BzEncoder<W>),
+    Xz(lzma_rust2::XzWriter<W>),
+}
+
+impl<W: std::io::Write> TarSink<W> {
+    pub(crate) fn new(kind: ArchiveKind, w: W) -> std::io::Result<Self> {
+        Ok(match kind {
+            ArchiveKind::TarGz => TarSink::Gz(flate2::write::GzEncoder::new(
+                w,
+                flate2::Compression::default(),
+            )),
+            ArchiveKind::TarBz2 => TarSink::Bz2(bzip2::write::BzEncoder::new(
+                w,
+                bzip2::Compression::default(),
+            )),
+            ArchiveKind::TarXz => TarSink::Xz(
+                lzma_rust2::XzWriter::new(w, lzma_rust2::XzOptions::with_preset(6))
+                    .map_err(std::io::Error::other)?,
+            ),
+            _ => TarSink::Plain(w),
+        })
+    }
+
+    pub(crate) fn finish(self) -> std::io::Result<W> {
+        match self {
+            TarSink::Plain(w) => Ok(w),
+            TarSink::Gz(e) => e.finish(),
+            TarSink::Bz2(e) => e.finish(),
+            TarSink::Xz(e) => e.finish().map_err(std::io::Error::other),
+        }
+    }
+}
+
+impl<W: std::io::Write> std::io::Write for TarSink<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            TarSink::Plain(w) => w.write(buf),
+            TarSink::Gz(e) => e.write(buf),
+            TarSink::Bz2(e) => e.write(buf),
+            TarSink::Xz(e) => e.write(buf).map_err(std::io::Error::other),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            TarSink::Plain(w) => w.flush(),
+            TarSink::Gz(e) => e.flush(),
+            TarSink::Bz2(e) => e.flush(),
+            TarSink::Xz(e) => e.flush().map_err(std::io::Error::other),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ArchiveLoc {
+    /// The archive file that is read and written.
     pub archive: PathBuf,
     pub kind: ArchiveKind,
     /// Path inside the archive without leading or trailing `/`; the root is `""`.
     pub inner: String,
+    /// The archive as the user sees it: `archive` itself, or for an archive inside another
+    /// one its path through the outer archive (`archive` is then a temp copy, see
+    /// `vfs::resolve`).
+    pub shown: PathBuf,
+}
+
+impl ArchiveLoc {
+    /// True for an archive inside another archive.
+    pub fn is_nested(&self) -> bool {
+        self.archive != self.shown
+    }
 }
 
 /// True for a regular file, or a symlink that points to one.
@@ -84,6 +189,7 @@ pub fn split_location(loc: &str) -> Option<ArchiveLoc> {
                 .collect::<Vec<_>>()
                 .join("/");
             return Some(ArchiveLoc {
+                shown: cur.clone(),
                 archive: cur,
                 kind,
                 inner,
@@ -264,7 +370,7 @@ pub struct IndexCache {
     state: Mutex<CacheState>,
 }
 
-fn stat_key(path: &Path) -> Result<(u64, i64), ArchiveError> {
+pub(crate) fn stat_key(path: &Path) -> Result<(u64, i64), ArchiveError> {
     use std::os::unix::fs::MetadataExt;
     let md = std::fs::metadata(path).map_err(|e| read::io_err(&e, path))?;
     Ok((md.len(), md.mtime() * 1_000_000_000 + md.mtime_nsec()))
@@ -393,6 +499,12 @@ mod tests {
         assert_eq!(ArchiveKind::from_name("x.7z"), Some(SevenZ));
         assert_eq!(ArchiveKind::from_name("x.rar"), None);
         assert_eq!(ArchiveKind::from_name("x.bz2"), None);
+        assert_eq!(ArchiveKind::from_name("x.tar.bz2"), Some(TarBz2));
+        assert_eq!(ArchiveKind::from_name("x.TBZ2"), Some(TarBz2));
+        assert_eq!(ArchiveKind::from_name("x.tbz"), Some(TarBz2));
+        assert_eq!(ArchiveKind::from_name("x.tar.xz"), Some(TarXz));
+        assert_eq!(ArchiveKind::from_name("x.txz"), Some(TarXz));
+        assert_eq!(ArchiveKind::from_name("x.xz"), None);
     }
 
     #[test]

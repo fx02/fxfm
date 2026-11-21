@@ -91,7 +91,7 @@ fn write_manifest(dir: &Path, list: &[PendingEdit]) -> std::io::Result<()> {
     let tmp = dir.join(format!(".{PENDING_EDITS}.tmp"));
     let mut f = std::fs::File::create(&tmp)?;
     f.write_all(&json)?;
-    f.sync_all()?;
+    fxfm_core::ops::sync_file(&f)?;
     drop(f);
     std::fs::rename(&tmp, dir.join(PENDING_EDITS))
 }
@@ -131,6 +131,9 @@ fn resolve_local(dir: &Path, local: &str) -> PathBuf {
 
 struct Entry {
     location: String,
+    /// The archive file the copy came from (None for a server file): an upload goes only
+    /// there.
+    archive: Option<PathBuf>,
     local: PathBuf,
     name: OsString,
     /// Content the archive holds (as far as fxfm knows).
@@ -253,10 +256,17 @@ impl EditWatch {
         watcher
             .watch(&dir, RecursiveMode::NonRecursive)
             .map_err(|e| e.to_string())?;
+        // The archive as it is now, so an upload never goes into another file of that path.
+        let archive = if parse_remote(&location).is_some() {
+            None
+        } else {
+            fxfm_core::archive::split_location(&location).map(|a| a.archive)
+        };
         self.inner.lock().insert(
             id,
             Entry {
                 location,
+                archive,
                 local,
                 name,
                 confirmed,
@@ -275,6 +285,16 @@ impl EditWatch {
     /// is clean and the archive entry is unchanged; otherwise a freshly extracted copy
     /// in `edit-<n>/`. Returns (id, local copy).
     pub fn open_for_edit(&self, ctx: &Ctx, location: &str) -> Result<(u64, PathBuf), String> {
+        self.open_for_edit_with(ctx, location, &mut |_, _| true)
+    }
+
+    /// `open_for_edit`, with the download's `progress(done, total)` (false stops it).
+    pub fn open_for_edit_with(
+        &self,
+        ctx: &Ctx,
+        location: &str,
+        progress: &mut dyn FnMut(u64, u64) -> bool,
+    ) -> Result<(u64, PathBuf), String> {
         let newest = self
             .inner
             .lock()
@@ -290,7 +310,7 @@ impl EditWatch {
             // Clean but stale: the archive entry changed since extraction. The old
             // copy stays registered (an editor may still have it open).
         }
-        let local = vfs::materialize(ctx, location, "edit")?;
+        let local = vfs::materialize_with(ctx, location, "edit", progress)?;
         let registered = vfs::entry_stamp(ctx, location).and_then(|stamp| {
             make_owner_writable(&local).map_err(|e| e.to_string())?;
             self.register(location.to_string(), local.clone(), stamp)
@@ -316,16 +336,17 @@ impl EditWatch {
         id: u64,
         force: bool,
     ) -> Result<(String, PathBuf), String> {
-        let (location, name, stamp) = {
+        let (location, name, stamp, archive) = {
             let g = self.inner.lock();
             let e = g.get(&id).ok_or("The edited copy is gone")?;
             (
                 e.location.clone(),
                 e.name.to_string_lossy().into_owned(),
                 e.stamp,
+                e.archive.clone(),
             )
         };
-        vfs::check_upload_target(ctx, &location)?;
+        vfs::check_upload_target(ctx, &location, archive.as_deref())?;
         if !force && vfs::entry_stamp(ctx, &location)? != stamp {
             let place = if parse_remote(&location).is_some() {
                 "on the server"

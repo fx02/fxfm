@@ -1,13 +1,22 @@
 // F3 viewer window: text / image / PDF / hex.
-import { formatViewStatus, hexLines, groupThousands, modifierMap, tcModifiers } from "./lib.mjs";
+import { formatViewStatus, hexLines, groupThousands, modifierMap, setFnHeld, tcModifiers } from "./lib.mjs";
 
 const T = window.__TAURI__;
 const invoke = T.core.invoke;
 const win = T.window.getCurrentWindow();
 const query = new URLSearchParams(location.search);
 const path = query.get("path") ?? "";
-/** Which Mac keys act as TC's Alt and Ctrl, as of opening (`open_viewer` passes them). */
-const mods = modifierMap({ modifiers: { alt: query.get("alt"), ctrl: query.get("ctrl") } });
+/** Which Mac keys act as TC's Alt and Ctrl: as of opening (`open_viewer` passes them), then
+ * whatever Configuration → Keyboard sets (`keys://modifiers` from the main window). */
+let mods = modifierMap({ modifiers: { alt: query.get("alt"), ctrl: query.get("ctrl") } });
+T.event
+  .listen("keys://modifiers", (ev) => {
+    mods = modifierMap({ modifiers: ev.payload });
+  })
+  .catch((e) => console.error("fxfm: keys://modifiers", e));
+T.event
+  .listen("keys://fn", (ev) => setFnHeld(ev.payload?.down))
+  .catch((e) => console.error("fxfm: keys://fn", e));
 
 const bodyEl = document.getElementById("vbody");
 const statusEl = document.getElementById("vstatus");

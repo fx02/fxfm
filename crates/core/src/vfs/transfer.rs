@@ -12,10 +12,13 @@
 //! forked connection (`RemoteFs::fork`), and a lost connection ends the job and drops the
 //! session.
 //!
-//! Conflicts with items in an archive are resolved per top-level item: an existing folder
-//! is one question, and "Overwrite" merges into it (files with the same name are replaced,
-//! with "Overwrite all older" only older ones). This is simpler than the per-file questions
-//! of a local copy. Conflicts on a local destination follow `ops` exactly.
+//! Conflicts with items in an archive follow the rules of a local copy: a folder merges into
+//! an existing folder without a question, and every existing file is asked about (the "all"
+//! answers hold for the whole operation). Conflicts on a local destination follow `ops`
+//! exactly.
+//!
+//! An archive inside an archive is read and written through its temp copy (see
+//! `vfs::resolve`); paths shown to the user always go through the outer archive.
 
 use std::fs;
 use std::os::unix::fs::MetadataExt;
@@ -26,7 +29,7 @@ use std::sync::{Arc, Mutex};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::archive::read::extract;
-use crate::archive::write::{rewrite, Edit};
+use crate::archive::write::Edit;
 use crate::archive::{split_location, ArchiveIndex, ArchiveKind, ArchiveLoc, IndexEntry};
 use crate::ops::{
     self, ConflictAnswer, ConflictInfo, ErrorAnswer, OpError, OpObserver, OpSummary, Progress,
@@ -37,7 +40,8 @@ use crate::remote::transfer::{walk_size, Answers, Decision, Downloader, Outcome,
 use crate::remote::{join_path, parent_path, parse_remote, RemoteError, RemoteFs, RemoteLoc};
 
 use super::{
-    archive_op_error, inner_loc, join_inner, parent_inner, session_for, size_in, Ctx, NullObserver,
+    archive_op_error, join_inner, parent_inner, resolve, resolve_item, rewrite_in, session_for,
+    size_in, Ctx, NullObserver, Unresolved,
 };
 
 pub fn copy(
@@ -80,7 +84,8 @@ fn transfer(
     if remote_src.is_some() || parse_remote(&dest).is_some() {
         return server_transfer(ctx, remote_src, sources, &dest, obs, moving);
     }
-    match (archive_sources(sources)?, split_location(&dest)) {
+    let to = resolve(ctx, &dest, true).map_err(Unresolved::op_error)?;
+    match (archive_sources(ctx, sources)?, to) {
         (None, None) => {
             let paths: Vec<PathBuf> = sources.iter().map(PathBuf::from).collect();
             let d = ops::resolve_dest(&paths, &dest, Path::new("/"));
@@ -108,6 +113,8 @@ fn transfer(
 struct Sources {
     archive: PathBuf,
     kind: ArchiveKind,
+    /// The archive as the user sees it (see `ArchiveLoc::shown`).
+    shown_archive: PathBuf,
     items: Vec<String>,
 }
 
@@ -120,13 +127,24 @@ impl Sources {
             archive: self.archive.clone(),
             kind: self.kind,
             inner: String::new(),
+            shown: self.shown_archive.clone(),
         }
     }
 }
 
+/// The real file that holds `shown` (an archive, or an archive nested in it): what a write
+/// must never replace.
+fn outermost(shown: &Path) -> PathBuf {
+    split_location(&shown.to_string_lossy()).map_or_else(|| shown.to_path_buf(), |a| a.archive)
+}
+
 /// `None` when all sources are local items (the archive file itself is a local item).
-fn archive_sources(sources: &[String]) -> Result<Option<Sources>, OpError> {
-    let locs: Vec<Option<ArchiveLoc>> = sources.iter().map(|s| inner_loc(s)).collect();
+fn archive_sources(ctx: &Ctx, sources: &[String]) -> Result<Option<Sources>, OpError> {
+    let locs: Vec<Option<ArchiveLoc>> = sources
+        .iter()
+        .map(|s| resolve_item(ctx, s))
+        .collect::<Result<_, _>>()
+        .map_err(Unresolved::op_error)?;
     if locs.iter().all(Option::is_none) {
         return Ok(None);
     }
@@ -143,6 +161,7 @@ fn archive_sources(sources: &[String]) -> Result<Option<Sources>, OpError> {
     Ok(Some(Sources {
         archive: first.archive,
         kind: first.kind,
+        shown_archive: first.shown,
         items,
     }))
 }
@@ -151,6 +170,8 @@ fn archive_sources(sources: &[String]) -> Result<Option<Sources>, OpError> {
 struct ArchiveDest {
     archive: PathBuf,
     kind: ArchiveKind,
+    /// The archive as the user sees it (see `ArchiveLoc::shown`).
+    shown_archive: PathBuf,
     dir: String,
     as_file: Option<String>,
 }
@@ -163,7 +184,7 @@ impl ArchiveDest {
         }
     }
     fn shown(&self, inner: &str) -> String {
-        format!("{}/{inner}", self.archive.to_string_lossy())
+        format!("{}/{inner}", self.shown_archive.to_string_lossy())
     }
 }
 
@@ -215,7 +236,7 @@ fn archive_dest(
     let index = ctx
         .cache
         .get(&a.archive, a.kind)
-        .map_err(|e| archive_op_error(e, &a.archive))?;
+        .map_err(|e| archive_op_error(e, &a.shown))?;
     let into_dir = count > 1
         || dest.ends_with('/')
         || inner.is_empty()
@@ -229,6 +250,7 @@ fn archive_dest(
         ArchiveDest {
             archive: a.archive,
             kind: a.kind,
+            shown_archive: a.shown,
             dir,
             as_file,
         },
@@ -378,7 +400,7 @@ fn archive_totals(ctx: &Ctx, src: &Sources) -> Result<(u64, u64), OpError> {
     let index = ctx
         .cache
         .get(&src.archive, src.kind)
-        .map_err(|e| archive_op_error(e, &src.archive))?;
+        .map_err(|e| archive_op_error(e, &src.shown_archive))?;
     let (mut bytes, mut files) = (0, 0);
     for inner in &src.items {
         let (b, f) = size_in(&index, inner)
@@ -399,7 +421,7 @@ fn extract_sources(
 ) -> Result<(Vec<PathBuf>, bool), OpError> {
     let (bytes, files) = archive_totals(ctx, src)?;
     let pobs = PhaseObs::new(obs, "extracting", Some((bytes, files)));
-    let pw = ctx.password(&src.archive);
+    let pw = ctx.password(&src.shown_archive);
     extract(
         &src.archive,
         src.kind,
@@ -408,7 +430,7 @@ fn extract_sources(
         pw.as_deref(),
         &pobs,
     )
-    .map_err(|e| archive_op_error(e, &src.archive))?;
+    .map_err(|e| archive_op_error(e, &src.shown_archive))?;
     let staged = src.items.iter().map(|i| stage.join(base_name(i))).collect();
     Ok((staged, pobs.had_errors()))
 }
@@ -454,8 +476,8 @@ fn delete_from_archive(
         .map(|inner| Edit::Delete { inner })
         .collect();
     let pobs = PhaseObs::new(obs, "packing", None);
-    rewrite(&src.archive, src.kind, &edits, &ctx.cache, &pobs)
-        .map_err(|e| archive_op_error(e, &src.archive))
+    rewrite_in(ctx, &src.archive, src.kind, &edits, &pobs)
+        .map_err(|e| archive_op_error(e, &src.shown_archive))
 }
 
 /// Last step of a move out of an archive: deletes the `transferred` items from the source
@@ -478,7 +500,7 @@ fn finish_move(
     let index = ctx
         .cache
         .get(&src.archive, src.kind)
-        .map_err(|e| archive_op_error(e, &src.archive))?;
+        .map_err(|e| archive_op_error(e, &src.shown_archive))?;
     let left: u64 = transferred
         .iter()
         .map(|i| size_in(&index, i).map_or(1, |(_, n)| n.max(1)))
@@ -500,7 +522,7 @@ fn archive_to_local(
     let originals: Vec<PathBuf> = src.items.iter().map(PathBuf::from).collect();
     let target = ops::resolve_dest(&originals, dest, Path::new("/"));
     // Writing onto the archive being read (or a folder holding it) could replace it.
-    let archive = ops::location(&src.archive);
+    let archive = ops::location(&outermost(&src.shown_archive));
     for inner in &src.items {
         let t = match &target {
             ops::Dest::IntoDir(d) => d.join(base_name(inner)),
@@ -854,7 +876,7 @@ fn server_transfer(
 ) -> Result<OpSummary, OpError> {
     match (src, parse_remote(dest)) {
         (Some(src), Some(r)) => server_to_server(ctx, &src, &r, dest, obs, moving),
-        (Some(src), None) => match split_location(dest) {
+        (Some(src), None) => match resolve(ctx, dest, true).map_err(Unresolved::op_error)? {
             Some(a) => server_to_archive(ctx, &src, a, dest, obs, moving),
             None => server_to_local(ctx, &src, dest, obs, moving),
         },
@@ -872,7 +894,7 @@ fn to_server(
     obs: &dyn OpObserver,
     moving: bool,
 ) -> Result<OpSummary, OpError> {
-    let src = archive_sources(sources)?;
+    let src = archive_sources(ctx, sources)?;
     let srv = Server::open(ctx, r)?;
     let to = remote_dest(&srv, r, raw, sources.len())?;
     prepare_remote_dest(&srv, &to)?;
@@ -1283,18 +1305,12 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    /// A folder is merged, so with "Overwrite all older" it is always entered and its files
-    /// are compared one by one.
-    fn conflict(&mut self, info: &ConflictInfo, is_dir: bool) -> Result<Decision, Cancel> {
-        let older = is_dir || info.target_mtime < info.source_mtime;
+    /// One existing file (or link); folders are merged without a question.
+    fn conflict(&mut self, info: &ConflictInfo) -> Result<Decision, Cancel> {
+        let older = info.target_mtime < info.source_mtime;
         self.conflicts
             .decide(self.obs, older, || info.clone())
             .ok_or(Cancel)
-    }
-
-    /// Whether a file inside a merged folder replaces the one in the archive.
-    fn replace_file(&self, src_mtime: i64, target_mtime: i64) -> bool {
-        !self.conflicts.overwrite_older() || target_mtime < src_mtime
     }
 
     /// Reports an item error; the item is skipped unless the user cancels. Retry is a skip
@@ -1355,17 +1371,23 @@ impl Packer<'_> {
         self.skipped += local_size(src).1.max(1);
     }
 
-    /// Ok(true) if the whole item goes into the archive.
-    fn item(&mut self, it: &PackItem, mut target: String) -> Result<bool, Cancel> {
-        let md = match fs::symlink_metadata(&it.src) {
+    /// Puts the local item `src` (shown to the user as `shown`) at `target`. Ok(true) if the
+    /// whole item goes into the archive.
+    fn item(&mut self, src: &Path, shown: &str, mut target: String) -> Result<bool, Cancel> {
+        let md = match fs::symlink_metadata(src) {
             Ok(m) => m,
             Err(e) => {
-                self.res.error(&it.shown, &e.to_string())?;
+                self.res.error(shown, &e.to_string())?;
                 self.skipped += 1;
                 return Ok(false);
             }
         };
         loop {
+            let existing = self.index.find(&target);
+            // A folder merges into an existing folder; its files are asked about one by one.
+            if md.is_dir() && existing.is_some_and(|e| e.is_dir) {
+                return self.merge(src, shown, &target);
+            }
             if self
                 .planned
                 .iter()
@@ -1373,36 +1395,35 @@ impl Packer<'_> {
             {
                 let msg = format!("'{}' is already written by this operation", target);
                 self.res.error(&self.dest.shown(&target), &msg)?;
-                self.skip(&it.src);
+                self.skip(src);
                 return Ok(false);
             }
-            let Some(e) = self.index.find(&target) else {
-                self.add(&it.src, target);
+            let Some(e) = existing else {
+                self.add(src, target);
                 return Ok(true);
             };
-            let shown = self.dest.shown(&target);
+            let shown_target = self.dest.shown(&target);
             if e.is_dir != md.is_dir() {
-                self.res
-                    .error(&shown, &ops::type_clash(Path::new(&shown), md.is_dir()))?;
-                self.skip(&it.src);
+                let msg = ops::type_clash(Path::new(&shown_target), md.is_dir());
+                self.res.error(&shown_target, &msg)?;
+                self.skip(src);
                 return Ok(false);
             }
             let info = ConflictInfo {
-                source: it.shown.clone(),
-                target: shown,
+                source: shown.to_string(),
+                target: shown_target,
                 source_size: if md.is_file() { md.len() } else { 0 },
                 source_mtime: md.mtime(),
                 target_size: e.size,
                 target_mtime: e.mtime,
             };
-            match self.res.conflict(&info, md.is_dir())? {
-                Decision::Overwrite if md.is_dir() => return self.merge(&it.src, &target),
+            match self.res.conflict(&info)? {
                 Decision::Overwrite => {
-                    self.add(&it.src, target);
+                    self.add(src, target);
                     return Ok(true);
                 }
                 Decision::Skip => {
-                    self.skip(&it.src);
+                    self.skip(src);
                     return Ok(false);
                 }
                 Decision::Rename(n) => {
@@ -1415,7 +1436,7 @@ impl Packer<'_> {
     }
 
     /// Adds the content of local folder `dir` into the existing archive folder `inner`.
-    fn merge(&mut self, dir: &Path, inner: &str) -> Result<bool, Cancel> {
+    fn merge(&mut self, dir: &Path, shown: &str, inner: &str) -> Result<bool, Cancel> {
         let names = match fs::read_dir(dir).and_then(|rd| {
             rd.map(|e| e.map(|e| e.file_name()))
                 .collect::<std::io::Result<Vec<_>>>()
@@ -1425,7 +1446,7 @@ impl Packer<'_> {
                 n
             }
             Err(e) => {
-                self.res.error(&dir.to_string_lossy(), &e.to_string())?;
+                self.res.error(shown, &e.to_string())?;
                 self.skip(dir);
                 return Ok(false);
             }
@@ -1433,33 +1454,14 @@ impl Packer<'_> {
         let mut complete = true;
         for name in names {
             let child = dir.join(&name);
-            let shown_src = child.to_string_lossy().into_owned();
-            let (Some(s), Ok(md)) = (name.to_str(), fs::symlink_metadata(&child)) else {
-                self.res.error(&shown_src, "cannot read this item")?;
+            let child_shown = format!("{shown}/{}", name.to_string_lossy());
+            let Some(s) = name.to_str() else {
+                self.res.error(&child_shown, "cannot read this item")?;
                 self.skip(&child);
                 complete = false;
                 continue;
             };
-            let t = join_rel(inner, &nfc(s));
-            match self.index.find(&t) {
-                None => self.add(&child, t),
-                Some(e) if e.is_dir != md.is_dir() => {
-                    let shown = self.dest.shown(&t);
-                    self.res
-                        .error(&shown, &ops::type_clash(Path::new(&shown), md.is_dir()))?;
-                    self.skip(&child);
-                    complete = false;
-                }
-                Some(_) if md.is_dir() => complete &= self.merge(&child, &t)?,
-                Some(e) => {
-                    if self.res.replace_file(md.mtime(), e.mtime) {
-                        self.add(&child, t);
-                    } else {
-                        self.skip(&child);
-                        complete = false;
-                    }
-                }
-            }
+            complete &= self.item(&child, &child_shown, join_rel(inner, &nfc(s)))?;
         }
         Ok(complete)
     }
@@ -1495,7 +1497,7 @@ fn pack(
         let r = if obs.is_cancelled() {
             Err(Cancel)
         } else {
-            p.item(it, target)
+            p.item(&it.src, &it.shown, target)
         };
         match r {
             Ok(c) => complete.push(c),
@@ -1511,8 +1513,8 @@ fn pack(
     }
     if !p.edits.is_empty() {
         let pobs = PhaseObs::new(obs, "packing", Some((p.bytes, p.done)));
-        rewrite(&dest.archive, dest.kind, &p.edits, &ctx.cache, &pobs)
-            .map_err(|e| archive_op_error(e, &dest.archive))?;
+        rewrite_in(ctx, &dest.archive, dest.kind, &p.edits, &pobs)
+            .map_err(|e| archive_op_error(e, &dest.shown_archive))?;
     }
     let summary = OpSummary {
         done: p.done,
@@ -1530,7 +1532,7 @@ fn local_to_archive(
     obs: &dyn OpObserver,
     moving: bool,
 ) -> Result<OpSummary, OpError> {
-    let archive = ops::location(&dest.archive);
+    let archive = ops::location(&outermost(&dest.shown_archive));
     for s in sources {
         if archive.starts_with(ops::location(Path::new(s))) {
             return Err(OpError::IntoItself(s.clone()));
@@ -1595,6 +1597,15 @@ fn archive_to_archive(
         if moving {
             return move_in_archive(ctx, src, dest, index, obs);
         }
+    } else {
+        // Into an archive nested in a source item (`outer.zip/inner.zip` into itself).
+        let into = dest.shown(&dest.dir);
+        let into = into.trim_end_matches('/');
+        for inner in &src.items {
+            if under(into, &src.shown(inner)) {
+                return Err(OpError::IntoItself(src.shown(inner)));
+            }
+        }
     }
     let stage = Stage::new(ctx)?;
     let (staged, errors) = extract_sources(ctx, src, &stage.dir, obs)?;
@@ -1629,6 +1640,7 @@ fn archive_to_archive(
 struct Mover<'a> {
     res: Resolver<'a>,
     index: &'a ArchiveIndex,
+    /// The archive as the user sees it.
     archive: &'a Path,
     edits: Vec<Edit>,
     planned: Vec<String>,
@@ -1672,13 +1684,25 @@ impl Mover<'_> {
         }
     }
 
-    fn item(&mut self, from: &str, mut target: String) -> Result<(), Cancel> {
+    /// Moves `from` to `target`. Ok(true) when all of it moves (nothing is left behind).
+    fn item(&mut self, from: &str, mut target: String) -> Result<bool, Cancel> {
         let Some(s) = self.index.find(from) else {
             self.res.error(&self.shown(from), "not found in archive")?;
             self.skipped += 1;
-            return Ok(());
+            return Ok(false);
         };
         loop {
+            let existing = self.index.find(&target);
+            // A folder merges into an existing folder; its files are asked about one by one.
+            if s.is_dir && existing.is_some_and(|t| t.is_dir) {
+                if !self.merge(from, &target)? {
+                    return Ok(false);
+                }
+                self.edits.push(Edit::Delete {
+                    inner: from.to_string(),
+                });
+                return Ok(true);
+            }
             if self
                 .planned
                 .iter()
@@ -1687,39 +1711,30 @@ impl Mover<'_> {
                 let msg = format!("'{target}' is already written by this operation");
                 self.res.error(&self.shown(&target), &msg)?;
                 self.skip(from);
-                return Ok(());
+                return Ok(false);
             }
-            let Some(t) = self.index.find(&target) else {
+            let Some(t) = existing else {
                 self.rename(from, target);
-                return Ok(());
+                return Ok(true);
             };
             if t.is_dir != s.is_dir {
                 let shown = self.shown(&target);
                 self.res
                     .error(&shown, &ops::type_clash(Path::new(&shown), s.is_dir))?;
                 self.skip(from);
-                return Ok(());
+                return Ok(false);
             }
-            match self.res.conflict(&self.info(s, t), s.is_dir)? {
-                Decision::Overwrite if s.is_dir => {
-                    self.planned.push(target.clone());
-                    if self.merge(from, &target)? {
-                        self.edits.push(Edit::Delete {
-                            inner: from.to_string(),
-                        });
-                    }
-                    return Ok(());
-                }
+            match self.res.conflict(&self.info(s, t))? {
                 Decision::Overwrite => {
                     self.edits.push(Edit::Delete {
                         inner: target.clone(),
                     });
                     self.rename(from, target);
-                    return Ok(());
+                    return Ok(true);
                 }
                 Decision::Skip => {
                     self.skip(from);
-                    return Ok(());
+                    return Ok(false);
                 }
                 Decision::Rename(n) => {
                     if let Some(t) = renamed_target(&target, &n) {
@@ -1734,43 +1749,16 @@ impl Mover<'_> {
     /// nothing is left behind, so `from` itself can go.
     fn merge(&mut self, from: &str, to: &str) -> Result<bool, Cancel> {
         let prefix = format!("{from}/");
-        let children: Vec<&IndexEntry> = self
+        let children: Vec<String> = self
             .index
             .entries
             .iter()
             .filter(|e| e.path.starts_with(&prefix) && !e.path[prefix.len()..].contains('/'))
+            .map(|e| e.path.clone())
             .collect();
         let mut complete = true;
         for c in children {
-            let t = join_rel(to, base_name(&c.path));
-            match self.index.find(&t) {
-                None => self.rename(&c.path, t),
-                Some(te) if te.is_dir != c.is_dir => {
-                    let shown = self.shown(&t);
-                    self.res
-                        .error(&shown, &ops::type_clash(Path::new(&shown), c.is_dir))?;
-                    self.skip(&c.path);
-                    complete = false;
-                }
-                Some(_) if c.is_dir => {
-                    if self.merge(&c.path, &t)? {
-                        self.edits.push(Edit::Delete {
-                            inner: c.path.clone(),
-                        });
-                    } else {
-                        complete = false;
-                    }
-                }
-                Some(te) => {
-                    if self.res.replace_file(c.mtime, te.mtime) {
-                        self.edits.push(Edit::Delete { inner: t.clone() });
-                        self.rename(&c.path, t);
-                    } else {
-                        self.skip(&c.path);
-                        complete = false;
-                    }
-                }
-            }
+            complete &= self.item(&c, join_rel(to, base_name(&c)))?;
         }
         Ok(complete)
     }
@@ -1787,7 +1775,7 @@ fn move_in_archive(
     let mut m = Mover {
         res: Resolver::new(obs),
         index,
-        archive: &src.archive,
+        archive: &src.shown_archive,
         edits: Vec::new(),
         planned: Vec::new(),
         done: 0,
@@ -1810,8 +1798,8 @@ fn move_in_archive(
     }
     if !m.edits.is_empty() {
         let pobs = PhaseObs::new(obs, "packing", Some((m.bytes, m.done)));
-        rewrite(&src.archive, src.kind, &m.edits, &ctx.cache, &pobs)
-            .map_err(|e| archive_op_error(e, &src.archive))?;
+        rewrite_in(ctx, &src.archive, src.kind, &m.edits, &pobs)
+            .map_err(|e| archive_op_error(e, &src.shown_archive))?;
     }
     Ok(OpSummary {
         done: m.done,
@@ -2102,7 +2090,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.done, 2);
-        assert_eq!(obs.conflicts().len(), 1, "one question for the folder");
+        let asked: Vec<String> = obs.conflicts().into_iter().map(|c| c.target).collect();
+        assert_eq!(
+            asked,
+            [format!("{tp}/a.zip/d/b.txt")],
+            "the folder merges, its file is asked"
+        );
         let p = paths(&c, &a, ArchiveKind::Zip);
         assert!(
             p.contains(&"d/e/c.txt".into()),
@@ -2501,8 +2494,7 @@ mod tests {
         let b = t.path().join("b.tar");
         make_tar(&b, &[("a.txt", Some(b"old")), ("d/e", Some(b"file"))]);
         let c = ctx(t.path());
-        let obs =
-            RecordingObserver::answering(vec![ConflictAnswer::Skip, ConflictAnswer::Overwrite]);
+        let obs = RecordingObserver::answering(vec![ConflictAnswer::Skip]);
         let srcs: Vec<String> = ["a.txt", "d", "k.txt"]
             .iter()
             .map(|n| format!("{tp}/a.zip/{n}"))
@@ -3349,5 +3341,229 @@ mod tests {
         )
         .unwrap();
         assert_one_bar(&obs);
+    }
+
+    fn kind_name(kind: ArchiveKind) -> &'static str {
+        match kind {
+            ArchiveKind::Zip => "m.zip",
+            ArchiveKind::Tar => "m.tar",
+            ArchiveKind::SevenZ => "m.7z",
+            k => panic!("no test name for {k:?}"),
+        }
+    }
+
+    /// An archive with d/a.txt, d/b.txt and d/e/c.txt, and the local folder `src/d` with
+    /// a.txt, b.txt, e/c.txt and n.txt to copy into it.
+    fn merge_setup(t: &Path, kind: ArchiveKind) -> PathBuf {
+        let a = t.join(kind_name(kind));
+        build(
+            kind,
+            &a,
+            &[
+                ("d/a.txt", Some(b"old-a")),
+                ("d/b.txt", Some(b"old-b")),
+                ("d/e/c.txt", Some(b"old-c")),
+            ],
+        );
+        let d = t.join("src/d");
+        fs::create_dir_all(d.join("e")).unwrap();
+        for (n, data) in [
+            ("a.txt", "A"),
+            ("b.txt", "B"),
+            ("e/c.txt", "C"),
+            ("n.txt", "N"),
+        ] {
+            fs::write(d.join(n), data).unwrap();
+        }
+        a
+    }
+
+    #[test]
+    fn copy_folder_into_archive_asks_per_file() {
+        for kind in [ArchiveKind::Zip, ArchiveKind::Tar, ArchiveKind::SevenZ] {
+            let t = tempfile::tempdir().unwrap();
+            let tp = s(t.path());
+            let a = merge_setup(t.path(), kind);
+            let c = ctx(t.path());
+            let obs = RecordingObserver::answering(vec![
+                ConflictAnswer::Overwrite,
+                ConflictAnswer::Skip,
+                ConflictAnswer::Rename {
+                    new_name: "c2.txt".into(),
+                },
+            ]);
+            let r = copy(&c, &[format!("{tp}/src/d")], &s(&a), &tp, &obs).unwrap();
+            assert_eq!((r.done, r.skipped), (3, 1), "{kind:?}");
+            let asked: Vec<(String, String)> = obs
+                .conflicts()
+                .into_iter()
+                .map(|c| (c.source, c.target))
+                .collect();
+            let sa = s(&a);
+            let want: Vec<(String, String)> = ["a.txt", "b.txt", "e/c.txt"]
+                .iter()
+                .map(|n| (format!("{tp}/src/d/{n}"), format!("{sa}/d/{n}")))
+                .collect();
+            assert_eq!(asked, want, "{kind:?}");
+            for (inner, data) in [
+                ("d/a.txt", "A"),
+                ("d/b.txt", "old-b"),
+                ("d/e/c.txt", "old-c"),
+                ("d/e/c2.txt", "C"),
+                ("d/n.txt", "N"),
+            ] {
+                assert_eq!(
+                    read_entry(&a, kind, inner),
+                    data.as_bytes(),
+                    "{kind:?} {inner}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn archive_merge_answers_for_all() {
+        for kind in [ArchiveKind::Zip, ArchiveKind::Tar, ArchiveKind::SevenZ] {
+            for (answer, a, b) in [
+                (ConflictAnswer::OverwriteAll, "A", "B"),
+                (ConflictAnswer::SkipAll, "old-a", "old-b"),
+            ] {
+                let t = tempfile::tempdir().unwrap();
+                let tp = s(t.path());
+                let arch = merge_setup(t.path(), kind);
+                let c = ctx(t.path());
+                let obs = RecordingObserver::answering(vec![answer.clone()]);
+                copy(&c, &[format!("{tp}/src/d")], &s(&arch), &tp, &obs).unwrap();
+                assert_eq!(obs.conflicts().len(), 1, "{kind:?} {answer:?}");
+                assert_eq!(read_entry(&arch, kind, "d/a.txt"), a.as_bytes());
+                assert_eq!(read_entry(&arch, kind, "d/b.txt"), b.as_bytes());
+                assert_eq!(read_entry(&arch, kind, "d/n.txt"), b"N");
+            }
+        }
+        // Overwrite all older: by age, file by file (tar entries are from TEST_MTIME).
+        let t = tempfile::tempdir().unwrap();
+        let tp = s(t.path());
+        let arch = merge_setup(t.path(), ArchiveKind::Tar);
+        let old = filetime::FileTime::from_unix_time(TEST_MTIME as i64 - 1000, 0);
+        filetime::set_file_mtime(t.path().join("src/d/b.txt"), old).unwrap();
+        let c = ctx(t.path());
+        let obs = RecordingObserver::answering(vec![ConflictAnswer::OverwriteAllOlder]);
+        let r = copy(&c, &[format!("{tp}/src/d")], &s(&arch), &tp, &obs).unwrap();
+        assert_eq!((r.done, r.skipped), (3, 1));
+        assert_eq!(obs.conflicts().len(), 1);
+        assert_eq!(read_entry(&arch, ArchiveKind::Tar, "d/a.txt"), b"A");
+        assert_eq!(read_entry(&arch, ArchiveKind::Tar, "d/b.txt"), b"old-b");
+        assert_eq!(read_entry(&arch, ArchiveKind::Tar, "d/e/c.txt"), b"C");
+    }
+
+    #[test]
+    fn move_within_archive_asks_per_file_and_keeps_skipped() {
+        for kind in [ArchiveKind::Zip, ArchiveKind::Tar, ArchiveKind::SevenZ] {
+            let t = tempfile::tempdir().unwrap();
+            let tp = s(t.path());
+            let a = t.path().join(kind_name(kind));
+            build(
+                kind,
+                &a,
+                &[
+                    ("d/x/1.txt", Some(b"new1")),
+                    ("d/x/2.txt", Some(b"new2")),
+                    ("d/x/3.txt", Some(b"three")),
+                    ("e/x/1.txt", Some(b"old1")),
+                    ("e/x/2.txt", Some(b"old2")),
+                ],
+            );
+            let c = ctx(t.path());
+            let obs = RecordingObserver::answering(vec![
+                ConflictAnswer::Overwrite,
+                ConflictAnswer::SkipAll,
+            ]);
+            let sa = s(&a);
+            let r = move_(&c, &[format!("{sa}/d/x")], &format!("{sa}/e"), &tp, &obs).unwrap();
+            assert_eq!((r.done, r.skipped), (2, 1), "{kind:?}");
+            let asked: Vec<String> = obs.conflicts().into_iter().map(|c| c.target).collect();
+            assert_eq!(
+                asked,
+                [format!("{sa}/e/x/1.txt"), format!("{sa}/e/x/2.txt")]
+            );
+            assert_eq!(read_entry(&a, kind, "e/x/1.txt"), b"new1");
+            assert_eq!(read_entry(&a, kind, "e/x/2.txt"), b"old2");
+            assert_eq!(read_entry(&a, kind, "e/x/3.txt"), b"three");
+            // The skipped file stays where it was, so its folder does too.
+            let p = paths(&c, &a, kind);
+            assert!(p.contains(&"d/x/2.txt".to_string()), "{kind:?} {p:?}");
+            assert!(!p.contains(&"d/x/1.txt".to_string()), "{kind:?} {p:?}");
+        }
+    }
+
+    /// Names in `loc`, sorted, read with a context of its own (so from disk).
+    fn fresh_names(t: &Path, loc: &str) -> Vec<String> {
+        let c = Ctx::new(t.join("tmp-fresh"));
+        let mut v: Vec<String> = super::super::list(&c, loc)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn copy_out_of_into_and_between_nested_archives() {
+        for (outer, inner) in [("o.zip", "i.tar.gz"), ("o.tar", "i.7z"), ("o.7z", "i.zip")] {
+            let t = tempfile::tempdir().unwrap();
+            let tp = s(t.path());
+            make_nested(
+                t.path(),
+                outer,
+                inner,
+                &[("d/a.txt", Some(b"aaa")), ("b.txt", Some(b"bb"))],
+            );
+            let n = format!("{tp}/{outer}/docs/{inner}");
+            let c = ctx(t.path());
+            fs::create_dir(t.path().join("out")).unwrap();
+            let obs = RecordingObserver::default();
+            let r = copy(&c, &[format!("{n}/d")], &format!("{tp}/out"), &tp, &obs).unwrap();
+            assert_eq!(r.done, 1, "{outer}/{inner}");
+            assert_eq!(fs::read(t.path().join("out/d/a.txt")).unwrap(), b"aaa");
+            // Back in, with the per-file question naming the file through the outer archive.
+            fs::write(t.path().join("out/d/a.txt"), b"AAA").unwrap();
+            fs::write(t.path().join("out/d/new.txt"), b"N").unwrap();
+            let obs = RecordingObserver::answering(vec![ConflictAnswer::Overwrite]);
+            let r = copy(&c, &[format!("{tp}/out/d")], &n, &tp, &obs).unwrap();
+            assert_eq!(r.done, 2);
+            let asked: Vec<String> = obs.conflicts().into_iter().map(|c| c.target).collect();
+            assert_eq!(asked, [format!("{n}/d/a.txt")]);
+            // From the nested archive into the outer one.
+            let obs = RecordingObserver::default();
+            let docs = format!("{tp}/{outer}/docs");
+            move_(&c, &[format!("{n}/b.txt")], &docs, &tp, &obs).unwrap();
+            assert_eq!(
+                fresh_names(t.path(), &format!("{n}/d")),
+                ["a.txt", "new.txt"]
+            );
+            assert_eq!(fresh_names(t.path(), &n), ["d"]);
+            assert_eq!(fresh_names(t.path(), &docs), ["b.txt", inner, "x.txt"]);
+            let view = super::super::materialize(&c, &format!("{n}/d/a.txt"), "view").unwrap();
+            assert_eq!(fs::read(view).unwrap(), b"AAA");
+            assert!(no_stage_dirs(&c));
+        }
+    }
+
+    #[test]
+    fn nested_archive_into_itself_is_refused() {
+        let t = tempfile::tempdir().unwrap();
+        let tp = s(t.path());
+        make_nested(t.path(), "o.zip", "i.zip", &[("d/a.txt", Some(b"a"))]);
+        let n = format!("{tp}/o.zip/docs/i.zip");
+        let c = ctx(t.path());
+        let obs = RecordingObserver::default();
+        let r = copy(&c, std::slice::from_ref(&n), &format!("{n}/d"), &tp, &obs);
+        assert!(matches!(r, Err(OpError::IntoItself(_))), "{r:?}");
+        let r = move_(&c, &[format!("{tp}/o.zip/docs")], &n, &tp, &obs);
+        assert!(matches!(r, Err(OpError::IntoItself(_))), "{r:?}");
+        let r = copy(&c, &[format!("{tp}/o.zip")], &n, &tp, &obs);
+        assert!(matches!(r, Err(OpError::IntoItself(_))), "{r:?}");
+        assert_eq!(fresh_names(t.path(), &n), ["d"]);
     }
 }

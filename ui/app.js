@@ -1,28 +1,48 @@
 // Main window: wires panels, keys, commands, volumes and the session.
 
 import {
+  remoteArchiveOf,
   acceptAudioEvent,
   audioActive,
   audioF3Action,
   cmdlineKeyGoesToPanel,
   comboFromEvent,
   comboLabel,
+  compileTypeRules,
   displayLocation,
   discardPendingConfirm,
   escapeStopsAudio,
   isAudioName,
+  isSearchLocation,
   joinLocation,
+  keepExisting,
   lastComponent,
+  groupThousands,
   modifierMap,
+  quickSearchChar,
+  quickSearchMode,
+  NOT_IN_RESULTS,
   passwordArchive,
+  panelFolder,
+  pathsToCheck,
   pendingEditsDialog as pendingEditsSpec,
   playerStrip,
   rectOnScreen,
-  remoteArchiveOf,
   remoteArchives,
+  resultEntries,
+  resultOpRefusal,
   remoteLinkIsFolder,
+  SEARCH_LOCATION,
   seekSeconds,
+  sessionLocation,
   textEditKey,
+  diskFor,
+  driveTarget,
+  mergeShares,
+  remoteRoot,
+  serverDrives,
+  serverTarget,
+  setFnHeld,
 } from "./lib.mjs";
 import {
   copyMove,
@@ -44,18 +64,22 @@ import {
   topModal,
 } from "./dialogs.js";
 import { cancelDrag, initDragDrop, rowPress } from "./dragdrop.js";
-import { configureKeyboard, configureOptions, firstRunConflictHint, initConfig } from "./config.js";
+import { configureKeyboard, configureOptions, firstRunConflictHint, initConfig, optionsSearchReload, optionsSearchStatus } from "./config.js";
 import { initHotlist, showHotlist } from "./hotlist.js";
+import { initMultiRename, multiRename } from "./multirename.js";
 import {
   chmodDialog,
   connectFlow,
   disconnectActive,
+  autoConnectShares,
+  disconnectShare,
   initServers,
   lostServer,
   serversLost,
   showConnect,
 } from "./servers.js";
 import { Panel, VOLUME_ICON, volumeFor } from "./panel.js";
+import { feedFromWindow, initSearchHost, lastResults, openSearch, searchSettingsChanged } from "./searchhost.js";
 
 const T = window.__TAURI__;
 const invoke = (cmd, args) => {
@@ -74,12 +98,21 @@ const app = {
   panels: {},
   activeSide: "left",
   showHidden: true,
+  /** Drives: `list_volumes` merged with the saved SMB shares (`mergeShares`). */
   volumes: [],
+  /** The last `list_volumes` and `smb_shares` answers. */
+  rawVolumes: [],
+  shares: [],
   ready: false,
   geom: null,
   scale: 1,
   /** "Continue without settings" after App Translocation: the session is not saved. */
   noSession: false,
+  /**
+   * "Feed to listbox": side -> {entries, query, back: {location, cursorName}, recheck} for a
+   * panel showing SEARCH_LOCATION. `recheck` drops vanished items at the next listing.
+   */
+  results: {},
 };
 
 const other = (side) => (side === "left" ? "right" : "left");
@@ -96,8 +129,48 @@ export function status(text) {
 export { connectFlow, dialog, withPassword };
 
 /** Volume chooser next to the panel's drive combo (Alt+F1 / Alt+F2). */
-function driveMenu(panel) {
-  if (!app.volumes.length) return;
+/** Last folder visited on each disk (disk path -> location), for picking a drive (TC). */
+const lastOnDisk = new Map();
+
+/**
+ * Drive bar or drive menu: a disk goes to its current folder (see `driveTarget`); a saved SMB
+ * share that is not mounted is mounted first and opens at its folder.
+ */
+function goDrive(panel, path) {
+  const vol = app.volumes.find((v) => v.path === path);
+  if (!vol) return panel.go(path); // a server connection button: its root
+  if (vol.smb && !vol.mounted) return connectFlow({ server: vol.smb }, { panel });
+  const otherPanel = app.panels[other(panel.side)];
+  return panel.go(
+    driveTarget(vol, { volumes: app.volumes, here: panel.location, other: otherPanel.location, last: lastOnDisk }),
+  );
+}
+
+/**
+ * A saved server from the drive menu: a connected one goes to its current folder (see
+ * `serverTarget`); otherwise it connects and opens the server's start folder in this panel.
+ */
+function goServer(panel, drive) {
+  const otherPanel = app.panels[other(panel.side)];
+  const to = serverTarget(drive, { here: panel.location, other: otherPanel.location, last: lastOnDisk });
+  if (to) return panel.go(to);
+  return connectFlow({ server: drive.server }, { panel, localDir: false });
+}
+
+/** Drive menu rows: the drives, then the saved SFTP/SCP/FTP servers (connection manager order). */
+async function driveRows() {
+  try {
+    const [list, conns] = await Promise.all([invoke("servers_load"), invoke("list_connections")]);
+    return [...app.volumes, ...serverDrives(list.nodes, conns)];
+  } catch (e) {
+    console.error("fxfm: drive menu servers", e);
+    return app.volumes;
+  }
+}
+
+async function driveMenu(panel) {
+  const rows = await driveRows();
+  if (!rows.length) return;
   const backdrop = document.createElement("div");
   backdrop.className = "backdrop clear";
   const menu = document.createElement("div");
@@ -105,11 +178,15 @@ function driveMenu(panel) {
   const r = panel.comboEl.getBoundingClientRect();
   menu.style.left = `${r.left}px`;
   menu.style.top = `${r.bottom + 2}px`;
-  let sel = Math.max(0, app.volumes.indexOf(volumeFor(app.volumes, panel.location)));
-  const items = app.volumes.map((v, i) => {
+  const here = remoteRoot(panel.location);
+  const at = here ? rows.findIndex((v) => v.kind === "server" && v.path === here) : rows.indexOf(volumeFor(app.volumes, panel.location));
+  let sel = Math.max(0, at);
+  const items = rows.map((v, i) => {
     const it = document.createElement("div");
     it.className = "item";
     it.textContent = `${VOLUME_ICON[v.kind] ?? "💾"} ${v.name}`;
+    if (v.smb) it.title = v.mounted ? `${v.path} (Delete: disconnect)` : "Not mounted: picking it mounts the share";
+    if (v.kind === "server") it.title = v.connected ? "Connected" : "Not connected: picking it connects";
     it.addEventListener("mouseenter", () => paint(i));
     it.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -127,7 +204,8 @@ function driveMenu(panel) {
   const choose = (i) => {
     close();
     setActive(panel.side);
-    panel.go(app.volumes[i].path);
+    if (rows[i].kind === "server") goServer(panel, rows[i]);
+    else goDrive(panel, rows[i].path);
   };
   modal.onKey = (e) => {
     e.preventDefault();
@@ -136,6 +214,11 @@ function driveMenu(panel) {
     else if (e.key === "Home") paint(0);
     else if (e.key === "End") paint(items.length - 1);
     else if (e.key === "Enter") choose(sel);
+    else if (e.key === "Delete" && rows[sel]?.smb && rows[sel].mounted) {
+      // Disconnect a mounted SMB share (diskutil unmount) without leaving the keyboard.
+      close();
+      disconnectShare(rows[sel].smb);
+    }
     else if (e.key === "Escape" || e.key === "Tab") close();
   };
   backdrop.addEventListener("mousedown", (e) => {
@@ -158,39 +241,62 @@ function setActive(side) {
 /** Command handlers; later tasks add entries (dispatch looks them up here). */
 export const handlers = {
   cm_switch_panel: () => setActive(other(app.activeSide)),
-  cm_parent: () => activePanel().goParent(),
+  // In the results list Ctrl+PgUp goes to the cursor item's folder; Backspace goes back.
+  cm_parent: (combo) =>
+    combo === "Ctrl+PageUp" && inResults() ? activePanel().goToResult() : activePanel().goParent(),
   cm_root: () => activePanel().goRoot(),
   cm_mark: () => activePanel().toggleMark(),
   cm_mark_mask: () => markByMask(true),
   cm_unmark_mask: () => markByMask(false),
   cm_copy: () => copyMove("copy"),
   cm_move: () => copyMove("move"),
-  cm_packfiles: () => packFiles(),
+  cm_packfiles: () => notInResults() || packFiles(),
   cm_delete: () => deleteItems(true),
   cm_delete_permanent: () => deleteItems(false),
-  cm_mkdir: () => makeDir(),
-  cm_rename: () => renameInline(),
+  cm_mkdir: () => notInResults() || makeDir(),
+  cm_rename: () => notInResults() || renameInline(),
   cm_view: () => viewOrPlay(),
   cm_edit: () => viewOrEdit("edit_file"),
-  cm_edit_new: () => editNew(),
+  cm_edit_new: () => notInResults() || editNew(),
   cm_invert: () => activePanel().invertMarks(),
   cm_mark_all: () => activePanel().markAll(),
   cm_refresh: () => {
     refreshVolumes();
+    // A results list drops the items that no longer exist.
+    recheckResults(app.activeSide);
     return activePanel().refresh();
   },
-  /** The other panel goes to the active panel's folder; focus stays where it is. */
-  cm_target_equal_source: () => app.panels[other(app.activeSide)].go(activePanel().location),
+  /** The other panel goes to the active panel's folder (or shows the same results); focus stays. */
+  cm_target_equal_source: () => {
+    const p = activePanel();
+    const o = app.panels[other(app.activeSide)];
+    if (inResults()) {
+      const r = app.results[p.side];
+      app.results[o.side] = { ...r, entries: r.entries.slice(), back: { ...r.back }, recheck: false };
+      o.clearMarks();
+    }
+    return o.go(p.location);
+  },
   cm_swap_panels: () => {
     const { left, right } = app.panels;
+    // Results lists move with their panels' locations.
+    const [l0, r0] = [app.results.left, app.results.right];
+    setResults("left", r0);
+    setResults("right", l0);
     const l = { location: left.location, cursor: left.cursorName ?? undefined };
     const r = { location: right.location, cursor: right.cursorName ?? undefined };
+    // Both show results: the location stays the same, so marks (by name) would stay too.
+    if (isSearchLocation(l.location) && isSearchLocation(r.location)) {
+      left.clearMarks();
+      right.clearMarks();
+    }
     left.go(r.location, r.cursor);
     right.go(l.location, l.cursor);
   },
   cm_toggle_hidden: () => {
     app.showHidden = !app.showHidden;
     for (const p of Object.values(app.panels)) p.rebuild();
+    scheduleSave();
   },
   cm_drive_left: () => driveMenu(app.panels.left),
   cm_drive_right: () => driveMenu(app.panels.right),
@@ -198,13 +304,159 @@ export const handlers = {
   cm_connect: () => showConnect(),
   cm_disconnect: () => disconnectActive(),
   cm_chmod: () => chmodDialog(),
+  cm_multi_rename: () => multiRename(),
   cm_exit: () => win.close(),
   cm_cmdline_focus: () => {
     if (app.settings.showCommandLine) cmdInput().focus();
   },
   cm_config_keyboard: () => configureKeyboard(),
   cm_config_options: () => configureOptions(),
+  cm_search: () => openSearch(),
+  /** The open Find files window's results, else the last one's, else the window itself. */
+  cm_feed_listbox: () => {
+    if (feedFromWindow()) return;
+    const { items, query } = lastResults();
+    return items.length ? feed(items, query) : openSearch();
+  },
 };
+
+/** The active panel shows search results. */
+const inResults = () => isSearchLocation(activePanel().location);
+
+/** In a results list: says "not available" and returns true; else false (the command runs). */
+function notInResults() {
+  if (!inResults()) return false;
+  status(NOT_IN_RESULTS);
+  return true;
+}
+
+/** Gives `side` the results list `r`; none keeps what it has until it navigates away. */
+function setResults(side, r) {
+  if (r) app.results[side] = r;
+}
+
+/**
+ * Enter on an archive on a server: downloads it with a progress note (after 300 ms) that has
+ * Cancel; resolves with the local copy's path.
+ */
+async function downloadArchive(location) {
+  const backdrop = document.createElement("div");
+  backdrop.className = "backdrop";
+  const box = document.createElement("div");
+  box.className = "dialog busy";
+  const title = document.createElement("div");
+  title.className = "title";
+  title.textContent = "Download";
+  const body = document.createElement("div");
+  body.className = "body";
+  const line = document.createElement("p");
+  const name = lastComponent(location);
+  line.textContent = `Downloading ${name}…`;
+  const bar = document.createElement("div");
+  bar.className = "dlbar";
+  const fill = document.createElement("div");
+  bar.append(fill);
+  body.append(line, bar);
+  const row = document.createElement("div");
+  row.className = "buttons";
+  const cancel = document.createElement("button");
+  cancel.textContent = "Cancel";
+  const stop = () => {
+    cancel.disabled = true;
+    invoke("cancel_download", { location }).catch((e) => console.error("fxfm: cancel_download", e));
+  };
+  cancel.addEventListener("click", stop);
+  row.append(cancel);
+  box.append(title, body, row);
+  backdrop.append(box);
+  const modal = {
+    el: backdrop,
+    onKey: (e) => {
+      e.preventDefault();
+      if (e.key === "Escape") stop();
+    },
+  };
+  const timer = setTimeout(() => pushModal(modal), 300);
+  const unlisten = await T.event.listen("download://progress", (ev) => {
+    const p = ev.payload;
+    if (p.location !== location) return;
+    const pct = p.total ? Math.min(100, Math.floor((p.done / p.total) * 100)) : null;
+    line.textContent = `Downloading ${name}… ${groupThousands(p.done)} / ${groupThousands(p.total)} bytes`;
+    fill.style.width = `${pct ?? 0}%`;
+  });
+  try {
+    return await invoke("open_remote_archive", { location });
+  } finally {
+    clearTimeout(timer);
+    unlisten();
+    popModal(modal);
+  }
+}
+
+/** Items of `side`'s results list renamed by Multi-rename: `moved` maps old to new paths. */
+function renamedInResults(side, moved) {
+  const r = app.results[side];
+  if (!r) return;
+  r.entries = r.entries.map((e) => {
+    const now = moved.get(e.path);
+    return now ? { ...resultEntries([{ ...e, path: now }], app.boot.home)[0] } : e;
+  });
+}
+
+/** The next listing of `side`'s results list (if it shows one) drops the vanished items. */
+function recheckResults(side) {
+  const r = app.results[side];
+  if (r && isSearchLocation(app.panels[side].location)) r.recheck = true;
+}
+
+/**
+ * "Feed to listbox": the Find files results become a list in the active panel. Feeding again
+ * from a results list keeps the way back to the folder it came from.
+ */
+function feed(items, query) {
+  const p = activePanel();
+  const prev = isSearchLocation(p.location) ? app.results[p.side] : null;
+  const back = prev?.back ?? { location: p.location, cursorName: p.cursorName };
+  const entries = resultEntries(items, app.boot.home);
+  app.results[p.side] = { entries, query, back, recheck: false };
+  // The same location again keeps marks by name: a new list starts unmarked.
+  p.clearMarks();
+  return p.go(SEARCH_LOCATION, entries[0]?.name);
+}
+
+/** The panel API's listing of the results list; a pending recheck asks `paths_exist` first. */
+async function resultsListing(side) {
+  const r = app.results[side];
+  if (!r) throw new Error("No search results");
+  if (r.recheck) {
+    r.recheck = false;
+    try {
+      r.entries = keepExisting(r.entries, await invoke("paths_exist", { paths: pathsToCheck(r.entries) }));
+    } catch (e) {
+      console.error("fxfm: paths_exist", e);
+    }
+  }
+  return r.entries;
+}
+
+/** Panel `p`'s folder for the command line and the hotlist: a results list uses the one it came from. */
+const workFolder = (p) => panelFolder(p.location, app.results[p.side] ?? null, app.boot.home);
+
+/** What the Find files window asks of the main window (searchhost.js). `view` is the panel's F3 path. */
+function searchCtx() {
+  return {
+    invoke,
+    home: app.boot.home,
+    settings: () => app.settings,
+    panel: activePanel,
+    status,
+    feed,
+    view: (path) => viewOrPlayPath(path, lastComponent(path)),
+    connectFlow,
+    openPrivacy: openFdaSettings,
+    focus: () => win.setFocus(),
+  };
+}
 
 const cmdInput = () => document.getElementById("cmdinput");
 
@@ -214,7 +466,7 @@ function runCommandLine() {
   const command = input.value.trim();
   if (!app.settings.showCommandLine || !command) return false;
   input.value = "";
-  invoke("run_in_terminal", { dir: activePanel().location, command }).catch((e) => status(`Command line: ${e}`));
+  invoke("run_in_terminal", { dir: workFolder(activePanel()), command }).catch((e) => status(`Command line: ${e}`));
   return true;
 }
 
@@ -223,8 +475,17 @@ function viewOrEdit(command) {
   const p = activePanel();
   const e = p.cursorEntry;
   if (!e || e.up || e.isDir) return;
-  const path = joinLocation(p.location, e.name);
+  if (refusedInResults(p, e, "edit")) return;
+  const path = e.path ?? joinLocation(p.location, e.name);
   return withPassword(() => invoke(command, { path }));
+}
+
+/** A results list refusing `op` on entry `e` (says why); false elsewhere. */
+function refusedInResults(p, e, op) {
+  if (!isSearchLocation(p.location)) return false;
+  const why = resultOpRefusal([e], op);
+  if (why) p.setMessage(why);
+  return Boolean(why);
 }
 
 // ---------------------------------------------------------------- F3 audio
@@ -245,11 +506,18 @@ const PLAYER_ERROR_MS = 5000;
 function viewOrPlay() {
   const p = activePanel();
   const e = p.cursorEntry;
-  if (!e || e.up || e.isDir || !isAudioName(e.name)) return viewOrEdit("open_viewer");
-  const path = joinLocation(p.location, e.name);
+  if (!e || e.up || e.isDir) return;
+  if (refusedInResults(p, e, "view")) return;
+  if (e.path) return viewOrPlayPath(e.path, lastComponent(e.path));
+  return viewOrPlayPath(joinLocation(p.location, e.name), e.name);
+}
+
+/** F3 on the file `path` (`name` is its file name): play it when it is audio, else view it. */
+function viewOrPlayPath(path, name) {
+  if (!isAudioName(name)) return withPassword(() => invoke("open_viewer", { path }));
   if (audioF3Action(player, path) === "stop") return invoke("audio_stop");
   // Ticks of the file playing until now may still be on their way: ignore them.
-  Object.assign(player, { path, name: e.name, info: null, minId: player.lastId + 1 });
+  Object.assign(player, { path, name, info: null, minId: player.lastId + 1 });
   return withPassword(() => invoke("audio_play", { path }))
     .then((started) => {
       player.minId = Math.max(player.minId, started.id);
@@ -264,7 +532,7 @@ function viewOrPlay() {
       const msg = String(err?.message ?? err);
       if (msg === "superseded" || passwordArchive(msg) || player.path !== path) return;
       if (player.state === "error") return;
-      const message = /^(Cannot play|Stopped)\b/.test(msg) ? msg : `Cannot play ${e.name}: ${msg}`;
+      const message = /^(Cannot play|Stopped)\b/.test(msg) ? msg : `Cannot play ${name}: ${msg}`;
       setPlayer({ path, state: "error", message });
     });
 }
@@ -302,6 +570,11 @@ function renderPlayer() {
   strip.querySelector(".name").textContent = v.text;
   strip.querySelector(".clock").textContent = v.clock;
   strip.querySelector(".codec").textContent = v.codec;
+  const pp = strip.querySelector(".pp");
+  pp.classList.toggle("off", player.state !== "playing" && player.state !== "paused");
+  pp.textContent = v.paused ? "▶" : "⏸";
+  pp.title = v.paused ? "Play" : "Pause";
+  strip.classList.toggle("paused", Boolean(v.paused));
   const bar = strip.querySelector(".bar");
   bar.classList.toggle("off", v.progress == null);
   bar.firstElementChild.style.width = `${(v.progress ?? 0) * 100}%`;
@@ -315,21 +588,40 @@ function initPlayer() {
     if (audioActive(player)) invoke("audio_stop").catch((e) => console.error("fxfm: audio_stop", e));
     else setPlayer({ state: null });
   });
+  strip.querySelector(".pp").addEventListener("click", () => {
+    if (player.state !== "playing" && player.state !== "paused") return;
+    invoke("audio_pause", { paused: player.state === "playing" }).catch((e) => console.error("fxfm: audio_pause", e));
+  });
+  // Volume: live while dragging, saved when let go.
+  const vol = strip.querySelector(".vol");
+  vol.value = String(Math.round((app.settings.audioVolume ?? 1) * 100));
+  vol.addEventListener("input", () => {
+    invoke("audio_volume", { volume: Number(vol.value) / 100 }).catch((e) => console.error("fxfm: audio_volume", e));
+  });
+  vol.addEventListener("change", () => {
+    const settings = { ...structuredClone(app.settings), audioVolume: Number(vol.value) / 100 };
+    invoke("save_settings", { settings })
+      .then(() => {
+        app.settings = settings;
+      })
+      .catch((e) => console.error("fxfm: save volume", e));
+  });
   strip.querySelector(".bar").addEventListener("click", (e) => {
     const r = e.currentTarget.getBoundingClientRect();
     const secs = seekSeconds(e.clientX, r.left, r.width, player.duration);
-    if (secs != null && player.state === "playing") {
+    if (secs != null && (player.state === "playing" || player.state === "paused")) {
       invoke("audio_seek", { secs }).catch((err) => console.error("fxfm: audio_seek", err));
     }
   });
 }
 
-export function dispatch(id) {
+/** Runs command `id`; `combo` is the key that asked for it (none from menus and buttons). */
+export function dispatch(id, combo = null) {
   const h = handlers[id];
   if (h) {
     const fail = (e) => status(`${id}: ${e?.message ?? e}`);
     try {
-      Promise.resolve(h()).catch(fail);
+      Promise.resolve(h(combo)).catch(fail);
     } catch (e) {
       fail(e);
     }
@@ -368,7 +660,7 @@ function onKeyDown(e) {
       if (id) {
         e.preventDefault();
         if (id === "cm_switch_panel") t.blur();
-        dispatch(id);
+        dispatch(id, combo);
       } else if (activePanel().handleKey(combo)) {
         e.preventDefault();
       }
@@ -381,6 +673,10 @@ function onKeyDown(e) {
     return;
   }
   const combo = comboFromEvent(e, mods);
+  if (quickSearchKey(e, combo)) {
+    e.preventDefault();
+    return;
+  }
   if (!combo) return;
   if (combo === "Escape" && escapeStopsAudio({ player, escapeBound: !!app.keymap[combo], commandText: cmdInput().value })) {
     e.preventDefault();
@@ -395,10 +691,33 @@ function onKeyDown(e) {
   const id = app.keymap[combo];
   if (id) {
     e.preventDefault();
-    dispatch(id);
+    dispatch(id, combo);
   } else if (activePanel().handleKey(combo)) {
     e.preventDefault();
   }
+}
+
+/**
+ * Quick search (TC Alt+letters) in the active panel. True when the key was used: a quick
+ * search character, or Esc/Backspace/Up/Down while the box is open. Any other key closes
+ * the box and goes on as usual (Enter opens the found entry). Bound keys win.
+ */
+function quickSearchKey(e, combo) {
+  const p = activePanel();
+  if (["Meta", "Control", "Alt", "Shift", "CapsLock"].includes(e.key)) return false;
+  if (p.quickSearching) {
+    if (e.key === "Escape") return p.quickSearchEnd(), true;
+    if (e.key === "Backspace") return p.quickSearchBack(), true;
+    if (e.key === "ArrowUp" && !e.shiftKey) return p.quickSearchStep(-1), true;
+    if (e.key === "ArrowDown" && !e.shiftKey) return p.quickSearchStep(1), true;
+  }
+  const ch = e.isComposing ? null : quickSearchChar(e, quickSearchMode(app.settings));
+  if (ch != null && !(combo && app.keymap[combo])) {
+    p.quickSearchType(ch);
+    return true;
+  }
+  if (p.quickSearching) p.quickSearchEnd();
+  return false;
 }
 
 // ---------------------------------------------------------------- session
@@ -411,6 +730,7 @@ function sessionState() {
     right: panelState(app.panels.right),
     active: app.activeSide,
     window: app.geom,
+    showHidden: app.showHidden,
   };
 }
 
@@ -446,11 +766,12 @@ function setGeometry(pos, size) {
   if (g.w > 0 && g.h > 0) app.geom = g;
 }
 
+/**
+ * The temp copy of a server archive does not survive the session: the server folder is saved.
+ * Nor does a results list: the folder it came from is saved.
+ */
 function panelState(p) {
-  // The temp copy of a server archive does not survive the session: save the server folder.
-  const r = remoteArchiveOf(p.location, remoteArchives);
-  if (r) return { location: r.parent, cursorName: lastComponent(r.archive) };
-  return p.location ? { location: p.location, cursorName: p.cursorName } : null;
+  return sessionLocation(p, app.results[p.side] ?? null, remoteArchives);
 }
 
 async function saveSession() {
@@ -503,23 +824,46 @@ async function restoreGeometry(g) {
 // ---------------------------------------------------------------- volumes, errors
 
 let volumesInFlight = false;
+/** Another refresh was asked for while one ran (a share was just mounted, say). */
+let volumesAgain = false;
 
-/** Re-reads volumes (free space changes); one request at a time. */
+/** Re-reads volumes (free space changes) and SMB mounts; one request at a time. */
 async function refreshVolumes() {
-  if (volumesInFlight) return;
+  if (volumesInFlight) {
+    volumesAgain = true;
+    return;
+  }
   volumesInFlight = true;
   try {
-    setVolumes(await invoke("list_volumes"));
-  } catch (e) {
-    console.error("fxfm: list_volumes", e);
+    do {
+      volumesAgain = false;
+      try {
+        const [vols, shares] = await Promise.all([invoke("list_volumes"), readShares()]);
+        setVolumes(vols, shares);
+      } catch (e) {
+        console.error("fxfm: list_volumes", e);
+      }
+    } while (volumesAgain);
   } finally {
     volumesInFlight = false;
   }
 }
 
-function setVolumes(vols) {
-  app.volumes = vols;
-  for (const p of Object.values(app.panels)) p.setVolumes(vols);
+/** Saved SMB shares and their mounts; the last known ones when that fails. */
+async function readShares() {
+  try {
+    return await invoke("smb_shares");
+  } catch (e) {
+    console.error("fxfm: smb_shares", e);
+    return app.shares;
+  }
+}
+
+function setVolumes(vols, shares = app.shares) {
+  app.rawVolumes = vols;
+  app.shares = shares;
+  app.volumes = mergeShares(vols, shares);
+  for (const p of Object.values(app.panels)) p.setVolumes(app.volumes);
 }
 
 /** Drive-bar buttons of the open connections (`list_connections`). */
@@ -547,7 +891,12 @@ async function fdaHint() {
       { label: "Later", value: null },
     ],
   });
-  if (r === "open") invoke("open_fda_settings").catch((e) => status(String(e)));
+  if (r === "open") openFdaSettings();
+}
+
+/** System Settings → Privacy & Security → Full Disk Access. */
+function openFdaSettings() {
+  invoke("open_fda_settings").catch((e) => status(String(e)));
 }
 
 function onPanelError(panel, error, target) {
@@ -575,9 +924,17 @@ function onPanelError(panel, error, target) {
 // ---------------------------------------------------------------- setup
 
 function applySettings(s) {
+  const keysChanged = JSON.stringify(app.settings?.modifiers) !== JSON.stringify(s.modifiers);
   app.settings = s;
+  // Open viewer windows take the new Alt/Ctrl keys at once.
+  if (keysChanged) T.event.emit("keys://modifiers", s.modifiers ?? {}).catch((e) => console.error("fxfm: emit keys", e));
+  searchSettingsChanged(s);
   const st = document.documentElement.style;
-  for (const [k, v] of Object.entries(s.colors)) st.setProperty(`--c-${k}`, v);
+  st.setProperty("--c-font", s.colors.font);
+  st.setProperty("--c-background", s.colors.background);
+  // File-type rules are compiled once per settings change, not per row.
+  const matcher = compileTypeRules(s.colors.typeRules);
+  for (const p of Object.values(app.panels)) p.setColors(s.colors, matcher);
   st.setProperty("--font-size", `${s.fontSize}px`);
   const rowH = Math.round(s.fontSize * 1.47);
   st.setProperty("--row-h", `${rowH}px`);
@@ -589,17 +946,19 @@ function applySettings(s) {
   }
 }
 
+/** The command line's prompt: the folder a command runs in (for a results list, the one it came from). */
 function updatePrompt() {
-  document.getElementById("prompt").textContent = `${displayLocation(activePanel().location, remoteArchives)}>`;
+  document.getElementById("prompt").textContent = `${displayLocation(workFolder(activePanel()), remoteArchives)}>`;
 }
 
 function makePanel(side) {
   return new Panel(document.getElementById(side), side, {
-    listDir: (location) => invoke("list_dir", { location }),
+    // The results list (SEARCH_LOCATION) is listed from `app.results`, never by `list_dir`.
+    listDir: (location) => (isSearchLocation(location) ? resultsListing(side) : invoke("list_dir", { location })),
     nearest: (location) => invoke("nearest_existing", { location }),
     dirSize: (location, panel) => invoke("dir_size", { location, panel }),
     status: (text) => status(text),
-    openRemoteArchive: (location) => invoke("open_remote_archive", { location }),
+    openRemoteArchive: (location) => downloadArchive(location),
     // `onFolder` (a server symlink): called instead of an error when the target is a folder.
     openDefault: (path, onFolder) =>
       withPassword(() => invoke("open_default", { path })).catch((e) =>
@@ -609,7 +968,14 @@ function makePanel(side) {
     onActivate: (p) => {
       if (app.activeSide !== p.side) setActive(p.side);
     },
+    results: (p) => app.results[p.side] ?? null,
     onNavigated: (p) => {
+      // Leaving a results list forgets it (Feed to listbox again brings it back).
+      if (!isSearchLocation(p.location)) delete app.results[p.side];
+      const disk = diskFor(app.volumes, p.location);
+      if (disk) lastOnDisk.set(disk.path, p.location);
+      const root = remoteRoot(p.location);
+      if (root) lastOnDisk.set(root, p.location);
       if (p.side === app.activeSide) updatePrompt();
       refreshVolumes();
       scheduleSave();
@@ -617,6 +983,7 @@ function makePanel(side) {
     onCursorMoved: () => scheduleSave(),
     onError: onPanelError,
     onDriveMenu: (p) => driveMenu(p),
+    onDrive: (p, path) => goDrive(p, path),
     onRowPress: (p, i, ev) => rowPress(p, i, ev),
   });
 }
@@ -675,6 +1042,7 @@ async function main() {
   app.commands = new Map(boot.commands.map((c) => [c.id, c]));
   app.geom = boot.session.window ?? null;
   app.activeSide = boot.session.active === "right" ? "right" : "left";
+  app.showHidden = boot.session.showHidden ?? true;
 
   app.panels.left = makePanel("left");
   app.panels.right = makePanel("right");
@@ -686,7 +1054,8 @@ async function main() {
   await captureGeometry();
 
   try {
-    setVolumes(await invoke("list_volumes"));
+    const [vols, shares] = await Promise.all([invoke("list_volumes"), readShares()]);
+    setVolumes(vols, shares);
   } catch (e) {
     console.error("fxfm: list_volumes", e);
   }
@@ -697,6 +1066,11 @@ async function main() {
   updatePrompt();
   await initDialogs({
     invoke,
+    // After F6/F8: the results lists drop the items that no longer exist.
+    recheckResults: () => {
+      recheckResults("left");
+      recheckResults("right");
+    },
     listen: T.event.listen,
     active: activePanel,
     other: () => app.panels[other(app.activeSide)],
@@ -724,9 +1098,21 @@ async function main() {
     },
     home: boot.home,
     active: activePanel,
+    // The active panel's real folder (a results list: the folder it came from).
+    // In a server archive's copy: the server folder holding the archive.
+    folder: () => remoteArchiveOf(workFolder(activePanel()), remoteArchives)?.parent ?? workFolder(activePanel()),
     other: () => app.panels[other(app.activeSide)],
     status,
     mods: keyMods,
+  });
+  initMultiRename({
+    invoke,
+    active: activePanel,
+    panels: () => Object.values(app.panels),
+    status,
+    renamedInResults,
+    settings: () => app.settings,
+    applySettings,
   });
   initServers({
     invoke,
@@ -736,6 +1122,7 @@ async function main() {
     panels: () => Object.values(app.panels),
     status,
     mods: keyMods,
+    refreshVolumes,
   });
   initConfig({
     invoke,
@@ -767,6 +1154,8 @@ async function main() {
     if (b) dispatch(b.dataset.cmd);
   });
 
+  // Fn as Alt or Ctrl: WebKit never reports Fn, the native monitor does.
+  await T.event.listen("keys://fn", (ev) => setFnHeld(ev.payload?.down));
   await T.event.listen("menu://command", (ev) => {
     // A menu click while a dialog is open would stack a second operation on it.
     if (topModal()) return;
@@ -781,8 +1170,13 @@ async function main() {
   await refreshConnections();
   initPlayer();
   await T.event.listen("audio://state", (ev) => setPlayer(ev.payload));
-  await T.event.listen("volumes://changed", (ev) => {
-    setVolumes(ev.payload);
+  // The Find files window listens to search:// and volumes:// itself.
+  await initSearchHost(searchCtx());
+  await T.event.listen("search://status", (ev) => optionsSearchStatus(ev.payload));
+  await T.event.listen("volumes://changed", async (ev) => {
+    optionsSearchReload();
+    // A share mounted or unmounted: its drive changes with the volume list.
+    setVolumes(ev.payload, await readShares());
     // A panel whose folder vanished (ejected disk) falls back to the nearest existing folder.
     for (const p of Object.values(app.panels)) {
       p.refresh().catch((e) => console.error("fxfm: refresh", e));
@@ -806,6 +1200,7 @@ async function main() {
     await pendingEditsDialog(boot.pendingEdits).catch((e) => console.error("fxfm: pending edits", e));
   }
   firstRunConflictHint().catch((e) => console.error("fxfm: keyboard hint", e));
+  autoConnectShares().catch((e) => console.error("fxfm: auto-connect", e));
 }
 
 /**

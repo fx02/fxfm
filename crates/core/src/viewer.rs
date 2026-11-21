@@ -82,7 +82,11 @@ pub fn read_for_view(path: &Path) -> io::Result<ViewContent> {
         });
     }
 
-    trim_partial(&mut buf, truncated, if utf16_bom { Trim::Utf16 } else { Trim::Utf8 });
+    trim_partial(
+        &mut buf,
+        truncated,
+        if utf16_bom { Trim::Utf16 } else { Trim::Utf8 },
+    );
     let (text, encoding) = decode_text(&buf);
     Ok(ViewContent::Text {
         encoding: encoding.to_string(),

@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 
 pub const DATA_DIR_NAME: &str = "fxfm-data";
 const WRITE_TEST: &str = ".fxfm-write-test";
+/// The search index folder: a cache of up to ~190 MB that the app saves into the new data
+/// folder itself after a move, so `migrate` neither copies it nor keeps it in a set-aside copy.
+const SEARCH_INDEX_DIR: &str = "index";
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -85,9 +88,17 @@ pub fn resolve(app_folder: Option<&Path>, system_dir: &Path) -> DataLocation {
 }
 
 fn copy_dir(from: &Path, to: &Path) -> io::Result<()> {
+    copy_dir_skipping(from, to, &[])
+}
+
+/// [`copy_dir`] without the top-level entries named in `skip`.
+fn copy_dir_skipping(from: &Path, to: &Path, skip: &[&str]) -> io::Result<()> {
     std::fs::create_dir_all(to)?;
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
+        if skip.iter().any(|s| entry.file_name() == *s) {
+            continue;
+        }
         let dest = to.join(entry.file_name());
         let ty = entry.file_type()?;
         if ty.is_symlink() {
@@ -168,7 +179,7 @@ pub fn migrate(
     }
     // Leftover of an earlier crashed attempt; ours to remove.
     let _ = std::fs::remove_dir_all(&staging);
-    if let Err(e) = copy_dir(&from.dir, &staging) {
+    if let Err(e) = copy_dir_skipping(&from.dir, &staging, &[SEARCH_INDEX_DIR]) {
         let _ = std::fs::remove_dir_all(&staging);
         return Err(e.into());
     }
@@ -207,6 +218,10 @@ pub fn migrate(
         restore_source(&set_aside);
         let _ = std::fs::remove_dir_all(&staging);
         return Err(e.into());
+    }
+    if let Some(old) = &set_aside {
+        // Nothing would ever delete it there (the app re-saves the index in the new folder).
+        let _ = std::fs::remove_dir_all(old.join(SEARCH_INDEX_DIR));
     }
     Ok(DataLocation {
         mode: to,
@@ -349,6 +364,29 @@ mod tests {
         let sys2 = t.path().join("sys2");
         migrate(&from, StorageMode::System, Some(&app), &sys2).unwrap();
         assert!(app.join("fxfm-data.old-2").exists());
+    }
+
+    #[test]
+    fn migrate_leaves_the_search_index_behind() {
+        let t = tempfile::tempdir().unwrap();
+        // System -> Portable: not copied (the app saves it into the new folder itself).
+        let from = sys_with_data(t.path());
+        fs::create_dir_all(from.dir.join("index")).unwrap();
+        fs::write(from.dir.join("index/index.bin"), "big").unwrap();
+        fs::write(from.dir.join("index/index.bin.tmp"), "half").unwrap();
+        let app = t.path().join("app");
+        fs::create_dir(&app).unwrap();
+        let to = migrate(&from, StorageMode::Portable, Some(&app), &from.dir).unwrap();
+        assert!(to.dir.join("settings.json").is_file());
+        assert!(!to.dir.join("index").exists());
+        // Portable -> System: the set-aside portable folder does not keep it either.
+        fs::create_dir_all(to.dir.join("index")).unwrap();
+        fs::write(to.dir.join("index/index.bin"), "big").unwrap();
+        let sys = t.path().join("sys2");
+        let back = migrate(&to, StorageMode::System, Some(&app), &sys).unwrap();
+        assert!(!back.dir.join("index").exists());
+        assert!(app.join("fxfm-data.old/settings.json").is_file());
+        assert!(!app.join("fxfm-data.old/index").exists());
     }
 
     #[test]

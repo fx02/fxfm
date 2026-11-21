@@ -1,5 +1,10 @@
 //! Virtual file system routing: locations are either local paths or paths inside an archive
 //! (`<archive file>/<inner path>`). Local locations go straight to `listing` and `ops`.
+//!
+//! An archive inside an archive (`outer.zip/inner.tar.gz/d`) is entered like any other: it is
+//! extracted to a temp file (`nested-<n>` under the temp root, kept while the outer archive is
+//! unchanged), and after every change that temp file is written back into the archive holding
+//! it, up to the outermost one, each with one atomic `rewrite`.
 
 use std::collections::HashMap;
 use std::fs;
@@ -12,7 +17,8 @@ use std::sync::{Arc, Mutex};
 use crate::archive::read::extract;
 use crate::archive::write::{rewrite, Edit};
 use crate::archive::{
-    list_inner, split_location, ArchiveError, ArchiveIndex, ArchiveLoc, IndexCache,
+    list_inner, split_location, stat_key, ArchiveError, ArchiveIndex, ArchiveKind, ArchiveLoc,
+    IndexCache,
 };
 use crate::listing::{list_dir, sort_entries, Entry, ListError};
 use crate::ops::{
@@ -50,7 +56,49 @@ pub struct Ctx {
     pub temp_root: PathBuf,
     pub sessions: Sessions,
     passwords: Mutex<HashMap<PathBuf, String>>,
+    nested: Mutex<NestedState>,
     n: AtomicU64,
+}
+
+/// Archives inside archives kept as temp copies at most.
+const NESTED_MAX: usize = 8;
+
+/// An archive inside another archive, extracted to a temp file.
+struct NestedSlot {
+    parent_kind: ArchiveKind,
+    /// `(size, mtime)` of the parent file when `file` was extracted or written back.
+    parent_stamp: (u64, i64),
+    /// The temp folder holding `file`.
+    dir: PathBuf,
+    file: PathBuf,
+    used: u64,
+}
+
+/// Temp copies of nested archives, keyed by (file of the archive holding it, inner path).
+#[derive(Default)]
+struct NestedState {
+    map: HashMap<(PathBuf, String), NestedSlot>,
+    tick: u64,
+}
+
+impl NestedState {
+    /// Removes the copy under `key` and every copy taken out of it; returns their folders.
+    fn forget(&mut self, key: &(PathBuf, String)) -> Vec<PathBuf> {
+        let Some(slot) = self.map.remove(key) else {
+            return Vec::new();
+        };
+        let children: Vec<(PathBuf, String)> = self
+            .map
+            .keys()
+            .filter(|(p, _)| *p == slot.file)
+            .cloned()
+            .collect();
+        let mut dirs = vec![slot.dir];
+        for c in children {
+            dirs.extend(self.forget(&c));
+        }
+        dirs
+    }
 }
 
 impl Ctx {
@@ -60,6 +108,7 @@ impl Ctx {
             temp_root,
             sessions: Sessions::new(),
             passwords: Mutex::new(HashMap::new()),
+            nested: Mutex::new(NestedState::default()),
             n: AtomicU64::new(0),
         }
     }
@@ -111,6 +160,198 @@ impl Ctx {
         }
         open_up(dir);
         let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The temp copy of the archive `inner` inside `parent`; extracted again when the parent
+    /// file changed since.
+    fn nested_file(&self, parent: &ArchiveLoc, inner: &str) -> Result<PathBuf, ArchiveError> {
+        let stamp = stat_key(&parent.archive)?;
+        let key = (parent.archive.clone(), inner.to_string());
+        let mut st = self.nested.lock().unwrap();
+        st.tick += 1;
+        let tick = st.tick;
+        if let Some(slot) = st.map.get_mut(&key) {
+            if slot.parent_stamp == stamp && slot.file.is_file() {
+                slot.used = tick;
+                return Ok(slot.file.clone());
+            }
+        }
+        for d in st.forget(&key) {
+            self.cleanup_dir(&d);
+        }
+        let dir = self
+            .new_temp_dir("nested")
+            .map_err(|e| ArchiveError::Io(e.to_string()))?;
+        let file = dir.join(inner.rsplit('/').next().unwrap_or(inner));
+        let pw = self.password(&parent.shown);
+        let obs = FirstError::default();
+        let res = extract(
+            &parent.archive,
+            parent.kind,
+            &[inner.to_string()],
+            &dir,
+            pw.as_deref(),
+            &obs,
+        )
+        .and_then(|_| match obs.0.lock().unwrap().take() {
+            Some(msg) => Err(ArchiveError::Io(msg)),
+            None if !file.is_file() => {
+                Err(ArchiveError::Io(format!("{inner} could not be extracted")))
+            }
+            None => Ok(()),
+        });
+        if let Err(e) = res {
+            self.cleanup_dir(&dir);
+            return Err(e);
+        }
+        st.map.insert(
+            key,
+            NestedSlot {
+                parent_kind: parent.kind,
+                parent_stamp: stamp,
+                dir,
+                file: file.clone(),
+                used: tick,
+            },
+        );
+        while st.map.len() > NESTED_MAX {
+            let Some(oldest) = st
+                .map
+                .iter()
+                .min_by_key(|(_, s)| s.used)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            for d in st.forget(&oldest) {
+                self.cleanup_dir(&d);
+            }
+        }
+        Ok(file)
+    }
+
+    /// After `file` was rewritten: when it is the temp copy of a nested archive, writes it
+    /// back into the archive holding it, and so on up to the outermost archive. A failed
+    /// write-back drops the copy, so the next access extracts it again from what the outer
+    /// archive really holds. Not cancellable: the inner archive is already written.
+    fn write_back(&self, file: &Path) -> Result<(), ArchiveError> {
+        let mut file = file.to_path_buf();
+        loop {
+            let found = {
+                let st = self.nested.lock().unwrap();
+                st.map
+                    .iter()
+                    .find(|(_, s)| s.file == file)
+                    .map(|(k, s)| (k.clone(), s.parent_kind))
+            };
+            let Some((key, kind)) = found else {
+                return Ok(());
+            };
+            let edit = Edit::Add {
+                src: file.clone(),
+                inner: key.1.clone(),
+            };
+            let res = rewrite(&key.0, kind, &[edit], &self.cache, &NullObserver)
+                .and_then(|_| stat_key(&key.0));
+            let mut st = self.nested.lock().unwrap();
+            match res {
+                Ok(stamp) => {
+                    if let Some(s) = st.map.get_mut(&key) {
+                        s.parent_stamp = stamp;
+                    }
+                }
+                Err(e) => {
+                    let dirs = st.forget(&key);
+                    drop(st);
+                    for d in dirs {
+                        self.cleanup_dir(&d);
+                    }
+                    return Err(e);
+                }
+            }
+            file = key.0;
+        }
+    }
+}
+
+/// `rewrite`, and for an archive inside another one the write-back into the outer archives.
+pub(crate) fn rewrite_in(
+    ctx: &Ctx,
+    archive: &Path,
+    kind: ArchiveKind,
+    edits: &[Edit],
+    obs: &dyn OpObserver,
+) -> Result<(), ArchiveError> {
+    rewrite(archive, kind, edits, &ctx.cache, obs)?;
+    ctx.write_back(archive)
+}
+
+/// Why `resolve` failed, and in which archive (as the user sees it).
+#[derive(Debug)]
+pub(crate) struct Unresolved {
+    pub err: ArchiveError,
+    pub archive: PathBuf,
+}
+
+impl Unresolved {
+    pub(crate) fn message(&self) -> String {
+        archive_error_message(&self.err, &self.archive)
+    }
+    pub(crate) fn op_error(self) -> OpError {
+        archive_op_error(self.err, &self.archive)
+    }
+}
+
+/// `split_location` that also enters archives inside archives (`outer.zip/inner.tar.gz/d`):
+/// each nested archive on the way is taken out to a temp copy, and the result names the
+/// innermost archive (`shown` is its path as the user sees it). With `enter`, a nested archive
+/// at the very end of `loc` is entered (its root); without, it stays an item of the archive
+/// holding it, as an archive file in a local folder is a local item.
+pub(crate) fn resolve(ctx: &Ctx, loc: &str, enter: bool) -> Result<Option<ArchiveLoc>, Unresolved> {
+    let Some(mut a) = split_location(loc) else {
+        return Ok(None);
+    };
+    loop {
+        if a.inner.is_empty() {
+            return Ok(Some(a));
+        }
+        let fail = |err, archive: &Path| Unresolved {
+            err,
+            archive: archive.to_path_buf(),
+        };
+        let index = ctx
+            .cache
+            .get(&a.archive, a.kind)
+            .map_err(|e| fail(e, &a.shown))?;
+        let ends = a
+            .inner
+            .match_indices('/')
+            .map(|(i, _)| i)
+            .chain(enter.then_some(a.inner.len()));
+        let mut nested = None;
+        for end in ends {
+            let p = &a.inner[..end];
+            match index.find(p) {
+                Some(e) if e.is_dir => continue,
+                Some(e) if !e.is_symlink => {
+                    let name = p.rsplit('/').next().unwrap_or(p);
+                    nested = ArchiveKind::from_name(name).map(|k| (end, k));
+                    break;
+                }
+                _ => break,
+            }
+        }
+        let Some((end, kind)) = nested else {
+            return Ok(Some(a));
+        };
+        let p = &a.inner[..end];
+        let file = ctx.nested_file(&a, p).map_err(|e| fail(e, &a.shown))?;
+        a = ArchiveLoc {
+            archive: file,
+            kind,
+            inner: a.inner[end..].trim_start_matches('/').to_string(),
+            shown: a.shown.join(p),
+        };
     }
 }
 
@@ -168,15 +409,21 @@ pub(crate) fn archive_op_error(e: ArchiveError, archive: &Path) -> OpError {
 }
 
 /// An archive location with a non-empty inner path; the archive file itself is a local item.
+/// By name only: a nested archive is not entered (see `resolve_item`).
 fn inner_loc(loc: &str) -> Option<ArchiveLoc> {
     split_location(loc).filter(|a| !a.inner.is_empty())
 }
 
+/// An item inside an archive (nested ones entered on the way); `None` for a local item.
+pub(crate) fn resolve_item(ctx: &Ctx, loc: &str) -> Result<Option<ArchiveLoc>, Unresolved> {
+    Ok(resolve(ctx, loc, false)?.filter(|a| !a.inner.is_empty()))
+}
+
 fn join_inner(a: &ArchiveLoc, inner: &str) -> String {
     if inner.is_empty() {
-        a.archive.to_string_lossy().into_owned()
+        a.shown.to_string_lossy().into_owned()
     } else {
-        format!("{}/{inner}", a.archive.to_string_lossy())
+        format!("{}/{inner}", a.shown.to_string_lossy())
     }
 }
 
@@ -193,11 +440,15 @@ pub fn list(ctx: &Ctx, loc: &str) -> Result<Vec<Entry>, ListError> {
             sort_entries(&mut v);
             Ok(v)
         }
-        Loc::Archive(a) => {
-            let index = ctx.cache.get(&a.archive, a.kind).map_err(|e| {
+        Loc::Archive(_) => {
+            let cannot = |e: &dyn std::fmt::Display| {
                 log::warn!("cannot list {loc}: {e}");
                 ListError::Io(loc.to_string())
-            })?;
+            };
+            let a = resolve(ctx, loc, true)
+                .map_err(|u| cannot(&u.message()))?
+                .ok_or_else(|| ListError::NotFound(loc.to_string()))?;
+            let index = ctx.cache.get(&a.archive, a.kind).map_err(|e| cannot(&e))?;
             list_inner(&index, &a.inner)
         }
     }
@@ -209,13 +460,17 @@ pub fn nearest(ctx: &Ctx, loc: &str, home: &Path) -> String {
     if let Some(r) = parse_remote(loc) {
         return nearest_remote(ctx, &r, loc);
     }
-    let Some(a) = split_location(loc) else {
-        return crate::config::restore_path(loc, home)
-            .to_string_lossy()
-            .into_owned();
+    let a = match resolve(ctx, loc, true) {
+        Ok(Some(a)) => a,
+        Ok(None) => {
+            return crate::config::restore_path(loc, home)
+                .to_string_lossy()
+                .into_owned()
+        }
+        Err(u) => return u.archive.to_string_lossy().into_owned(),
     };
     let Ok(index) = ctx.cache.get(&a.archive, a.kind) else {
-        return a.archive.to_string_lossy().into_owned();
+        return join_inner(&a, "");
     };
     let mut inner = a.inner.as_str();
     while !inner.is_empty() && !index.find(inner).is_some_and(|e| e.is_dir) {
@@ -316,7 +571,8 @@ pub fn dir_size(ctx: &Ctx, loc: &str, cancel: &AtomicBool) -> io::Result<(u64, u
             },
         );
     }
-    match inner_loc(loc) {
+    let item = resolve_item(ctx, loc).map_err(|u| io::Error::other(u.message()))?;
+    match item {
         None => ops::dir_size(Path::new(loc), cancel),
         Some(a) => {
             if cancel.load(Ordering::Relaxed) {
@@ -325,7 +581,7 @@ pub fn dir_size(ctx: &Ctx, loc: &str, cancel: &AtomicBool) -> io::Result<(u64, u
             let index = ctx
                 .cache
                 .get(&a.archive, a.kind)
-                .map_err(|e| io::Error::other(archive_error_message(&e, &a.archive)))?;
+                .map_err(|e| io::Error::other(archive_error_message(&e, &a.shown)))?;
             size_in(&index, &a.inner)
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("not found: {loc}")))
         }
@@ -347,7 +603,7 @@ pub fn mkdir(ctx: &Ctx, parent: &str, name: &str) -> Result<String, String> {
         remote_call(ctx, &r, |fs| fs.mkdir(&path)).map_err(|e| e.to_string())?;
         return Ok(crate::remote::format_remote(&r.scheme, &r.server, &path));
     }
-    match split_location(parent) {
+    match resolve(ctx, parent, true).map_err(|u| u.message())? {
         None => ops::mkdir(Path::new(parent), name)
             .map(|p| p.to_string_lossy().into_owned())
             .map_err(|e| e.to_string()),
@@ -358,16 +614,16 @@ pub fn mkdir(ctx: &Ctx, parent: &str, name: &str) -> Result<String, String> {
             } else {
                 format!("{}/{name}", a.inner)
             };
-            rewrite(
+            rewrite_in(
+                ctx,
                 &a.archive,
                 a.kind,
                 &[Edit::Mkdir {
                     inner: inner.clone(),
                 }],
-                &ctx.cache,
                 &NullObserver,
             )
-            .map_err(|e| archive_error_message(&e, &a.archive))?;
+            .map_err(|e| archive_error_message(&e, &a.shown))?;
             Ok(join_inner(&a, &inner))
         }
     }
@@ -380,7 +636,7 @@ pub fn rename(ctx: &Ctx, loc: &str, new_name: &str) -> Result<String, String> {
         remote_call(ctx, &r, |fs| fs.rename(&r.path, &to)).map_err(|e| e.to_string())?;
         return Ok(crate::remote::format_remote(&r.scheme, &r.server, &to));
     }
-    match inner_loc(loc) {
+    match resolve_item(ctx, loc).map_err(|u| u.message())? {
         None => ops::rename(Path::new(loc), new_name)
             .map(|p| p.to_string_lossy().into_owned())
             .map_err(|e| e.to_string()),
@@ -392,17 +648,17 @@ pub fn rename(ctx: &Ctx, loc: &str, new_name: &str) -> Result<String, String> {
             } else {
                 format!("{parent}/{new_name}")
             };
-            rewrite(
+            rewrite_in(
+                ctx,
                 &a.archive,
                 a.kind,
                 &[Edit::Rename {
                     from: a.inner.clone(),
                     to: to.clone(),
                 }],
-                &ctx.cache,
                 &NullObserver,
             )
-            .map_err(|e| archive_error_message(&e, &a.archive))?;
+            .map_err(|e| archive_error_message(&e, &a.shown))?;
             Ok(join_inner(&a, &to))
         }
     }
@@ -419,7 +675,11 @@ pub fn delete(
     if locs.iter().any(|l| parse_remote(l).is_some()) {
         return delete_remote(ctx, locs, obs);
     }
-    let parsed: Vec<Option<ArchiveLoc>> = locs.iter().map(|l| inner_loc(l)).collect();
+    let parsed: Vec<Option<ArchiveLoc>> = locs
+        .iter()
+        .map(|l| resolve_item(ctx, l))
+        .collect::<Result<_, _>>()
+        .map_err(Unresolved::op_error)?;
     if parsed.iter().all(Option::is_none) {
         let paths: Vec<PathBuf> = locs.iter().map(PathBuf::from).collect();
         return ops::delete(&paths, to_trash, obs);
@@ -437,10 +697,11 @@ pub fn delete(
             summary.cancelled = true;
             break;
         }
+        let shown = &items[0].shown;
         let index = ctx
             .cache
             .get(&archive, items[0].kind)
-            .map_err(|e| archive_op_error(e, &archive))?;
+            .map_err(|e| archive_op_error(e, shown))?;
         let count: u64 = items
             .iter()
             .filter_map(|a| size_in(&index, &a.inner))
@@ -452,8 +713,8 @@ pub fn delete(
                 inner: a.inner.clone(),
             })
             .collect();
-        rewrite(&archive, items[0].kind, &edits, &ctx.cache, obs)
-            .map_err(|e| archive_op_error(e, &archive))?;
+        rewrite_in(ctx, &archive, items[0].kind, &edits, obs)
+            .map_err(|e| archive_op_error(e, shown))?;
         summary.done += count;
     }
     Ok(summary)
@@ -510,13 +771,13 @@ pub fn entry_stamp(ctx: &Ctx, loc: &str) -> Result<Option<(u64, i64)>, String> {
         let st = stat_following(ctx, &r).map_err(|e| e.to_string())?;
         return Ok(st.filter(|s| !s.is_dir).map(|s| (s.size, s.mtime)));
     }
-    let Some(a) = inner_loc(loc) else {
+    let Some(a) = resolve_item(ctx, loc).map_err(|u| u.message())? else {
         return Ok(None);
     };
     let index = ctx
         .cache
         .get(&a.archive, a.kind)
-        .map_err(|e| archive_error_message(&e, &a.archive))?;
+        .map_err(|e| archive_error_message(&e, &a.shown))?;
     Ok(index
         .find(&a.inner)
         .filter(|e| !e.is_dir)
@@ -524,10 +785,12 @@ pub fn entry_stamp(ctx: &Ctx, loc: &str) -> Result<Option<(u64, i64)>, String> {
 }
 
 /// Before writing an edited copy back to `loc` (a file inside an archive): the archive the
-/// location names must still be there. Otherwise (renamed, moved, deleted, replaced by a
-/// folder) the copy would land in a new folder named like the archive. For a server file the
-/// connection must still be open.
-pub fn check_upload_target(ctx: &Ctx, loc: &str) -> Result<(), String> {
+/// location names must still be there, and be `expected` (the archive the copy came from)
+/// when given. Otherwise (renamed, moved, deleted, replaced by a folder) the copy would land
+/// in a new folder named like the archive. For a server file the connection must still be
+/// open. A folder whose name looks like an archive (`backup.zip/real.tar`) is fine: the
+/// archive is the first real archive file on the path.
+pub fn check_upload_target(ctx: &Ctx, loc: &str, expected: Option<&Path>) -> Result<(), String> {
     if let Some(r) = parse_remote(loc) {
         return match ctx.sessions.get(&r.server) {
             Some(_) => Ok(()),
@@ -555,24 +818,44 @@ pub fn check_upload_target(ctx: &Ctx, loc: &str) -> Result<(), String> {
     } else {
         loc.to_string()
     };
-    match inner_loc(loc) {
-        Some(a) if found && a.archive == named => Ok(()),
-        _ => Err(format!(
-            "The archive {shown} no longer exists; your edited copy is kept"
-        )),
+    let gone = |what: String| {
+        Err(format!(
+            "The archive {what} no longer exists; your edited copy is kept"
+        ))
+    };
+    match (inner_loc(loc), expected) {
+        (Some(a), Some(exp)) if a.archive == exp => Ok(()),
+        (Some(_), Some(exp)) => gone(exp.display().to_string()),
+        (Some(_), None) => Ok(()),
+        (None, Some(exp)) => gone(exp.display().to_string()),
+        (None, None) => gone(shown),
     }
 }
 
 /// Local path for `loc`: a local location is returned unchanged; a file inside an archive is
 /// extracted into a new `ctx.temp_root/<prefix>-<n>` folder (removed by the caller).
 pub fn materialize(ctx: &Ctx, loc: &str, prefix: &str) -> Result<PathBuf, String> {
+    materialize_with(ctx, loc, prefix, &mut |_, _| true)
+}
+
+/// Refusal when a download was stopped through `progress`.
+pub const DOWNLOAD_CANCELLED: &str = "Download cancelled";
+
+/// `materialize`; for a server file `progress(done, total)` hears the bytes so far and stops
+/// the download (`DOWNLOAD_CANCELLED`) when it returns false.
+pub fn materialize_with(
+    ctx: &Ctx,
+    loc: &str,
+    prefix: &str,
+    progress: &mut dyn FnMut(u64, u64) -> bool,
+) -> Result<PathBuf, String> {
     if let Some(r) = parse_remote(loc) {
-        return materialize_remote(ctx, &r, prefix);
+        return materialize_remote(ctx, &r, prefix, progress);
     }
-    let Some(a) = inner_loc(loc) else {
+    let Some(a) = resolve_item(ctx, loc).map_err(|u| u.message())? else {
         return Ok(PathBuf::from(loc));
     };
-    let fail = |e: ArchiveError| archive_error_message(&e, &a.archive);
+    let fail = |e: ArchiveError| archive_error_message(&e, &a.shown);
     let index = ctx.cache.get(&a.archive, a.kind).map_err(fail)?;
     match index.find(&a.inner) {
         None => return Err(fail(ArchiveError::NotFound(a.inner.clone()))),
@@ -580,7 +863,7 @@ pub fn materialize(ctx: &Ctx, loc: &str, prefix: &str) -> Result<PathBuf, String
         Some(_) => {}
     }
     let dir = ctx.new_temp_dir(prefix).map_err(|e| e.to_string())?;
-    let pw = ctx.password(&a.archive);
+    let pw = ctx.password(&a.shown);
     let obs = FirstError::default();
     let res = extract(
         &a.archive,
@@ -652,21 +935,41 @@ fn stat_following(ctx: &Ctx, r: &RemoteLoc) -> Result<Option<RemoteStat>, Remote
 
 /// Downloads the server file `r` into a new `<prefix>-<n>` temp folder (removed by the caller
 /// on success, here on any error). A symlink is followed: the copy holds the content.
-fn materialize_remote(ctx: &Ctx, r: &RemoteLoc, prefix: &str) -> Result<PathBuf, String> {
+fn materialize_remote(
+    ctx: &Ctx,
+    r: &RemoteLoc,
+    prefix: &str,
+    progress: &mut dyn FnMut(u64, u64) -> bool,
+) -> Result<PathBuf, String> {
     let st = stat_following(ctx, r).map_err(|e| e.to_string())?;
-    match st {
+    let total = match st {
         None => return Err(RemoteError::NotFound(r.path.clone()).to_string()),
         Some(s) if s.is_dir => return Err("Only files can be opened from a server".into()),
-        Some(_) => {}
-    }
+        Some(s) => s.size,
+    };
+    let mut done = 0u64;
+    let mut stopped = false;
     let dir = ctx.new_temp_dir(prefix).map_err(|e| e.to_string())?;
     let name = r.path.rsplit('/').next().unwrap_or(&r.path);
     let path = dir.join(name);
     let res = fs::File::create(&path)
         .map_err(|e| e.to_string())
         .and_then(|mut f| {
-            remote_call(ctx, r, |fs| fs.read_to(&r.path, &mut f, &mut |_| true))
-                .map_err(|e| e.to_string())
+            remote_call(ctx, r, |fs| {
+                fs.read_to(&r.path, &mut f, &mut |n| {
+                    done += n;
+                    let go = progress(done, total);
+                    stopped |= !go;
+                    go
+                })
+            })
+            .map_err(|e| {
+                if stopped {
+                    DOWNLOAD_CANCELLED.to_string()
+                } else {
+                    e.to_string()
+                }
+            })
         });
     match res {
         Ok(()) => Ok(path),
@@ -998,13 +1301,16 @@ mod tests {
         zip_with_d(t.path());
         let tp = s(t.path());
         let c = ctx(t.path());
+        let a_zip = t.path().join("a.zip");
         assert_eq!(
-            check_upload_target(&c, &format!("{tp}/a.zip/d/b.txt")),
+            check_upload_target(&c, &format!("{tp}/a.zip/d/b.txt"), Some(&a_zip)),
             Ok(())
         );
         let gone = |loc: &str, archive: &str| {
+            let exp = PathBuf::from(archive);
+            let exp = (archive != format!("{tp}/x.txt")).then_some(exp);
             assert_eq!(
-                check_upload_target(&c, loc),
+                check_upload_target(&c, loc, exp.as_deref()),
                 Err(format!(
                     "The archive {archive} no longer exists; your edited copy is kept"
                 ))
@@ -1022,6 +1328,23 @@ mod tests {
             &format!("{tp}/a.zip"),
         );
         gone(&format!("{tp}/x.txt"), &format!("{tp}/x.txt"));
+    }
+
+    #[test]
+    fn upload_into_an_archive_inside_a_folder_named_like_an_archive() {
+        let t = tempfile::tempdir().unwrap();
+        fs::create_dir(t.path().join("backup.zip")).unwrap();
+        let real = t.path().join("backup.zip/real.tar");
+        let mut b = tar::Builder::new(fs::File::create(&real).unwrap());
+        let mut h = tar::Header::new_gnu();
+        h.set_mode(0o644);
+        h.set_size(1);
+        b.append_data(&mut h, "f.txt", &b"x"[..]).unwrap();
+        b.into_inner().unwrap();
+        let c = ctx(t.path());
+        let loc = format!("{}/f.txt", s(&real));
+        assert_eq!(check_upload_target(&c, &loc, Some(&real)), Ok(()));
+        assert_eq!(check_upload_target(&c, &loc, None), Ok(()));
     }
 
     #[test]
@@ -1162,8 +1485,8 @@ mod tests {
     fn check_upload_target_needs_session() {
         let t = tempfile::tempdir().unwrap();
         let (c, _m) = remote_ctx(t.path());
-        assert_eq!(check_upload_target(&c, "sftp://m/x/f"), Ok(()));
-        let e = check_upload_target(&c, "sftp://gone/x/f").unwrap_err();
+        assert_eq!(check_upload_target(&c, "sftp://m/x/f", None), Ok(()));
+        let e = check_upload_target(&c, "sftp://gone/x/f", None).unwrap_err();
         assert!(e.contains("your edited copy is kept"), "{e}");
         assert!(e.contains("Not connected to gone"), "{e}");
     }
@@ -1219,6 +1542,157 @@ mod tests {
                 .map(|r| r.count())
                 .unwrap_or(0),
             0
+        );
+    }
+
+    /// Names in `loc`, sorted, read with a context of its own (so from disk).
+    fn fresh_names(t: &Path, loc: &str) -> Vec<String> {
+        let c = Ctx::new(t.join("tmp-fresh"));
+        let mut v = names(&list(&c, loc).unwrap());
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn nested_archive_browse_and_edit() {
+        for (outer, inner) in [
+            ("o.zip", "i.tar.gz"),
+            ("o.tar", "i.7z"),
+            ("o.7z", "i.zip"),
+            ("o.tgz", "i.tar"),
+        ] {
+            let t = tempfile::tempdir().unwrap();
+            let tp = s(t.path());
+            make_nested(
+                t.path(),
+                outer,
+                inner,
+                &[("d/a.txt", Some(b"aaa")), ("b.txt", Some(b"bb"))],
+            );
+            let n = format!("{tp}/{outer}/docs/{inner}");
+            let c = ctx(t.path());
+            assert_eq!(
+                names(&list(&c, &n).unwrap()),
+                ["d", "b.txt"],
+                "{outer}/{inner}"
+            );
+            assert_eq!(names(&list(&c, &format!("{n}/d")).unwrap()), ["a.txt"]);
+            let p = materialize(&c, &format!("{n}/d/a.txt"), "view").unwrap();
+            assert_eq!(fs::read(&p).unwrap(), b"aaa");
+            // The nested archive itself stays an item of the outer one.
+            let no = AtomicBool::new(false);
+            assert_eq!(dir_size(&c, &n, &no).unwrap().1, 1);
+            assert_eq!(dir_size(&c, &format!("{n}/d"), &no).unwrap(), (3, 1));
+            assert_eq!(
+                nearest(&c, &format!("{n}/d/gone"), t.path()),
+                format!("{n}/d")
+            );
+            assert!(entry_stamp(&c, &format!("{n}/b.txt")).unwrap().is_some());
+            assert_eq!(mkdir(&c, &n, "m").unwrap(), format!("{n}/m"));
+            assert_eq!(
+                rename(&c, &format!("{n}/b.txt"), "c.txt").unwrap(),
+                format!("{n}/c.txt")
+            );
+            let r = delete(&c, &[format!("{n}/d/a.txt")], false, &NullObserver).unwrap();
+            assert_eq!(r.done, 1);
+            // Written back into the outer archive file.
+            let got = fresh_names(t.path(), &n);
+            assert!(
+                got.contains(&"c.txt".into()) && got.contains(&"m".into()),
+                "{got:?}"
+            );
+            assert!(!got.contains(&"b.txt".into()), "{got:?}");
+            let d = Ctx::new(t.path().join("tmp-fresh"));
+            assert!(list(&d, &format!("{n}/d")).map_or(true, |v| v.is_empty()));
+            assert_eq!(
+                fresh_names(t.path(), &format!("{tp}/{outer}/docs")),
+                [inner, "x.txt"]
+            );
+        }
+    }
+
+    #[test]
+    fn archive_two_levels_deep() {
+        let t = tempfile::tempdir().unwrap();
+        let tp = s(t.path());
+        let mid = tempfile::tempdir().unwrap();
+        make_nested(mid.path(), "b.tar", "c.zip", &[("f.txt", Some(b"f"))]);
+        let data = fs::read(mid.path().join("b.tar")).unwrap();
+        make_zip(&t.path().join("a.zip"), &[("x/b.tar", Some(&data))]);
+        let loc = format!("{tp}/a.zip/x/b.tar/docs/c.zip");
+        let c = ctx(t.path());
+        assert_eq!(names(&list(&c, &loc).unwrap()), ["f.txt"]);
+        let first = resolve(&c, &loc, true).unwrap().unwrap();
+        assert!(first.is_nested());
+        assert_eq!(first.shown, PathBuf::from(&loc));
+        assert_eq!(first.inner, "");
+        // The copies are reused while the outer archive is unchanged.
+        assert_eq!(resolve(&c, &loc, true).unwrap().unwrap(), first);
+        rename(&c, &format!("{loc}/f.txt"), "g.txt").unwrap();
+        assert_eq!(fresh_names(t.path(), &loc), ["g.txt"]);
+        assert_eq!(
+            fresh_names(t.path(), &format!("{tp}/a.zip/x/b.tar/docs")),
+            ["c.zip", "x.txt"]
+        );
+        // Changed by another program: taken out again.
+        let other = tempfile::tempdir().unwrap();
+        make_nested(other.path(), "b.tar", "c.zip", &[("new.txt", Some(b"n"))]);
+        let data = fs::read(other.path().join("b.tar")).unwrap();
+        make_zip(
+            &t.path().join("a.zip"),
+            &[("x/b.tar", Some(&data)), ("y", Some(b"y"))],
+        );
+        assert_eq!(names(&list(&c, &loc).unwrap()), ["new.txt"]);
+    }
+
+    #[test]
+    fn failed_write_back_leaves_the_outer_archive_and_drops_the_copy() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("ro");
+        fs::create_dir(&dir).unwrap();
+        make_nested(&dir, "o.zip", "i.zip", &[("b.txt", Some(b"b"))]);
+        let n = format!("{}/o.zip/docs/i.zip", s(&dir));
+        let c = ctx(t.path());
+        assert_eq!(names(&list(&c, &n).unwrap()), ["b.txt"]);
+        // The outer archive cannot be rewritten: its folder is read-only.
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+        let res = rename(&c, &format!("{n}/b.txt"), "c.txt");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(res.is_err(), "{res:?}");
+        assert_eq!(names(&list(&c, &n).unwrap()), ["b.txt"]);
+        assert_eq!(fresh_names(t.path(), &n), ["b.txt"]);
+    }
+
+    #[test]
+    fn nested_archive_passwords_are_per_shown_path() {
+        let t = tempfile::tempdir().unwrap();
+        let tp = s(t.path());
+        let src = tempfile::tempdir().unwrap();
+        make_zip_aes(
+            &src.path().join("i.zip"),
+            &[("s.txt", Some(b"secret"))],
+            "pw",
+        );
+        let data = fs::read(src.path().join("i.zip")).unwrap();
+        make_zip(&t.path().join("o.zip"), &[("i.zip", Some(&data))]);
+        let n = format!("{tp}/o.zip/i.zip");
+        let c = ctx(t.path());
+        assert_eq!(names(&list(&c, &n).unwrap()), ["s.txt"]);
+        let loc = format!("{n}/s.txt");
+        assert_eq!(
+            materialize(&c, &loc, "view").unwrap_err(),
+            format!("password required: {n}")
+        );
+        c.set_password(Path::new(&n), "pw".into());
+        let p = materialize(&c, &loc, "view").unwrap();
+        assert_eq!(fs::read(p).unwrap(), b"secret");
+        // An encrypted outer archive asks for its own password first.
+        make_zip_aes(&t.path().join("p.zip"), &[("i.zip", Some(&data))], "outer");
+        let n = format!("{tp}/p.zip/i.zip");
+        assert!(matches!(list(&c, &n), Err(ListError::Io(_))));
+        assert_eq!(
+            materialize(&c, &format!("{n}/s.txt"), "view").unwrap_err(),
+            format!("password required: {tp}/p.zip")
         );
     }
 }

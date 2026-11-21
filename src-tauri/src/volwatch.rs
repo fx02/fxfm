@@ -4,7 +4,7 @@ use fxfm_core::volumes::{list_volumes, Volume};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 const INTERVAL: Duration = Duration::from_secs(2);
 
@@ -24,6 +24,10 @@ pub fn start(app: AppHandle, home: PathBuf) {
                 if let Err(e) = app.emit("volumes://changed", now) {
                     eprintln!("fxfm: emit volumes://changed: {e}");
                 }
+                // Enabled search volumes that were just mounted get scanned.
+                app.state::<crate::state::AppState>()
+                    .search
+                    .volumes_changed();
             }
         }
     });

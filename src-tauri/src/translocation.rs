@@ -98,10 +98,15 @@ mod tests {
     #[test]
     fn bundle_of_finds_the_app() {
         assert_eq!(
-            bundle_of(Path::new("/x/T/AppTranslocation/A/d/fxfm.app/Contents/MacOS/fxfm")),
+            bundle_of(Path::new(
+                "/x/T/AppTranslocation/A/d/fxfm.app/Contents/MacOS/fxfm"
+            )),
             Path::new("/x/T/AppTranslocation/A/d/fxfm.app")
         );
-        assert_eq!(bundle_of(Path::new("/usr/bin/fxfm")), Path::new("/usr/bin/fxfm"));
+        assert_eq!(
+            bundle_of(Path::new("/usr/bin/fxfm")),
+            Path::new("/usr/bin/fxfm")
+        );
     }
 
     #[test]

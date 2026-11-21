@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Generates app-icon-source.png (1024x1024): a dark-blue rounded square with two white
-upright "panels" and, below them, "fxfm" in bold blocky white lowercase letters
+upright "panels" and, below them, "fxfm" in regular-weight blocky white lowercase letters
 (strokes and rounded corners). Standard library only. Then run:
   python3 src-tauri/icons/gen_app_icon.py && cargo tauri icon src-tauri/icons/app-icon-source.png
 """
@@ -12,11 +12,13 @@ N, SS = 1024, 3
 MARGIN, RADIUS = 100, 180  # macOS-style inset rounded square
 
 # Two panels (upright rectangles) above the text; the group is centred.
-PANELS = ((340, 196, 480, 466), (544, 196, 684, 466))
+PANELS = ((304, 244, 474, 574), (550, 244, 720, 574))
 PANEL_R = 24
 # Lowercase letters: ascender top, x-height top, baseline, descender bottom.
 ASC, XTOP, BASE, DESC = 560, 640, 780, 780
-STROKE = 42
+STROKE = 32
+# The letters are drawn in their own coordinates and scaled down onto the icon.
+TEXT_SCALE, TEXT_TOP = 0.65, 638  # TEXT_TOP: where ASC lands on the icon
 WIDTHS, GAP = (112, 136, 112, 196), 28  # f, x, f, m
 CORNER = 62  # outer radius of the curves
 
@@ -104,9 +106,11 @@ for _f, _w in zip((letter_f, letter_x, letter_f, letter_m), WIDTHS):
 
 
 def in_text(x, y):
-    if not (ASC <= y <= DESC):
+    u = N / 2 + (x - N / 2) / TEXT_SCALE
+    v = ASC + (y - TEXT_TOP) / TEXT_SCALE
+    if not (ASC <= v <= DESC):
         return False
-    return any(x0 <= x <= x1 and f(x, y, x0, x1) for f, x0, x1 in LETTERS)
+    return any(x0 <= u <= x1 and f(u, v, x0, x1) for f, x0, x1 in LETTERS)
 
 
 def color(x, y):

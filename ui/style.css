@@ -1,11 +1,6 @@
 :root {
-  --c-normal: #ffffff;
-  --c-hidden: #9a9a9a;
-  --c-archive: #ff6a4d;
-  --c-media: #8a8aff;
-  --c-marked: #ff4d4d;
+  --c-font: #ffffff;
   --c-background: #000000;
-  --c-cursor: #555555;
   --font-size: 17px;
   --row-h: 25px;
   --chrome: #f0f0f0;
@@ -134,7 +129,7 @@ html, body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  color: var(--c-normal);
+  color: var(--c-font);
 }
 
 .r i {
@@ -143,16 +138,14 @@ html, body {
   width: 1.3em;
 }
 
-.r.hid { color: var(--c-hidden); }
-.r.arc { color: var(--c-archive); }
-.r.med { color: var(--c-media); }
-.r.mark { color: var(--c-marked); font-weight: 600; }
-/* Cursor row: filled with an accent bar in the active panel, only outlined in the other one,
-   so the active side is obvious at a glance (also after the window regains focus). */
-.pane.active .r.sel { background: var(--c-cursor); box-shadow: inset 4px 0 0 var(--active); }
-.pane:not(.active) .r.sel { background: transparent; outline: 1px dashed #8a8a8a; outline-offset: -1px; }
+/* Row text, background and cursor bar / frame colors are inline styles from `rowStyle` (lib.mjs):
+   the active panel's cursor is a bar or a frame (Configuration → Colors), the inactive one's
+   only a dashed frame, so the active side is obvious at a glance. */
+.r.mark { font-weight: 600; }
+.r.sel { outline-offset: -1px; }
+.pane.active .r.sel { box-shadow: inset 4px 0 0 var(--active); }
 .pane.active .list { box-shadow: inset 0 2px 0 var(--active); }
-.r.droptarget { outline: 2px solid var(--active); outline-offset: -2px; }
+.r.droptarget { outline: 2px solid var(--active) !important; outline-offset: -2px; }
 .rows { -webkit-user-drag: none; }
 .pane.droptarget { outline: 2px solid var(--active); outline-offset: 1px; }
 body.dragging, body.dragging * { cursor: copy !important; }
@@ -164,6 +157,24 @@ body.dragging, body.dragging * { cursor: copy !important; }
   white-space: nowrap;
   min-height: 1.3em;
 }
+
+.status { position: relative; }
+.status .quicksearch {
+  position: absolute;
+  left: 4px;
+  bottom: 100%;
+  margin-bottom: 2px;
+  padding: 1px 6px;
+  min-width: 8em;
+  background: var(--qs-bg, #ffffe1);
+  color: #000;
+  border: 1px solid #808080;
+  box-shadow: 1px 1px 3px rgba(0, 0, 0, 0.25);
+  white-space: pre;
+  z-index: 5;
+}
+.status .quicksearch.miss { color: #c00000; }
+.status .quicksearch[hidden] { display: none; }
 
 .status .n {
   flex: 1;
@@ -201,6 +212,11 @@ body.dragging, body.dragging * { cursor: copy !important; }
 .player .bar.off { visibility: hidden; }
 .player .bar > div { height: 100%; width: 0; background: var(--active); }
 .player .close { cursor: pointer; padding: 0 4px; }
+.player .pp { cursor: pointer; padding: 0 4px; min-width: 1.2em; text-align: center; }
+.player .pp:hover { background: #d0d0d0; }
+.player .pp.off { visibility: hidden; }
+.player.paused .clock, .player.paused .name { color: #777; }
+.player .vol { width: 6em; flex: none; margin: 0; }
 .player .close:hover { background: #d0d0d0; }
 
 .fkeys {
@@ -417,7 +433,9 @@ body.viewer {
 .dialog.keycfg .mods { margin-bottom: 8px; }
 .dialog.keycfg .mods .line { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
 .dialog.keycfg .mods .line span { width: 11em; }
-.dialog.optcfg { width: 600px; max-width: 94vw; }
+.dialog.keycfg .mods .hint { color: #555; font-size: 0.9em; margin: 4px 0; max-width: 46em; }
+.dialog.optcfg { width: 700px; max-width: 94vw; }
+.dialog.optcfg .body { max-height: 78vh; overflow-y: auto; }
 .keyscroll {
   max-height: 60vh;
   overflow-y: auto;
@@ -455,6 +473,22 @@ table.keys td button { min-width: 0; padding: 0 8px; }
 .dialog .colors { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; margin-bottom: 6px; }
 .dialog .colors .color { display: flex; align-items: center; gap: 6px; }
 .dialog .colors input[type="color"] { width: 36px; height: 22px; padding: 0; }
+.dialog .colors .color .opt { margin: 0 0 0 4px; }
+.colormain { display: flex; gap: 12px; align-items: flex-start; }
+.colorleft { flex: 1; min-width: 0; }
+.colorleft .line button { flex: none; }
+.colorexample { width: 190px; flex: none; }
+.colorexample .exbox { border: 1px solid #808080; font-size: var(--font-size); line-height: var(--row-h); }
+.colorexample .r.sel { box-shadow: inset 4px 0 0 var(--active); }
+
+/* Define colors by file type (looks like the hotlist dialog; rows in their own colors). */
+.dialog.typecfg { width: 640px; }
+.typelist .trow { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.typelist .trow.sel { box-shadow: inset 4px 0 0 var(--active); }
+.typelist .trow.dropover { outline: 1px dashed #fff; }
+.dialog.ruleedit { width: 520px; }
+.dialog.ruleedit .srvfield > label:first-child { width: 150px; }
+.dialog.ruleedit input[type="color"] { width: 48px; height: 24px; padding: 0; }
 .dialog fieldset input[type="radio"],
 .dialog fieldset input[type="checkbox"] { width: auto; margin: 0; }
 
@@ -494,3 +528,136 @@ table.keys td button { min-width: 0; padding: 0 8px; }
 .dialog .rwx input[type="checkbox"] { width: auto; margin: 0 auto; }
 
 .boot-error { position: fixed; inset: 0; z-index: 1000; margin: 0; padding: 16px; background: #fff; color: #a00; font: 13px/1.4 ui-monospace, monospace; white-space: pre-wrap; overflow: auto; }
+
+/* Find files (Alt+F7): its own window (search.html); the dialog box fills it. */
+.dialog.search {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.dialog.search.window {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  max-width: none;
+  box-sizing: border-box;
+  border: none;
+  box-shadow: none;
+}
+.dialog.search .body { display: flex; flex-direction: column; gap: 4px; flex: 1 1 auto; min-height: 0; }
+.dialog.search .body p { margin: 0; }
+.dialog.search .line { display: flex; align-items: center; gap: 8px; }
+.dialog.search .line > span:first-child { width: 4em; flex: none; }
+.dialog.search .line input[type="text"] { flex: 1; min-width: 0; width: auto; }
+.dialog.search .opt { display: inline-flex; align-items: center; gap: 4px; }
+.dialog.search .opt input { width: auto; margin: 0; }
+.dialog.search [hidden] { display: none !important; }
+.dialog.search .fda { display: flex; align-items: center; gap: 8px; }
+.dialog.search .fda button { min-width: 0; }
+.dialog.search .results {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 120px;
+  overflow: auto;
+  background: #fff;
+  border: 1px solid #808080;
+  margin-top: 4px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.dialog.search .fhead, .frow {
+  display: grid;
+  grid-template-columns: var(--rcols);
+  column-gap: 8px;
+  width: max-content;
+  min-width: 100%;
+  box-sizing: border-box;
+  padding: 1px 4px;
+  white-space: nowrap;
+}
+.dialog.search .fhead {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #f0f0f0;
+  border-bottom: 1px solid #b0b0b0;
+  padding-top: 2px;
+  padding-bottom: 2px;
+  cursor: default;
+}
+.dialog.search .fhead .h { position: relative; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.dialog.search .fhead .grip { position: absolute; top: -2px; bottom: -2px; right: 0; width: 6px; cursor: col-resize; border-right: 1px solid #c8c8c8; }
+.dialog.search .fhead .h.size, .frow .size { text-align: right; }
+.dialog.search .frows { width: max-content; min-width: 100%; }
+.frow { cursor: default; }
+.frow > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.frow .folder, .frow .size, .frow .date { color: #444; }
+.frow .size, .frow .date { font-variant-numeric: tabular-nums; }
+.frow.dir .name { font-weight: bold; }
+.frow.stale, .frow.stale > span { color: #999; }
+.frow.mark, .frow.mark > span { background: #c9d7f2; }
+.frow.sel, .frow.sel > span { background: var(--active); color: #fff; }
+.frow.sel.stale { background: #8aa6d6; }
+.dialog.search .colmenu {
+  position: absolute;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 10px;
+  background: #fff;
+  border: 1px solid #888;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+.dialog.search .sfoot { display: flex; align-items: center; gap: 8px; }
+.dialog.search .sfoot button { min-width: 0; flex: none; }
+.dialog.search .sstatus { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dialog.search .sstatus.msg { color: #c00000; }
+.dialog.search .buttons { align-items: center; }
+.dialog.search .buttons .hint { flex: 1; color: #555; white-space: pre; }
+
+.dialog fieldset .svol { justify-content: space-between; }
+.dialog fieldset .sex .line .path { flex: 1; margin: 0; }
+.dialog fieldset .sdenied .path { margin: 1px 0; font-size: 0.9em; }
+
+/* Multi-rename (Ctrl+M). */
+.dialog.mrename {
+  width: 900px;
+  max-width: 96vw;
+  height: 76vh;
+  max-height: 96vh;
+  min-width: 560px;
+  min-height: 380px;
+  display: flex;
+  flex-direction: column;
+  resize: both;
+  overflow: hidden;
+}
+.dialog.mrename .body { display: flex; flex-direction: column; gap: 6px; flex: 1 1 auto; min-height: 0; }
+.dialog.mrename .body p { margin: 0; }
+.dialog.mrename .line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.dialog.mrename .line > span:first-child { width: 4.5em; flex: none; }
+.dialog.mrename .line .lbl { flex: none; margin-left: 6px; }
+.dialog.mrename .line select { flex: 0 1 auto; }
+.dialog.mrename .line button { min-width: 0; }
+.dialog.mrename .line input[type="text"] { flex: 1; min-width: 6em; width: auto; }
+.dialog.mrename .line input.short { flex: 0 0 7em; }
+.dialog.mrename .line input.num { flex: 0 0 3.5em; min-width: 0; }
+.dialog.mrename .opt { display: inline-flex; align-items: center; gap: 4px; }
+.dialog.mrename .opt input { width: auto; margin: 0; }
+.dialog.mrename .note { color: #555; font-size: 0.9em; white-space: pre-wrap; }
+.dialog.mrename .mrlist { flex: 1 1 auto; min-height: 120px; overflow: auto; background: #fff; border: 1px solid #808080; user-select: none; -webkit-user-select: none; }
+.mrrow { display: grid; grid-template-columns: 1fr 1fr; column-gap: 12px; padding: 1px 4px; white-space: nowrap; }
+.mrrow > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.mrrow.head { position: sticky; top: 0; background: #f0f0f0; border-bottom: 1px solid #b0b0b0; }
+.mrrow.changed > span:last-child { color: #0645ad; }
+.mrrow.bad > span:last-child { color: #c00000; }
+.dialog.mrename .sstatus { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dialog.mrename .sstatus.msg { color: #c00000; }
+.dialog.mrename .buttons .spacer { flex: 1; }
+.dialog.mrename [hidden] { display: none !important; }
+
+/* Downloading an archive from a server. */
+.dlbar { height: 6px; background: #d0d0d0; margin-top: 6px; }
+.dlbar > div { height: 100%; width: 0; background: var(--active); }

@@ -25,13 +25,9 @@ pub(crate) fn io_err(e: &io::Error, path: &Path) -> ArchiveError {
 pub fn read_index(path: &Path, kind: ArchiveKind) -> Result<ArchiveIndex, ArchiveError> {
     let raw = match kind {
         ArchiveKind::Zip => read_zip(path)?,
-        ArchiveKind::Tar => {
+        k @ (ArchiveKind::Tar | ArchiveKind::TarGz | ArchiveKind::TarBz2 | ArchiveKind::TarXz) => {
             let f = File::open(path).map_err(|e| io_err(&e, path))?;
-            read_tar(BufReader::new(f))?
-        }
-        ArchiveKind::TarGz => {
-            let f = File::open(path).map_err(|e| io_err(&e, path))?;
-            read_tar(flate2::read::GzDecoder::new(BufReader::new(f)))?
+            read_tar(super::tar_decoder(k, BufReader::new(f)))?
         }
         ArchiveKind::Gz => read_gz(path)?,
         ArchiveKind::SevenZ => read_7z(path)?,
@@ -640,17 +636,9 @@ pub fn extract(
     };
     match kind {
         ArchiveKind::Zip => extract_zip(path, &sel, password, &mut sink)?,
-        ArchiveKind::Tar => {
+        k @ (ArchiveKind::Tar | ArchiveKind::TarGz | ArchiveKind::TarBz2 | ArchiveKind::TarXz) => {
             let f = File::open(path).map_err(|e| io_err(&e, path))?;
-            extract_tar(BufReader::new(f), &sel, &mut sink)?;
-        }
-        ArchiveKind::TarGz => {
-            let f = File::open(path).map_err(|e| io_err(&e, path))?;
-            extract_tar(
-                flate2::read::GzDecoder::new(BufReader::new(f)),
-                &sel,
-                &mut sink,
-            )?;
+            extract_tar(super::tar_decoder(k, BufReader::new(f)), &sel, &mut sink)?;
         }
         ArchiveKind::Gz => extract_gz(path, &index, &sel, &mut sink)?,
         ArchiveKind::SevenZ => extract_7z(path, &sel, &mut sink)?,

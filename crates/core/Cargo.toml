@@ -1,6 +1,6 @@
 [package]
 name = "fxfm-core"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 
 [dependencies]
@@ -19,6 +19,8 @@ rand = "0.8"
 zip = { version = "=9.4.1", default-features = false, features = ["deflate", "deflate64", "aes-crypto", "time"] }
 tar = "0.4"
 flate2 = "1"
+bzip2 = "0.6"
+lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "encoder", "optimization", "xz"] }
 sevenz-rust2 = { version = "0.25", default-features = false, features = ["compress", "bzip2", "ppmd", "util"] }
 argon2 = "0.5"
 chacha20poly1305 = "0.10"

@@ -5,11 +5,16 @@ import {
   comboFromEvent,
   comboLabel,
   conflictMessage,
+  formatDate,
   keyRows,
   MAC_KEYS,
+  QUICK_SEARCH_KEYS,
+  quickSearchMode,
   modifierChoiceError,
   outputOptions,
+  searchSettingsPatch,
 } from "./lib.mjs";
+import { colorsSection } from "./colors.js";
 import { dialog, popModal, pushModal } from "./dialogs.js";
 import { moveStorage } from "./servers.js";
 
@@ -165,6 +170,15 @@ export function configureKeyboard() {
   const current = ctx.mods();
   const altSel = keySelect(current.alt);
   const ctrlSel = keySelect(current.ctrl);
+  const fnNote = el(
+    "p",
+    "hint",
+    "Fn: on keyboards where the F-keys need Fn, Fn+F5 then gives Alt+F5 (or Ctrl+F5); switch the F-keys to standard function keys in System Settings → Keyboard. Fn shortcuts macOS uses (Fn+E, Fn+F, Fn+Q…) stay with macOS.",
+  );
+  const showFnNote = () => (fnNote.hidden = altSel.value !== "fn" && ctrlSel.value !== "fn");
+  showFnNote();
+  altSel.addEventListener("change", showFnNote);
+  ctrlSel.addEventListener("change", showFnNote);
   const modError = el("p", "error");
   modError.hidden = true;
   const modLine = (label, sel) => {
@@ -172,8 +186,33 @@ export function configureKeyboard() {
     l.append(el("span", null, label), sel);
     return l;
   };
+  // Quick search in the file list (TC Alt+letters); saved at once.
+  const qsSel = el("select");
+  for (const [id, name] of QUICK_SEARCH_KEYS) {
+    const o = el("option", null, name);
+    o.value = id;
+    qsSel.append(o);
+  }
+  qsSel.value = quickSearchMode(ctx.settings());
+  qsSel.title = "Jumps to the first name starting with the typed letters (TC Alt+letters)";
+  qsSel.addEventListener("change", async () => {
+    const settings = { ...structuredClone(ctx.settings()), quickSearch: qsSel.value };
+    try {
+      const conflicts = await ctx.invoke("save_settings", { settings });
+      ctx.applySettings(settings);
+      ctx.setConflicts(conflicts);
+    } catch (e) {
+      await message("Error", `Cannot save the quick search keys: ${e}`);
+    }
+  });
   const modBox = el("div", "mods");
-  modBox.append(modLine("Alt key (TC Alt)", altSel), modLine("Ctrl key (TC Ctrl)", ctrlSel), modError);
+  modBox.append(
+    modLine("Alt key (TC Alt)", altSel),
+    modLine("Ctrl key (TC Ctrl)", ctrlSel),
+    modLine("Quick search", qsSel),
+    fnNote,
+    modError,
+  );
   const saveMods = async () => {
     const problem = modifierChoiceError(altSel.value, ctrlSel.value);
     modError.textContent = problem ? `${problem} Not saved.` : "";
@@ -287,15 +326,21 @@ export function configureKeyboard() {
 
 // ---------------------------------------------------------------- Options
 
-const COLOR_LABELS = [
-  ["normal", "Folders and files"],
-  ["hidden", "Hidden"],
-  ["archive", "Archives"],
-  ["media", "Video / audio"],
-  ["marked", "Marked"],
-  ["background", "Background"],
-  ["cursor", "Cursor"],
-];
+/** Set while Options is open: {setStatus(status), reload()}. app.js forwards search://status and volume changes. */
+let searchLive = null;
+
+/** A `search://status` payload: the open Options dialog repaints its Search section. */
+export function optionsSearchStatus(status) {
+  searchLive?.setStatus(status);
+}
+
+/** Volumes changed: the open Options dialog re-reads the index state. */
+export function optionsSearchReload() {
+  searchLive?.reload();
+}
+
+const VOL_STATE = { building: "indexing…", ready: "up to date", stale: "stale", off: "off" };
+const NO_SEARCH_STATUS = { state: "off", entries: 0, volumes: [], denied: [], unreadable: [], fdaNeeded: false, excludeDefaults: [] };
 
 function radio(name, value, label, checked) {
   const l = el("label", "opt");
@@ -404,23 +449,8 @@ export function configureOptions() {
   };
   editor.append(line(edSystem.label), line(edApp.label, appPath, choose), line(edTerm.label, termCmd));
 
-  // Colors.
-  const colors = section("Colors");
-  const pickers = {};
-  const grid = el("div", "colors");
-  for (const [key, label] of COLOR_LABELS) {
-    const p = el("input");
-    p.type = "color";
-    p.value = work.colors[key];
-    pickers[key] = p;
-    const l = el("label", "color");
-    l.append(p, ` ${label}`);
-    grid.append(l);
-  }
-  const resetColors = button("Reset", () => {
-    for (const [key] of COLOR_LABELS) pickers[key].value = ctx.defaultColors[key];
-  });
-  colors.append(grid, resetColors);
+  // Colors: panel colors and colors by file type.
+  const colors = colorsSection(work.colors, { defaultColors: ctx.defaultColors, mods: ctx.mods });
 
   // Font size and command line.
   const view = section("View");
@@ -458,9 +488,237 @@ export function configureOptions() {
   const outputLabel = el("label", "opt", "Output device");
   audio.append(line(outputLabel, output));
 
-  body.append(storage, editor, colors, view, audio);
+  // Search: edits go to work.search (OK saves); the buttons act at once.
+  const search = section("Search");
+  const sline = (...kids) => {
+    const d = el("div", "line");
+    d.append(...kids);
+    return d;
+  };
+  const patch = (change) => {
+    work.search = searchSettingsPatch(work, change);
+  };
+  const s0 = work.search ?? {};
+  const wasOn = () => ctx.settings().search?.index === true;
+  const indexBox = el("input");
+  indexBox.type = "checkbox";
+  indexBox.checked = s0.index === true;
+  const indexLabel = el("label", "opt");
+  indexLabel.append(indexBox, " Index while fxfm is running");
+  const indexNote = el("p", "note", "Off: no index is built or used, and searches walk the chosen folder.");
+  const sInfo = el("p", "note");
+  const volsBox = el("div", "svols");
+  const exDefaults = el("p", "note");
+  const exList = el("div", "sex");
+  const exAdd = button("Add folder…", async () => {
+    const dir = await window.__TAURI__.dialog.open({ directory: true });
+    if (typeof dir === "string" && dir) {
+      patch({ addExclude: dir });
+      paintExcludes();
+    }
+  });
+  const archBox = el("input");
+  archBox.type = "checkbox";
+  archBox.checked = Boolean(s0.archives);
+  const archLabel = el("label", "opt");
+  archLabel.append(archBox, " Index files inside archives");
+  const archNote = el("p", "note", "Turning this on re-reads every indexed volume; turning it off drops the archive entries. Changing the options below re-reads only the archives they affect.");
+  const gz = el("input");
+  gz.type = "number";
+  gz.min = "1";
+  gz.value = String(s0.gzLimitMb ?? 500);
+  const gzLabel = el("label", "opt");
+  gzLabel.append("Skip tar.gz/gz larger than ", gz, " MB");
+  const netArchBox = el("input");
+  netArchBox.type = "checkbox";
+  netArchBox.checked = Boolean(s0.networkArchives);
+  const netArchLabel = el("label", "opt");
+  netArchLabel.append(netArchBox, " Also read archives on network volumes");
+  const hours = el("input");
+  hours.type = "number";
+  hours.min = "0";
+  hours.value = String(s0.networkRefreshHours ?? 24);
+  const hoursLabel = el("label", "opt");
+  hoursLabel.append("Refresh network volumes every ", hours, " hours (0 = only by hand)");
+  const deniedBox = el("div", "sdenied");
+  const rebuild = button("Rebuild index", async () => {
+    try {
+      await ctx.invoke("search_rebuild", { path: null });
+    } catch (e) {
+      await message("Search", `Cannot rebuild the index: ${e?.message ?? e}`);
+    }
+  });
 
-  const close = () => popModal(modal);
+  let sstatus = NO_SEARCH_STATUS;
+  const indexOn = () => work.search?.index === true;
+  const paintExcludes = () => {
+    exDefaults.textContent = `Always skipped: ${sstatus.excludeDefaults.join("  ")}`;
+    exDefaults.hidden = !sstatus.excludeDefaults.length;
+    exList.replaceChildren(
+      ...(work.search?.exclude ?? []).map((path) => {
+        const r = el("div", "line");
+        const t = el("span", "path", path);
+        r.append(t, button("Remove", () => {
+          patch({ removeExclude: path });
+          paintExcludes();
+        }));
+        return r;
+      }),
+    );
+  };
+  const paintStatus = () => {
+    const on = indexOn();
+    sInfo.textContent =
+      sstatus.state === "building"
+        ? "Building index…"
+        : sstatus.state === "ready"
+          ? `Index: ${sstatus.entries.toLocaleString("en-US")} files, up to date`
+          : sstatus.state === "notAsked"
+            ? "The index has not been built yet. Turn on “Index while fxfm is running” to build it."
+            : "";
+    sInfo.hidden = !sInfo.textContent;
+    rebuild.disabled = !on;
+    volsBox.replaceChildren(
+      ...sstatus.volumes.map((v) => {
+        const r = el("div", "line svol");
+        const box = el("input");
+        box.type = "checkbox";
+        const saved = work.search?.volumes?.find((x) => x.path === v.path);
+        box.checked = v.kind === "startup" ? true : (saved?.enabled ?? v.enabled);
+        box.disabled = v.kind === "startup";
+        box.title = v.kind === "startup" ? "The startup disk is always indexed" : v.path;
+        box.addEventListener("change", () => patch({ volume: { path: v.path, enabled: box.checked } }));
+        const state = on ? (VOL_STATE[v.state] ?? v.state) : "off";
+        let text = `${v.name} · ${v.kind} · ${v.entries.toLocaleString("en-US")} files · ${state}`;
+        if (v.kind === "network" && v.refreshed > 0) text += ` · last refreshed ${formatDate(v.refreshed)}`;
+        if (!v.mounted) text += " · not mounted";
+        const lab = el("label", "opt", "");
+        lab.append(box, ` ${text}`);
+        r.append(lab);
+        if (v.kind === "network") {
+          const b = button("Refresh now", async () => {
+            try {
+              await ctx.invoke("search_refresh", { path: v.path });
+            } catch (e) {
+              await message("Search", `Cannot refresh ${v.name}: ${e?.message ?? e}`);
+            }
+          });
+          b.disabled = !on || !v.mounted || !(saved?.enabled ?? v.enabled);
+          r.append(b);
+        }
+        return r;
+      }),
+    );
+    deniedBox.replaceChildren();
+    if (sstatus.denied.length) {
+      deniedBox.append(el("p", "note", "Folders macOS privacy protection blocked (skipped; Full Disk Access opens them):"));
+      for (const d of sstatus.denied) deniedBox.append(el("div", "path", d));
+      const retry = button("Retry", async () => {
+        for (const d of sstatus.denied) {
+          try {
+            await ctx.invoke("search_rebuild", { path: d });
+          } catch (e) {
+            console.error("fxfm: search_rebuild", e);
+          }
+        }
+      });
+      retry.disabled = !on;
+      deniedBox.append(retry);
+    }
+    if (sstatus.unreadable.length) {
+      deniedBox.append(el("p", "note", "Not readable (permissions; skipped):"));
+      for (const d of sstatus.unreadable) deniedBox.append(el("div", "path", d));
+    }
+    if (sstatus.fdaNeeded) {
+      deniedBox.append(
+        el("p", "note", "Some folders were skipped: Full Disk Access is needed for a complete index."),
+        button("Open Privacy settings", () => ctx.invoke("open_fda_settings").catch((e) => ctx.status(String(e)))),
+      );
+    }
+    paintExcludes();
+  };
+  const reloadStatus = () =>
+    ctx
+      .invoke("search_status")
+      .then((st) => {
+        sstatus = { ...NO_SEARCH_STATUS, ...st };
+        paintStatus();
+      })
+      .catch((e) => console.error("fxfm: search_status", e));
+  searchLive = {
+    setStatus: (st) => {
+      sstatus = { ...NO_SEARCH_STATUS, ...st };
+      paintStatus();
+    },
+    reload: reloadStatus,
+  };
+
+  indexBox.addEventListener("change", async () => {
+    if (indexBox.checked) {
+      if (!wasOn()) {
+        try {
+          await ctx.invoke("search_build");
+        } catch (e) {
+          indexBox.checked = false;
+          await message("Search", `Cannot build the index: ${e?.message ?? e}`);
+          return;
+        }
+        // The backend saved search.index = true; keep the UI's copy in step.
+        const cur = ctx.settings();
+        cur.search = { ...(cur.search ?? {}), index: true };
+      }
+      patch({ index: true });
+    } else {
+      const r = await dialog({
+        title: "Search",
+        text: "Turn off the index? Its file is deleted; searches then walk the current folder.",
+        buttons: YES_NO,
+      });
+      if (r !== "yes") {
+        indexBox.checked = true;
+        return;
+      }
+      patch({ index: false });
+    }
+    paintStatus();
+  });
+  archBox.addEventListener("change", () => patch({ archives: archBox.checked }));
+  netArchBox.addEventListener("change", () => patch({ networkArchives: netArchBox.checked }));
+  const number = (input, key) => {
+    input.addEventListener("change", () => {
+      patch({ [key]: input.value });
+      input.value = String(work.search[key]); // an invalid entry shows the kept value
+    });
+  };
+  number(gz, "gzLimitMb");
+  number(hours, "networkRefreshHours");
+  paintStatus();
+  reloadStatus();
+  search.append(
+    sline(indexLabel),
+    indexNote,
+    sInfo,
+    el("p", null, "Volumes"),
+    volsBox,
+    el("p", null, "Excluded folders"),
+    exDefaults,
+    exList,
+    sline(exAdd),
+    archLabel,
+    archNote,
+    gzLabel,
+    netArchLabel,
+    hoursLabel,
+    deniedBox,
+    sline(rebuild),
+  );
+
+  body.append(storage, search, editor, colors.el, view, audio);
+
+  const close = () => {
+    searchLive = null;
+    popModal(modal);
+  };
   const ok = async () => {
     if (edApp.input.checked && !appPath.value) return message("Options", "Choose the editor application.");
     if (edTerm.input.checked && !termCmd.value.trim()) return message("Options", "Enter the terminal command.");
@@ -469,7 +727,10 @@ export function configureOptions() {
       : edTerm.input.checked
         ? { kind: "terminal", command: termCmd.value.trim() }
         : { kind: "system" };
-    for (const [key] of COLOR_LABELS) work.colors[key] = pickers[key].value;
+    work.colors = colors.read();
+    // Enter in a number field may not fire its change event: take both values now.
+    patch({ gzLimitMb: gz.value });
+    patch({ networkRefreshHours: hours.value });
     const size = Number.parseInt(font.value, 10);
     work.fontSize = Number.isFinite(size) ? Math.min(24, Math.max(12, size)) : ctx.settings().fontSize;
     work.showCommandLine = cmdBox.checked;

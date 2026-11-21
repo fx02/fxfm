@@ -4,6 +4,7 @@ use crate::audio::{self, Player};
 use crate::editwatch::{self, EditWatch, PendingEdit};
 use crate::jobs::Jobs;
 use crate::remote::Connector;
+use crate::search;
 use crate::translocation;
 use fxfm_core::config::{SessionState, Settings, SETTINGS_FILE};
 use fxfm_core::hotlist::{Hotlist, HOTLIST_FILE};
@@ -48,6 +49,8 @@ pub struct AppState {
     pub remote: Connector,
     /// F3 audio playback.
     pub audio: Player,
+    /// Search (Alt+F7) index and searches; started in `setup`.
+    pub search: search::Service,
 }
 
 impl AppState {
@@ -82,8 +85,24 @@ impl AppState {
         let mut settings: Settings = storage::load_json(&data.dir, SETTINGS_FILE);
         // Commands added since keymap.json was saved get their free default keys.
         let keymap = fxfm_core::keymap::load_migrating(&data.dir, &mut settings);
+        let h = handle.clone();
+        let search = search::Service::new(
+            PathBuf::from("/"),
+            data.dir.clone(),
+            Arc::new(move |event: &str, payload: serde_json::Value| {
+                let Some(app) = h.get() else {
+                    return;
+                };
+                // Every window: the main window (status in Options) and Find files.
+                if let Err(e) = app.emit(event, payload) {
+                    eprintln!("fxfm: emit {event}: {e}");
+                }
+            }),
+            Arc::new(search::system_mounts),
+        );
         let audio = audio::app_player(handle.clone());
         audio.set_output(settings.audio_output.clone());
+        audio.set_volume(settings.audio_volume);
         AppState {
             vfs: Arc::new(vfs::Ctx::new(temp_root)),
             home: dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")),
@@ -103,6 +122,7 @@ impl AppState {
             handle,
             stale_edits: Mutex::new(stale_edits),
             audio,
+            search,
         }
     }
 }

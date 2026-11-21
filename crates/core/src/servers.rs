@@ -1,5 +1,8 @@
-//! Saved servers (SFTP/SCP/FTP/FTPS): a tree of entries persisted as `servers.json`.
-//! Secrets (passwords, passphrases) are never part of these structures.
+//! Saved servers (SFTP/SCP/FTP/FTPS, SMB shares): a tree of entries persisted as
+//! `servers.json`. Secrets (passwords, passphrases) are never part of these structures.
+//!
+//! SMB entries are not connected by fxfm: macOS mounts the share (see `smb_url`) and the
+//! panels browse the mount point as local files.
 
 use serde::{Deserialize, Serialize};
 use std::io::{self, Write};
@@ -15,6 +18,8 @@ pub enum Protocol {
     Scp,
     Ftp,
     Ftps,
+    /// A Windows/Samba share, mounted by macOS.
+    Smb,
 }
 
 impl Protocol {
@@ -24,6 +29,7 @@ impl Protocol {
             Protocol::Scp => "scp",
             Protocol::Ftp => "ftp",
             Protocol::Ftps => "ftps",
+            Protocol::Smb => "smb",
         }
     }
 
@@ -31,6 +37,7 @@ impl Protocol {
         match self {
             Protocol::Sftp | Protocol::Scp => 22,
             Protocol::Ftp | Protocol::Ftps => 21,
+            Protocol::Smb => 445,
         }
     }
 }
@@ -77,6 +84,13 @@ pub struct ServerEntry {
     #[serde(default = "default_true")]
     pub ftp_passive: bool,
     pub ftp_encoding: FtpEncoding,
+    /// SMB only: the share to mount (required there; empty for other protocols).
+    pub share: String,
+    /// SMB only: mount the share when fxfm starts (with the saved password; never asks).
+    pub auto_connect: bool,
+    /// SMB only: log in with the system's Kerberos ticket (`kinit` / Ticket Viewer): fxfm
+    /// never asks for, stores or sends a password for this entry.
+    pub kerberos: bool,
 }
 
 impl Default for ServerEntry {
@@ -96,6 +110,9 @@ impl Default for ServerEntry {
             legacy_algorithms: false,
             ftp_passive: true,
             ftp_encoding: FtpEncoding::Utf8,
+            share: String::new(),
+            auto_connect: false,
+            kerberos: false,
         }
     }
 }
@@ -157,6 +174,15 @@ impl ServerList {
             seen.push(&e.name);
             if e.host.trim().is_empty() {
                 return Err("Host is required".into());
+            }
+            if e.protocol == Protocol::Smb {
+                if e.share.trim().is_empty() {
+                    return Err("Share is required".into());
+                }
+                if e.share.contains('/') {
+                    return Err("Share cannot contain '/'".into());
+                }
+                continue;
             }
             if matches!(e.auth, Auth::Key | Auth::KeyPassphrase)
                 && e.key_path.as_deref().is_none_or(|p| p.trim().is_empty())
@@ -284,6 +310,155 @@ fn split_userinfo(rest: &str) -> (Option<&str>, &str) {
     }
 }
 
+// ------------------------------------------------------------------ SMB shares
+
+/// Percent-encodes everything but the URL's unreserved characters (`A-Z a-z 0-9 - . _ ~`).
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// The SMB login of a user field: a Windows domain typed as `DOMAIN\user` or `DOMAIN;user`
+/// becomes `DOMAIN;user` (what smbfs expects); a plain user stays as it is. Not encoded.
+pub fn smb_user(user: &str) -> String {
+    let user = user.trim();
+    match user.split_once(['\\', ';']) {
+        Some((domain, name)) => format!("{domain};{name}"),
+        None => user.to_string(),
+    }
+}
+
+/// The user name handed to NetFS next to the URL. With a domain this is the bare name: the
+/// domain travels in the URL (`DOMAIN;user@host`), and a `DOMAIN;user` user argument
+/// overrides the URL's user and is not taken as a domain login (owner's test 2026-11-17:
+/// `DOMAIN\user` failed, the plain name worked).
+pub fn netfs_user(user: &str) -> String {
+    let user = smb_user(user);
+    match user.split_once(';') {
+        Some((_, name)) => name.to_string(),
+        None => user,
+    }
+}
+
+/// `smb://[user@]host[:port]/share` for NetFS. The user (domain and name separately) and
+/// the share are percent-encoded; port 445 is left out. Never holds a password: NetFS gets
+/// it as a separate argument.
+pub fn smb_url(entry: &ServerEntry) -> String {
+    format!(
+        "smb:{}/{}",
+        smb_server_url(entry),
+        percent_encode(entry.share.trim())
+    )
+}
+
+/// `//[user@]host[:port]` of the entry (as in `smb_url`, without the share): the server
+/// argument of `smbutil view`. Never holds a password.
+pub fn smb_server_url(entry: &ServerEntry) -> String {
+    let user = smb_user(&entry.user);
+    let userinfo = if user.is_empty() {
+        String::new()
+    } else {
+        let enc = match user.split_once(';') {
+            Some((domain, name)) => format!("{};{}", percent_encode(domain), percent_encode(name)),
+            None => percent_encode(&user),
+        };
+        format!("{enc}@")
+    };
+    let host = entry.host.trim();
+    let host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    let port = if entry.port == 0 || entry.port == Protocol::Smb.default_port() {
+        String::new()
+    } else {
+        format!(":{}", entry.port)
+    };
+    format!("//{userinfo}{host}{port}")
+}
+
+/// `(host, share)` of an smbfs `f_mntfromname` (`//[user@]host[:port]/share`, the share
+/// percent-decoded). None for anything else, also for a mount of a folder inside a share.
+pub fn parse_mntfrom(s: &str) -> Option<(String, String)> {
+    let rest = s.strip_prefix("//")?;
+    let (authority, path) = rest.split_once('/')?;
+    let hostport = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = match hostport.strip_prefix('[') {
+        Some(v6) => v6.split_once(']')?.0,
+        None => hostport.split(':').next().unwrap_or(""),
+    };
+    let share = path.strip_suffix('/').unwrap_or(path);
+    if host.is_empty() || share.is_empty() || share.contains('/') {
+        return None;
+    }
+    Some((host.to_string(), percent_decode(share)))
+}
+
+/// A host name for comparing: lower case, without a trailing dot and without the Bonjour
+/// (`._smb._tcp.local`) or `.local` suffix, so a share mounted from Finder's sidebar
+/// (`nas._smb._tcp.local`) matches an entry for `nas.local` or `nas`.
+fn host_key(host: &str) -> String {
+    let h = host.trim().trim_end_matches('.').to_lowercase();
+    let h = h.strip_suffix("._smb._tcp.local").unwrap_or(&h);
+    h.strip_suffix(".local").unwrap_or(h).to_string()
+}
+
+/// Whether the smbfs mount from `mntfrom` is the entry's share: host (see `host_key`) and
+/// share compared case-insensitively; the user and the port do not matter.
+pub fn matches_mount(entry: &ServerEntry, mntfrom: &str) -> bool {
+    let Some((host, share)) = parse_mntfrom(mntfrom) else {
+        return false;
+    };
+    entry.protocol == Protocol::Smb
+        && host_key(&host) == host_key(&entry.host)
+        && share.to_lowercase() == entry.share.trim().to_lowercase()
+}
+
+/// `matches_mount`, also when the two sides name the host differently: one by an IP address
+/// and the other by name, or two names (an alias) that resolve to a shared address.
+/// `resolve(name)` gives the name's addresses; it is only asked when the share names already
+/// match, so a mount of another share never waits on DNS.
+pub fn matches_mount_resolving(
+    entry: &ServerEntry,
+    mntfrom: &str,
+    resolve: &dyn Fn(&str) -> Vec<std::net::IpAddr>,
+) -> bool {
+    if matches_mount(entry, mntfrom) {
+        return true;
+    }
+    let Some((host, share)) = parse_mntfrom(mntfrom) else {
+        return false;
+    };
+    if entry.protocol != Protocol::Smb || share.to_lowercase() != entry.share.trim().to_lowercase()
+    {
+        return false;
+    }
+    let ip = |h: &str| {
+        h.trim()
+            .trim_matches(['[', ']'])
+            .parse::<std::net::IpAddr>()
+            .ok()
+    };
+    match (ip(&host), ip(&entry.host)) {
+        (Some(a), None) => resolve(entry.host.trim()).contains(&a),
+        (None, Some(b)) => resolve(&host).contains(&b),
+        // Two different addresses.
+        (Some(_), Some(_)) => false,
+        (None, None) => {
+            let a = resolve(&host);
+            !a.is_empty() && resolve(entry.host.trim()).iter().any(|x| a.contains(x))
+        }
+    }
+}
+
 /// Resolves the entry's key path: absolute as is, `keys/<name>` under `data_dir`.
 pub fn key_file(entry: &ServerEntry, data_dir: &Path) -> Option<PathBuf> {
     let p = entry.key_path.as_deref().filter(|p| !p.is_empty())?;
@@ -349,6 +524,9 @@ mod tests {
             legacy_algorithms: false,
             ftp_passive: true,
             ftp_encoding: FtpEncoding::Utf8,
+            share: String::new(),
+            auto_connect: false,
+            kerberos: false,
         }
     }
 
@@ -563,5 +741,208 @@ mod tests {
         assert_eq!(key_file(&e, data.path()), Some(PathBuf::from("/abs/key")));
         e.key_path = None;
         assert_eq!(key_file(&e, data.path()), None);
+    }
+    fn smb(host: &str, user: &str, share: &str, port: u16) -> ServerEntry {
+        ServerEntry {
+            name: "nas".into(),
+            protocol: Protocol::Smb,
+            host: host.into(),
+            port,
+            user: user.into(),
+            share: share.into(),
+            ..ServerEntry::default()
+        }
+    }
+
+    #[test]
+    fn netfs_user_leaves_the_domain_to_the_url() {
+        assert_eq!(netfs_user("CORP\\ana"), "ana");
+        assert_eq!(netfs_user("CORP;ana"), "ana");
+        assert_eq!(netfs_user(" ana "), "ana");
+        assert_eq!(netfs_user(""), "");
+    }
+
+    #[test]
+    fn smb_user_domain_forms() {
+        assert_eq!(smb_user("zb"), "zb");
+        assert_eq!(smb_user(" CORP\\zb "), "CORP;zb");
+        assert_eq!(smb_user("CORP;zb"), "CORP;zb");
+        assert_eq!(smb_user(""), "");
+    }
+
+    #[test]
+    fn smb_url_variants() {
+        assert_eq!(smb_url(&smb("nas", "", "Public", 445)), "smb://nas/Public");
+        assert_eq!(smb_url(&smb("nas", "zb", "data", 445)), "smb://zb@nas/data");
+        assert_eq!(
+            smb_url(&smb("nas", "CORP\\zb", "data", 445)),
+            "smb://CORP;zb@nas/data"
+        );
+        assert_eq!(
+            smb_url(&smb("nas", "CORP;zb", "data", 445)),
+            "smb://CORP;zb@nas/data"
+        );
+        assert_eq!(
+            smb_url(&smb("10.0.0.5", "zb", "data", 1445)),
+            "smb://zb@10.0.0.5:1445/data"
+        );
+        assert_eq!(
+            smb_url(&smb("nas", "Žana Ivić", "My Files", 445)),
+            "smb://%C5%BDana%20Ivi%C4%87@nas/My%20Files"
+        );
+        assert_eq!(
+            smb_url(&smb("nas", "a@b", "x#y?z%", 445)),
+            "smb://a%40b@nas/x%23y%3Fz%25"
+        );
+        assert_eq!(smb_url(&smb("fe80::1", "", "s", 445)), "smb://[fe80::1]/s");
+        assert_eq!(smb_server_url(&smb("nas", "", "", 445)), "//nas");
+        assert_eq!(
+            smb_server_url(&smb("10.0.0.5", "CORP\\zb", "data", 1445)),
+            "//CORP;zb@10.0.0.5:1445"
+        );
+    }
+
+    #[test]
+    fn smb_url_never_holds_the_password() {
+        // The entry has no password field; a password typed into the user field by mistake
+        // is still encoded as a user, never as `user:password`.
+        let url = smb_url(&smb("nas", "zb:secret", "data", 445));
+        assert_eq!(url, "smb://zb%3Asecret@nas/data");
+        assert!(!url.contains(":secret"));
+    }
+
+    #[test]
+    fn parse_mntfrom_variants() {
+        let p = |s: &str| parse_mntfrom(s).map(|(h, s)| format!("{h}|{s}"));
+        assert_eq!(p("//zb@nas/data").as_deref(), Some("nas|data"));
+        assert_eq!(p("//nas/data/").as_deref(), Some("nas|data"));
+        assert_eq!(
+            p("//CORP;zb@nas:1445/My%20Files").as_deref(),
+            Some("nas|My Files")
+        );
+        assert_eq!(p("//GUEST:@nas/Public").as_deref(), Some("nas|Public"));
+        assert_eq!(p("//zb@[fe80::1]/s").as_deref(), Some("fe80::1|s"));
+        assert_eq!(p("//nas/data/sub"), None);
+        assert_eq!(p("/dev/disk3s1"), None);
+        assert_eq!(p("//nas/"), None);
+        assert_eq!(p("map auto_home"), None);
+    }
+
+    #[test]
+    fn matches_mount_ignores_case_user_and_encoding() {
+        let e = smb("NAS.local", "zb", "My Files", 445);
+        assert!(matches_mount(&e, "//zb@nas.local/My%20Files"));
+        assert!(matches_mount(&e, "//other@NAS.LOCAL/my%20files"));
+        assert!(matches_mount(&e, "//nas.local/MY FILES"));
+        assert!(matches_mount(&e, "//zb@nas._smb._tcp.local/My%20Files"));
+        assert!(matches_mount(&e, "//zb@nas/My%20Files"));
+        assert!(!matches_mount(&e, "//zb@nas2.local/My%20Files"));
+        assert!(!matches_mount(&e, "//zb@nas.local/Other"));
+        assert!(!matches_mount(&e, "//zb@nas.local/My%20Files/sub"));
+        let mut sftp = e.clone();
+        sftp.protocol = Protocol::Sftp;
+        assert!(!matches_mount(&sftp, "//zb@nas.local/My%20Files"));
+    }
+
+    #[test]
+    fn mounts_by_ip_match_entries_by_name_and_back() {
+        let ip: std::net::IpAddr = "192.168.1.5".parse().unwrap();
+        let resolve = move |h: &str| {
+            if h == "nas.local" {
+                vec![ip]
+            } else {
+                Vec::new()
+            }
+        };
+        let by_name = smb("nas.local", "zb", "data", 445);
+        assert!(matches_mount_resolving(
+            &by_name,
+            "//zb@192.168.1.5/data",
+            &resolve
+        ));
+        assert!(!matches_mount_resolving(
+            &by_name,
+            "//zb@192.168.1.6/data",
+            &resolve
+        ));
+        assert!(!matches_mount_resolving(
+            &by_name,
+            "//zb@192.168.1.5/other",
+            &resolve
+        ));
+        let by_ip = smb("192.168.1.5", "zb", "data", 445);
+        assert!(matches_mount_resolving(
+            &by_ip,
+            "//zb@nas.local/data",
+            &resolve
+        ));
+        // Two names for one host (an alias) match through a shared address; DNS is never
+        // asked for a mount of another share.
+        let ip6: std::net::IpAddr = "fd00::5".parse().unwrap();
+        let alias = move |h: &str| match h {
+            "nas.local" => vec![ip],
+            "files.example.com" => vec![ip6, ip],
+            "other.example.com" => vec!["192.168.1.9".parse().unwrap()],
+            _ => Vec::new(),
+        };
+        assert!(matches_mount_resolving(
+            &by_name,
+            "//zb@files.example.com/data",
+            &alias
+        ));
+        assert!(!matches_mount_resolving(
+            &by_name,
+            "//zb@other.example.com/data",
+            &alias
+        ));
+        assert!(!matches_mount_resolving(
+            &by_name,
+            "//zb@unknown.example.com/data",
+            &alias
+        ));
+        let unresolved = smb("gone.example.com", "zb", "data", 445);
+        assert!(!matches_mount_resolving(
+            &unresolved,
+            "//zb@unknown.example.com/data",
+            &alias
+        ));
+        let never = |_: &str| -> Vec<std::net::IpAddr> { panic!("no DNS for another share") };
+        assert!(!matches_mount_resolving(
+            &by_name,
+            "//zb@other.local/music",
+            &never
+        ));
+        assert!(!matches_mount_resolving(
+            &by_ip,
+            "//zb@192.168.1.6/data",
+            &never
+        ));
+    }
+
+    #[test]
+    fn smb_entries_validate_and_old_files_load() {
+        let check = |e: ServerEntry| list_of(vec![ServerNode::Server(e)]).validate();
+        assert!(check(smb("nas", "", "data", 445)).is_ok());
+        assert_eq!(
+            check(smb("nas", "", " ", 445)),
+            Err("Share is required".into())
+        );
+        assert_eq!(
+            check(smb("nas", "", "a/b", 445)),
+            Err("Share cannot contain '/'".into())
+        );
+        // A file written before SMB existed has no `share`.
+        let old: ServerList = serde_json::from_str(
+            r#"{"nodes":[{"kind":"server","id":"0123456789abcdef","name":"m","protocol":"ftp","host":"h","port":21,"user":"u","auth":"password"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(old.find_by_name("m").unwrap().share, "");
+        assert!(!old.find_by_name("m").unwrap().kerberos);
+        let e = smb("nas", "zb", "data", 445);
+        let text = serde_json::to_string(&e).unwrap();
+        assert!(text.contains(r#""protocol":"smb""#) && text.contains(r#""share":"data""#));
+        assert_eq!(serde_json::from_str::<ServerEntry>(&text).unwrap(), e);
+        assert_eq!(Protocol::Smb.scheme(), "smb");
+        assert_eq!(Protocol::Smb.default_port(), 445);
     }
 }
