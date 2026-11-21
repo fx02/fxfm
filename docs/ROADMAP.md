@@ -1,6 +1,14 @@
 # fxfm roadmap
 
 ## Next
+From the UI critique (docs/critique/UI_CRITIQUE_REPORT.md), not started:
+- Change attributes for local files (today only SFTP/SCP).
+- Folder tabs per panel.
+- Help menu with the key table (Start and Help menus are empty).
+- Quick filter (TC Ctrl+S) and folder history back/forward.
+- Undo of the last file operation.
+- Content search in Find files; directory compare/sync; operation queue; branch view; thumbnails.
+- Dialog selects in the dialog font; F8 confirmation names a single item; follow system dark mode; screen-reader labels.
 
 ## Search
 - A full rebuild briefly holds two indexes in memory (about 2x RAM) while the new one replaces the old. By design: dropping the old index first would leave searches without results for the whole scan.

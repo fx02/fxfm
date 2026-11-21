@@ -184,17 +184,17 @@ export function cmdlineKeyGoesToPanel(combo) {
   return ["Up", "Down", "PageUp", "PageDown", "Tab"].includes(combo);
 }
 
-/** 1234567 -> "1.234.567" (TC thousands separator). */
+/** 1234567 -> "1,234,567". */
 export function groupThousands(n) {
-  return String(Math.trunc(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+  return String(Math.trunc(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 }
 
-/** Bytes as TC kilobytes: floor(bytes / 1024) with dots, e.g. "288.594.048 k". */
+/** Bytes as TC kilobytes: floor(bytes / 1024) with commas, e.g. "288,594,048 k". */
 export function formatK(bytes) {
   return `${groupThousands(Math.floor(bytes / 1024))} k`;
 }
 
-/** "[Macintosh HD]  288.594.048 k of 971.350.180 k free". */
+/** "[Macintosh HD]  288,594,048 k of 971,350,180 k free". */
 export function freeLine(name, free, total) {
   return `[${name}]  ${formatK(free)} of ${formatK(total)} free`;
 }
@@ -222,7 +222,7 @@ export function formatDate(unixSecs, tz) {
   return `${p.day}.${p.month}.${p.year} ${p.hour}:${p.minute}`;
 }
 
-/** "<DIR>" for folders, otherwise the byte size with dots. */
+/** "<DIR>" for folders, otherwise the byte size with commas. */
 export function formatSize(entry) {
   return entry.isDir ? "<DIR>" : groupThousands(entry.size);
 }
@@ -394,7 +394,7 @@ export function lastComponent(loc) {
 }
 
 /**
- * TC selection summary: "4.218 k / 288.594 k in 2 / 31 file(s)", plus
+ * TC selection summary: "4,218 k / 288,594 k in 2 / 31 file(s)", plus
  * ", 1 / 3 dir(s)" when the listing has folders. Folder bytes count only
  * when computed (`dirSizes`: name -> bytes). The "[..]" row is ignored.
  */
@@ -745,7 +745,6 @@ export function feedItems(rows, marked) {
 /** Results shown by the Find files window (the backend's `limit`). */
 export const SEARCH_LIMIT = 1000;
 
-const commas = (n) => Math.trunc(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 
 /**
  * Reducer of the Find files window's results: {rows, total, done, id, pending, fresh, early, floor}.
@@ -798,14 +797,14 @@ export function searchWindowState(prev, event) {
 export function statusText({ total, shown, state, walking, entries, stale }) {
   const parts = [];
   if (total != null) {
-    let found = `${commas(total)} found`;
-    if (shown != null && total > shown) found += ` · showing first ${commas(shown)}`;
+    let found = `${groupThousands(total)} found`;
+    if (shown != null && total > shown) found += ` · showing first ${groupThousands(shown)}`;
     parts.push(found);
   }
   if (walking) parts.push("searching folder…");
   else if (state === "building") parts.push("building index…");
   else if (state === "ready" && stale) parts.push(`volume ${stale.name} last refreshed ${stale.date}`);
-  else if (state === "ready") parts.push(`index: ${commas(entries ?? 0)} files, up to date`);
+  else if (state === "ready") parts.push(`index: ${groupThousands(entries ?? 0)} files, up to date`);
   else if (state === "notAsked") parts.push("index not built");
   return parts.join(" · ");
 }
@@ -1034,7 +1033,7 @@ export function hexLines(bytes, offset) {
   return rows;
 }
 
-/** Viewer status line, e.g. `UTF-8 · 12.345 bytes (truncated)`. */
+/** Viewer status line, e.g. `UTF-8 · 12,345 bytes (truncated)`. */
 export function formatViewStatus(encoding, bytes, truncated) {
   return `${encoding} · ${groupThousands(bytes)} bytes${truncated ? " (truncated)" : ""}`;
 }

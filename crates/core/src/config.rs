@@ -218,6 +218,14 @@ pub struct Settings {
     pub editor: EditorConfig,
     pub colors: Colors,
     pub show_command_line: bool,
+    /// The drive button bar above each panel (the drive dropdown stays). Off by default.
+    pub show_drive_bar: bool,
+    /// Each panel's header: drive dropdown, free space and the path line.
+    pub show_panel_header: bool,
+    /// Each panel's status line (the quick search box still shows while typing).
+    pub show_panel_footer: bool,
+    /// The F-key bar at the bottom of the window.
+    pub show_fkey_bar: bool,
     pub font_size: u32,
     pub fda_hint_shown: bool,
     /// The first-run warning about keys macOS takes for itself was shown.
@@ -298,6 +306,10 @@ impl Default for Settings {
             editor: EditorConfig::System,
             colors: Colors::default(),
             show_command_line: true,
+            show_drive_bar: false,
+            show_panel_header: true,
+            show_panel_footer: true,
+            show_fkey_bar: true,
             font_size: 17,
             fda_hint_shown: false,
             conflict_hint_shown: false,
@@ -567,6 +579,8 @@ mod tests {
         assert_eq!(s.audio_output, None);
         assert_eq!(s.font_size, 15);
         assert!(!s.show_command_line);
+        assert!(!s.show_drive_bar);
+        assert!(s.show_panel_header && s.show_panel_footer && s.show_fkey_bar);
     }
 
     #[test]

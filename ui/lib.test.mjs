@@ -25,17 +25,17 @@ test("comboFromEvent ignores pure modifiers and unknown codes", () => {
   assert.equal(lib.comboFromEvent(e("IntlRo")), null);
 });
 
-test("formatK floors to KiB with dot separators", () => {
-  assert.equal(lib.formatK(295520305152), "288.594.048 k");
+test("formatK floors to KiB with comma separators", () => {
+  assert.equal(lib.formatK(295520305152), "288,594,048 k");
   assert.equal(lib.formatK(0), "0 k");
   assert.equal(lib.formatK(1023), "0 k");
-  assert.equal(lib.formatK(1024 * 1000), "1.000 k");
+  assert.equal(lib.formatK(1024 * 1000), "1,000 k");
 });
 
 test("freeLine", () => {
   assert.equal(
     lib.freeLine("Macintosh HD", 295520305152, 994662584320),
-    "[Macintosh HD]  288.594.048 k of 971.350.180 k free",
+    "[Macintosh HD]  288,594,048 k of 971,350,180 k free",
   );
 });
 
@@ -48,9 +48,9 @@ test("formatDate dd.MM.yyyy HH:mm in a fixed zone", () => {
 
 test("formatSize", () => {
   assert.equal(lib.formatSize({ name: "a", isDir: true, size: 96 }), "<DIR>");
-  assert.equal(lib.formatSize({ name: "a", isDir: false, size: 4218 }), "4.218");
+  assert.equal(lib.formatSize({ name: "a", isDir: false, size: 4218 }), "4,218");
   assert.equal(lib.formatSize({ name: "a", isDir: false, size: 7 }), "7");
-  assert.equal(lib.formatSize({ name: "a", isDir: false, size: 1234567 }), "1.234.567");
+  assert.equal(lib.formatSize({ name: "a", isDir: false, size: 1234567 }), "1,234,567");
 });
 
 test("formatMode", () => {
@@ -220,13 +220,13 @@ test("markSummary", () => {
   entries.push({ name: "a", isDir: false, size: 2000 });
   entries.push({ name: "b", isDir: false, size: 2319 });
   entries[1].size = 295520305152 - 4319;
-  assert.equal(lib.markSummary(entries, new Set(["a", "b"])), "4 k / 288.594.048 k in 2 / 31 file(s)");
+  assert.equal(lib.markSummary(entries, new Set(["a", "b"])), "4 k / 288,594,048 k in 2 / 31 file(s)");
   const small = entries.map((e) => ({ ...e }));
   small[1].size = 295520300 - 4319359;
   small[30].size = 4319359 - 2319;
   small[31].size = 2319;
-  assert.equal(lib.markSummary(small, new Set(["a", "b"])), "4.218 k / 288.594 k in 2 / 31 file(s)");
-  assert.equal(lib.markSummary(small, new Set()), "0 k / 288.594 k in 0 / 31 file(s)");
+  assert.equal(lib.markSummary(small, new Set(["a", "b"])), "4,218 k / 288,594 k in 2 / 31 file(s)");
+  assert.equal(lib.markSummary(small, new Set()), "0 k / 288,594 k in 0 / 31 file(s)");
 });
 
 test("markSummary counts dirs separately and uses computed dir sizes", () => {
@@ -439,7 +439,7 @@ test("hexLines: 16 bytes per row with offset and ASCII column", () => {
 });
 
 test("formatViewStatus: encoding, grouped byte count, truncated mark", () => {
-  assert.equal(lib.formatViewStatus("UTF-8", 12345, false), "UTF-8 · 12.345 bytes");
+  assert.equal(lib.formatViewStatus("UTF-8", 12345, false), "UTF-8 · 12,345 bytes");
   assert.equal(lib.formatViewStatus("windows-1250", 5, true), "windows-1250 · 5 bytes (truncated)");
 });
 
@@ -1612,7 +1612,7 @@ test("dropMissing", () => { assert.deepEqual(lib.dropMissing([{path:"/a"},{path:
 test("homeDisplay", () => { assert.equal(lib.homeDisplay("/Users/x/D/a", "/Users/x"), "~/D/a"); assert.equal(lib.homeDisplay("/Users/x", "/Users/x"), "~"); assert.equal(lib.homeDisplay("/Users/xy/a", "/Users/x"), "/Users/xy/a"); assert.equal(lib.homeDisplay("/Volumes/M/a", "/Users/x"), "/Volumes/M/a"); assert.equal(lib.homeDisplay("/a", ""), "/a"); });
 test("resultRow", () => {
   assert.deepEqual(lib.resultRow({ name: "a.txt", folder: "/Users/x/D", mtime: 0, size: 1234 }, "/Users/x"), {
-    name: "a.txt", folder: "~/D", size: "1.234", date: lib.formatDate(0),
+    name: "a.txt", folder: "~/D", size: "1,234", date: lib.formatDate(0),
   });
   assert.equal(lib.resultRow({ name: "D", folder: "/", mtime: 0, isDir: true }, "/Users/x").size, "<DIR>");
   assert.equal(lib.resultRow({ name: "x", folder: "/", mtime: 0 }, "/Users/x").size, "");

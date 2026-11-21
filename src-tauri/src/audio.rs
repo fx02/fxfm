@@ -1593,7 +1593,9 @@ mod tests {
     #[test]
     fn panic_while_playing_is_reported_and_cleaned_up() {
         let (p, factory, events) = player(true, None);
-        play(&p, "flac_8k.flac", None).unwrap();
+        let a = play(&p, "flac_8k.flac", None).unwrap();
+        // Armed only after the first file ended: armed earlier, its own last pushes may panic.
+        wait_for(&events, |e| e.id == a.id && e.state == PlayState::Ended);
         // The next file's first push panics.
         factory.sink(0).panic.store(true, Ordering::SeqCst);
         let (cleaned, cleanup) = flag();

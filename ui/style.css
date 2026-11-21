@@ -190,6 +190,12 @@ body.dragging, body.dragging * { cursor: copy !important; }
 }
 
 .cmd.off { display: none; }
+body.nodrives .drives { display: none; }
+body.nohead .pathrow, body.nohead .cur { display: none; }
+body.nofkeys .fkeys { display: none; }
+/* Without the status line the row takes no space; the quick search box (above it) still shows. */
+body.nofoot .status { height: 0; min-height: 0; padding: 0; overflow: visible; border: 0; }
+body.nofoot .status > span { display: none; }
 .cmd .prompt { white-space: nowrap; }
 .cmd input { flex: 1; font-size: var(--chrome-font); }
 
@@ -258,7 +264,7 @@ body.dragging, body.dragging * { cursor: copy !important; }
 
 .dialog .title {
   background: #fff;
-  padding: 6px 10px;
+  padding: 8px 12px;
   border-bottom: 1px solid #ccc;
 }
 
@@ -276,10 +282,25 @@ body.dragging, body.dragging * { cursor: copy !important; }
 .dialog button {
   font: inherit;
   min-width: 80px;
-  padding: 3px 10px;
+  padding: 4px 12px;
   background: #e1e1e1;
   border: 1px solid #adadad;
 }
+
+/* Native popups ignore the CSS font size in WebKit, so selects are drawn like the inputs. */
+.dialog select {
+  -webkit-appearance: none;
+  appearance: none;
+  font: inherit;
+  font-size: var(--chrome-font);
+  padding: 2px 24px 2px 4px;
+  border: 1px solid #adadad;
+  border-radius: 0;
+  background: #fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23555' stroke-width='1.5'/%3E%3C/svg%3E") no-repeat right 8px center;
+  color: inherit;
+}
+.dialog select:disabled { color: GrayText; background-color: #f0f0f0; }
+.dialog select:focus { outline: 1px dotted #000; border-color: #0078d7; }
 
 .dialog button:focus { outline: 1px dotted #000; border-color: #0078d7; }
 
@@ -403,7 +424,7 @@ body.viewer {
 .hotleft { flex: 1; min-width: 0; }
 .hothead { display: flex; align-items: center; gap: 4px; margin-bottom: 2px; }
 .hothead > span:first-child { flex: 1; }
-.hothead .mv { min-width: 0; padding: 0 6px; }
+.hothead .mv { min-width: 0; padding: 0 8px; }
 .hothead .count { min-width: 2ch; text-align: right; }
 .hotlist {
   height: 250px;
@@ -416,14 +437,14 @@ body.viewer {
 .hrow { padding: 1px 4px; white-space: pre; cursor: default; }
 .hrow.sel { background: var(--active); color: #fff; }
 .hrow.dropover { outline: 1px dashed #000; outline-offset: -1px; }
-.hotfield { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.hotfield { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .hotfield > label:first-child { width: 90px; }
 .hotfield input[type="text"] { flex: 1; min-width: 0; font-size: var(--chrome-font); }
 .hotfield .browse { min-width: 0; padding: 1px 8px; }
 .hotfield.hide label { flex: none; }
 .hotfield.hide .hidechar { flex: none; width: 2.2ch; text-align: center; }
 .hotnote { margin-top: 2px; }
-.hotbtns { display: flex; flex-direction: column; gap: 6px; width: 130px; padding-top: 18px; }
+.hotbtns { display: flex; flex-direction: column; gap: 8px; width: 130px; padding-top: 20px; }
 .hotbtns button { width: 100%; }
 .hotbtns .gap { height: 24px; }
 .hotbtns .def { border-color: #0078d7; }
@@ -431,7 +452,7 @@ body.viewer {
 /* Configuration → Keyboard / Options. */
 .dialog.keycfg { width: 640px; max-width: 94vw; }
 .dialog.keycfg .mods { margin-bottom: 8px; }
-.dialog.keycfg .mods .line { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+.dialog.keycfg .mods .line { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
 .dialog.keycfg .mods .line span { width: 11em; }
 .dialog.keycfg .mods .hint { color: #555; font-size: 0.9em; margin: 4px 0; max-width: 46em; }
 .dialog.optcfg { width: 700px; max-width: 94vw; }
@@ -443,8 +464,8 @@ body.viewer {
   border: 1px solid #808080;
 }
 table.keys { width: 100%; border-collapse: collapse; }
-table.keys th { position: sticky; top: 0; background: #e6e6e6; text-align: left; padding: 2px 6px; font-weight: normal; }
-table.keys td { padding: 2px 6px; border-top: 1px solid #eee; vertical-align: middle; }
+table.keys th { position: sticky; top: 0; background: #e6e6e6; text-align: left; padding: 2px 8px; font-weight: normal; }
+table.keys td { padding: 2px 8px; border-top: 1px solid #eee; vertical-align: middle; }
 table.keys td:last-child { text-align: right; white-space: nowrap; }
 table.keys td button { min-width: 0; padding: 0 8px; }
 .chip {
@@ -452,26 +473,26 @@ table.keys td button { min-width: 0; padding: 0 8px; }
   align-items: center;
   gap: 2px;
   margin: 1px 4px 1px 0;
-  padding: 0 0 0 6px;
+  padding: 0 0 0 8px;
   background: #e8eef8;
   border: 1px solid #a8b8d8;
   border-radius: 3px;
   white-space: nowrap;
 }
-.chip button.x { min-width: 0; padding: 0 5px; border: 0; background: transparent; }
+.chip button.x { min-width: 0; padding: 0 4px; border: 0; background: transparent; }
 .warn { background: #fff4b8; border: 1px solid #d8c060; padding: 8px; margin-bottom: 8px; }
-.warn p { margin: 0 0 6px; }
+.warn p { margin: 0 0 8px; }
 .dialog.capture .keyname { font-weight: bold; }
 .dialog .note { color: #555; }
 .dialog fieldset { border: 1px solid #c8c8c8; margin: 0 0 8px; padding: 4px 8px 8px; }
-.dialog fieldset .line { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+.dialog fieldset .line { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
 .dialog fieldset .line input[type="text"] { flex: 1; min-width: 0; width: auto; }
 .dialog fieldset .line select { flex: 1; min-width: 0; }
-.dialog fieldset .opt { display: flex; align-items: center; gap: 4px; margin: 3px 0; }
+.dialog fieldset .opt { display: flex; align-items: center; gap: 4px; margin: 4px 0; }
 .dialog fieldset .opt input[type="number"] { width: 5em; }
 .dialog fieldset .path { margin: 4px 0; overflow-wrap: anywhere; }
-.dialog .colors { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; margin-bottom: 6px; }
-.dialog .colors .color { display: flex; align-items: center; gap: 6px; }
+.dialog .colors { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; margin-bottom: 8px; }
+.dialog .colors .color { display: flex; align-items: center; gap: 8px; }
 .dialog .colors input[type="color"] { width: 36px; height: 22px; padding: 0; }
 .dialog .colors .color .opt { margin: 0 0 0 4px; }
 .colormain { display: flex; gap: 12px; align-items: flex-start; }
@@ -501,7 +522,7 @@ table.keys td button { min-width: 0; padding: 0 8px; }
 .dialog .check input[type="checkbox"] { width: auto; margin: 0; }
 .dialog.srvcfg { width: 600px; }
 .dialog.pack { width: 520px; max-width: 94vw; }
-.dialog.pack .line { display: flex; align-items: center; gap: 6px; margin: 6px 0 0; }
+.dialog.pack .line { display: flex; align-items: center; gap: 8px; margin: 8px 0 0; }
 .dialog.pack .line span { width: 9em; flex: none; }
 .dialog.pack .line input, .dialog.pack .line select { flex: 1; min-width: 0; width: auto; }
 .dialog.pack .pw[hidden] { display: none; }
@@ -510,7 +531,7 @@ table.keys td button { min-width: 0; padding: 0 8px; }
 .srow .twisty { display: inline-block; width: 1.2em; text-align: center; }
 .dialog.srvask { width: 380px; }
 .dialog.srvedit { width: 520px; }
-.srvfield { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.srvfield { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .srvfield[hidden] { display: none; }
 .srvfield > label:first-child { width: 110px; flex: none; }
 .dialog .srvfield input[type="text"],
@@ -605,7 +626,7 @@ table.keys td button { min-width: 0; padding: 0 8px; }
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 6px 10px;
+  padding: 8px 12px;
   background: #fff;
   border: 1px solid #888;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
@@ -623,7 +644,7 @@ table.keys td button { min-width: 0; padding: 0 8px; }
 
 /* Multi-rename (Ctrl+M). */
 .dialog.mrename {
-  width: 900px;
+  width: 980px;
   max-width: 96vw;
   height: 76vh;
   max-height: 96vh;
@@ -634,11 +655,11 @@ table.keys td button { min-width: 0; padding: 0 8px; }
   resize: both;
   overflow: hidden;
 }
-.dialog.mrename .body { display: flex; flex-direction: column; gap: 6px; flex: 1 1 auto; min-height: 0; }
+.dialog.mrename .body { display: flex; flex-direction: column; gap: 8px; flex: 1 1 auto; min-height: 0; }
 .dialog.mrename .body p { margin: 0; }
-.dialog.mrename .line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.dialog.mrename .line { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .dialog.mrename .line > span:first-child { width: 4.5em; flex: none; }
-.dialog.mrename .line .lbl { flex: none; margin-left: 6px; }
+.dialog.mrename .line .lbl { flex: none; margin-left: 8px; }
 .dialog.mrename .line select { flex: 0 1 auto; }
 .dialog.mrename .line button { min-width: 0; }
 .dialog.mrename .line input[type="text"] { flex: 1; min-width: 6em; width: auto; }

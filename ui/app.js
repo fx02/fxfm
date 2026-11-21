@@ -175,9 +175,11 @@ async function driveMenu(panel) {
   backdrop.className = "backdrop clear";
   const menu = document.createElement("div");
   menu.className = "popup";
-  const r = panel.comboEl.getBoundingClientRect();
+  // Without the panel header the menu opens at the panel's top-left corner.
+  const c = panel.comboEl.getBoundingClientRect();
+  const r = c.width ? c : panel.root.getBoundingClientRect();
   menu.style.left = `${r.left}px`;
-  menu.style.top = `${r.bottom + 2}px`;
+  menu.style.top = `${c.width ? r.bottom + 2 : r.top}px`;
   const here = remoteRoot(panel.location);
   const at = here ? rows.findIndex((v) => v.kind === "server" && v.path === here) : rows.indexOf(volumeFor(app.volumes, panel.location));
   let sel = Math.max(0, at);
@@ -940,6 +942,10 @@ function applySettings(s) {
   st.setProperty("--row-h", `${rowH}px`);
   for (const p of Object.values(app.panels)) p.setRowHeight(rowH);
   document.getElementById("cmdline").classList.toggle("off", !s.showCommandLine);
+  document.body.classList.toggle("nodrives", s.showDriveBar !== true);
+  document.body.classList.toggle("nohead", s.showPanelHeader === false);
+  document.body.classList.toggle("nofoot", s.showPanelFooter === false);
+  document.body.classList.toggle("nofkeys", s.showFkeyBar === false);
   // F-key bar entries with a modifier show the Mac keys in use.
   for (const b of document.querySelectorAll("#fkeys [data-combo]")) {
     b.textContent = `${comboLabel(b.dataset.combo, modifierMap(s))} ${b.dataset.label}`;

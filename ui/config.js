@@ -466,7 +466,19 @@ export function configureOptions() {
   cmdBox.checked = work.showCommandLine;
   const cmdLabel = el("label", "opt");
   cmdLabel.append(cmdBox, " Show command line");
-  view.append(line(fontLabel), line(cmdLabel));
+  const check = (checked, text) => {
+    const box = el("input");
+    box.type = "checkbox";
+    box.checked = checked;
+    const label = el("label", "opt");
+    label.append(box, ` ${text}`);
+    return { box, label };
+  };
+  const drive = check(work.showDriveBar === true, "Show drive button bar");
+  const head = check(work.showPanelHeader !== false, "Show panel header (drive list, free space, path)");
+  const foot = check(work.showPanelFooter !== false, "Show panel status line");
+  const fkeys = check(work.showFkeyBar !== false, "Show function key bar");
+  view.append(line(fontLabel), line(cmdLabel), line(fkeys.label), line(drive.label), line(head.label), line(foot.label));
 
   // Audio: the device list is read once, when the dialog opens.
   const audio = section("Audio");
@@ -713,7 +725,8 @@ export function configureOptions() {
     sline(rebuild),
   );
 
-  body.append(storage, search, editor, colors.el, view, audio);
+  // Search (indexing) stays last: it is the longest section.
+  body.append(storage, editor, colors.el, view, audio, search);
 
   const close = () => {
     searchLive = null;
@@ -734,6 +747,10 @@ export function configureOptions() {
     const size = Number.parseInt(font.value, 10);
     work.fontSize = Number.isFinite(size) ? Math.min(24, Math.max(12, size)) : ctx.settings().fontSize;
     work.showCommandLine = cmdBox.checked;
+    work.showDriveBar = drive.box.checked;
+    work.showPanelHeader = head.box.checked;
+    work.showPanelFooter = foot.box.checked;
+    work.showFkeyBar = fkeys.box.checked;
     work.audioOutput = output.value || null;
     try {
       await ctx.invoke("save_settings", { settings: work });
