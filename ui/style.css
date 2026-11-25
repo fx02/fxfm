@@ -137,6 +137,7 @@ html, body {
   display: inline-block;
   width: 1.3em;
 }
+.r i img { width: 1.1em; height: 1.1em; vertical-align: -0.2em; }
 
 /* Row text, background and cursor bar / frame colors are inline styles from `rowStyle` (lib.mjs):
    the active panel's cursor is a bar or a frame (Configuration → Colors), the inactive one's

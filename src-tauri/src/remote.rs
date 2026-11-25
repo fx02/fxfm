@@ -27,7 +27,7 @@ use tauri::{AppHandle, Emitter, Manager};
 pub const WRONG_LOGIN: &str = "Wrong user name, password or key";
 pub const CONNECT_TIMEOUT_MSG: &str = "Server did not answer within 15 seconds";
 pub const MASTER_REQUIRED: &str = "master password required";
-pub const CHMOD_ONLY_REMOTE: &str = "Change attributes works on SFTP and SCP servers";
+pub const CHMOD_NOT_IN_ARCHIVE: &str = "Change attributes does not work inside archives";
 pub const CONNECTIONS_CHANGED: &str = "connections://changed";
 pub const SMB_CANCELLED: &str = "Mounting was cancelled";
 /// A server connection the UI stopped waiting for (the half-made connection is closed).
@@ -1041,9 +1041,19 @@ pub fn watch<T>(app: &AppHandle, ctx: &Ctx, f: impl FnOnce() -> T) -> T {
     r
 }
 
-/// `chmod` on a server file; local and archive locations are refused.
+/// `chmod` on a local or server file (a symlink: its target); items inside archives are refused.
 pub fn chmod_location(ctx: &Ctx, location: &str, mode: u32) -> Result<(), String> {
-    let r = parse_remote(location).ok_or(CHMOD_ONLY_REMOTE)?;
+    let Some(r) = parse_remote(location) else {
+        let path = match fxfm_core::vfs::parse(location) {
+            fxfm_core::vfs::Loc::Local(p) => p,
+            // The archive file itself is a plain local file.
+            fxfm_core::vfs::Loc::Archive(a) if a.inner.is_empty() => a.archive,
+            _ => return Err(CHMOD_NOT_IN_ARCHIVE.into()),
+        };
+        use std::os::unix::fs::PermissionsExt;
+        return std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode & 0o7777))
+            .map_err(|e| e.to_string());
+    };
     let fs = ctx
         .sessions
         .get(&r.server)
@@ -1900,22 +1910,29 @@ mod tests {
     }
 
     #[test]
-    fn chmod_only_on_servers() {
+    fn chmod_on_local_files_and_servers_not_in_archives() {
+        use std::os::unix::fs::PermissionsExt;
         let t = tempfile::tempdir().unwrap();
         let ctx = Ctx::new(t.path().join("tmp-root"));
         let f = t.path().join("f");
         std::fs::write(&f, b"x").unwrap();
-        let local = f.to_string_lossy().into_owned();
+        chmod_location(&ctx, &f.to_string_lossy(), 0o100640).unwrap();
+        let mode =
+            |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode(&f), 0o640);
+        let zip = t.path().join("a.tar");
+        let mut w = tar::Builder::new(std::fs::File::create(&zip).unwrap());
+        w.append_path_with_name(&f, "x").unwrap();
+        w.finish().unwrap();
+        chmod_location(&ctx, &zip.to_string_lossy(), 0o600).unwrap();
+        assert_eq!(mode(&zip), 0o600);
         assert_eq!(
-            chmod_location(&ctx, &local, 0o600).err().as_deref(),
-            Some(CHMOD_ONLY_REMOTE)
-        );
-        assert_eq!(
-            chmod_location(&ctx, &format!("{}/a.zip/x", t.path().display()), 0o600)
+            chmod_location(&ctx, &format!("{}/x", zip.display()), 0o600)
                 .err()
                 .as_deref(),
-            Some(CHMOD_ONLY_REMOTE)
+            Some(CHMOD_NOT_IN_ARCHIVE)
         );
+        assert!(chmod_location(&ctx, &t.path().join("missing").to_string_lossy(), 0o600).is_err());
         let fs = FakeFs::with(&[("/x", b"x")]);
         ctx.sessions.insert("m", fs.clone());
         chmod_location(&ctx, "sftp://m/x", 0o600).unwrap();

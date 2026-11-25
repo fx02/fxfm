@@ -491,7 +491,7 @@ export function suggestRename(name, existing) {
   }
 }
 
-/** Inline rename selection: the name without its extension; whole name for folders. */
+/** Selection in the conflict dialog's suggested new name: the name without its extension; whole name for folders. */
 export function renameSelection(name, isDir = false) {
   const at = isDir ? -1 : extensionStart(name);
   return { start: 0, end: at < 0 ? name.length : at };
@@ -963,6 +963,17 @@ export function moveIndex(sel, key, count, page) {
 
 /** Activation/dismissal keys ignored for this long after a modal opens (stray Enter from the previous one). */
 export const MODAL_KEY_DELAY = 150;
+
+/** A modal opened this long after an activation key counts as opened by it. */
+export const OPENED_BY_KEY_MS = 1000;
+
+/**
+ * True when the last keydown (`last`: {key, at} or null) was Enter, Escape or Space shortly
+ * before a modal opened at `openedAt`: only then may that key still be a stray one.
+ */
+export function openedByActivationKey(last, openedAt) {
+  return Boolean(last) && ["Enter", "Escape", " "].includes(last.key) && openedAt - last.at < OPENED_BY_KEY_MS;
+}
 
 /**
  * True when a modal must ignore the key: Enter, Escape or Space on a button
@@ -1827,8 +1838,8 @@ export function remoteLinkIsFolder(message) {
   return String(message ?? "") === REMOTE_FOLDER_REFUSED;
 }
 
-/** Backend refusal of `chmod` outside servers; same as `CHMOD_ONLY_REMOTE` in src-tauri/src/remote.rs. */
-export const CHMOD_ONLY_REMOTE = "Change attributes works on SFTP and SCP servers";
+/** Backend refusal of `chmod` inside archives; same as `CHMOD_NOT_IN_ARCHIVE` in src-tauri/src/remote.rs. */
+export const CHMOD_NOT_IN_ARCHIVE = "Change attributes does not work inside archives";
 
 /** Lines of the chmod result box ([{name, error|null}]), or null when every entry changed. */
 export function chmodSummary(results) {
@@ -2017,6 +2028,32 @@ export function secretChanges(before, entry, secret) {
 /** A plain local folder: not on a server, not inside an archive (by name, like `archiveOf`), not search results. */
 export function isLocalFolder(location) {
   return !parseRemote(location) && !archiveOf(location) && !isSearchLocation(location);
+}
+
+/** Row icon styles for Options → View: macOS's own icons (default) or emoji. */
+export const ICON_STYLES = [
+  ["finder", "Finder (macOS icons)"],
+  ["emoji", "Emoji"],
+];
+
+/** The icon style of `settings`; unknown values give "finder". */
+export function iconStyle(settings) {
+  return settings?.icons === "emoji" ? "emoji" : "finder";
+}
+
+/**
+ * The `file_icons` key for a row in the folder `location`, or null for "..": an application
+ * (or other bundle) in a local folder uses its own icon, other folders the folder icon, files
+ * the icon of their extension.
+ */
+export function iconKey(entry, location) {
+  if (entry.up) return null;
+  if (entry.isDir) {
+    const bundle = /\.(app|prefPane|bundle|framework)$/i.test(entry.name) && isLocalFolder(location);
+    return bundle ? `path:${joinLocation(location, entry.name)}` : "dir";
+  }
+  const dot = entry.name.lastIndexOf(".");
+  return dot > 0 && dot < entry.name.length - 1 ? `ext:${entry.name.slice(dot + 1).toLowerCase()}` : "file";
 }
 
 /**
@@ -2437,4 +2474,45 @@ export function multiRenamePlan(entries, opts, others = () => null) {
   }
   const changed = rows.some((r) => r.from !== r.to);
   return { rows, ok: changed && rows.every((r) => !r.error), error: null };
+}
+
+// ---------------------------------------------------------------- clipboard and context menu
+
+/** Status text when Paste finds neither fxfm's own Copy/Cut nor files copied in Finder. */
+export const NOTHING_TO_PASTE = "Nothing to paste";
+/** Paste into a search results list is refused: it is no folder. */
+export const PASTE_NEEDS_FOLDER = "Paste needs a folder, not a search results list.";
+
+/**
+ * What Paste does: fxfm's own Copy/Cut (`clip`: {kind, paths, cwd, change}) while the macOS
+ * clipboard still holds it (same change count), else a copy of the files on the clipboard
+ * (`board`: {change, files}, e.g. copied in Finder). Returns {kind, paths, cwd} or null.
+ */
+export function pasteSource(clip, board) {
+  if (clip && clip.change === board.change) return { kind: clip.kind, paths: clip.paths, cwd: clip.cwd };
+  if (!board.files.length) return null;
+  return { kind: "copy", paths: board.files, cwd: parentLocation(board.files[0]) };
+}
+
+/**
+ * Right-click menu of a panel as [commandId, label] pairs and "-" separators. `entry`: the row
+ * under the pointer (null or `..`: only Paste); `n`: how many items the commands act on.
+ */
+export function contextMenuItems(entry, n) {
+  const paste = ["cm_paste_from_clipboard", "Paste"];
+  if (!entry || entry.up) return [paste];
+  const s = n > 1 ? "s" : "";
+  return [
+    ["open", "Open"],
+    "-",
+    ["cm_copy_names_to_clip", `Copy name${s}`],
+    ["cm_copy_full_names_to_clip", `Copy path${s}`],
+    "-",
+    ["cm_cut_to_clipboard", "Cut"],
+    ["cm_copy_to_clipboard", "Copy"],
+    paste,
+    "-",
+    ["cm_delete", "Delete"],
+    ["cm_rename", "Rename"],
+  ];
 }

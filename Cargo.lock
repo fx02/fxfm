@@ -1900,8 +1900,9 @@ dependencies = [
 
 [[package]]
 name = "fxfm"
-version = "0.1.2"
+version = "0.1.6"
 dependencies = [
+ "base64 0.22.1",
  "block2",
  "core-foundation",
  "cpal",
@@ -1927,7 +1928,7 @@ dependencies = [
 
 [[package]]
 name = "fxfm-core"
-version = "0.1.2"
+version = "0.1.6"
 dependencies = [
  "argon2 0.5.3",
  "async-trait",

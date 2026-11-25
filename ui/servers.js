@@ -5,7 +5,7 @@
 // emptied when their dialog closes.
 
 import {
-  CHMOD_ONLY_REMOTE,
+  CHMOD_NOT_IN_ARCHIVE,
   chmodStart,
   chmodSummary,
   comboLabel,
@@ -737,7 +737,7 @@ const RWX = ["Read", "Write", "Execute"];
 const WHO = ["Owner", "Group", "Others"];
 
 /**
- * `cm_chmod`: octal field and nine rwx boxes (kept in sync) for the marked entries or the one
+ * `cm_chmod` (local folders and servers, not inside archives): octal field and nine rwx boxes (kept in sync) for the marked entries or the one
  * under the cursor. The start value is the cursor entry's mode. Folders are not changed
  * recursively.
  */
@@ -745,10 +745,6 @@ export async function chmodDialog() {
   const panel = ctx.active();
   const sources = operationSources(panel.entries, panel.marked, panel.cursorIndex);
   if (!sources.length) return;
-  if (!parseRemote(panel.location)) {
-    await message("Change attributes", CHMOD_ONLY_REMOTE);
-    return;
-  }
   const { paths } = operationPaths(panel.location, sources);
   const under = panel.cursorEntry && !panel.cursorEntry.up ? panel.cursorEntry : sources[0];
   let mode = chmodStart(under);
@@ -822,6 +818,10 @@ export async function chmodDialog() {
       await ctx.invoke("chmod", { location, mode });
       results.push({ name: sources[i].name, error: null });
     } catch (e) {
+      if (errText(e) === CHMOD_NOT_IN_ARCHIVE) {
+        await message("Change attributes", CHMOD_NOT_IN_ARCHIVE);
+        return;
+      }
       lost = lostServer(errText(e), location);
       if (lost) break;
       results.push({ name: sources[i].name, error: errText(e) });

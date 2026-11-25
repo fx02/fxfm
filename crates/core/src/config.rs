@@ -247,6 +247,9 @@ pub struct Settings {
     /// "controlCommand", "option", "letters" or "off". The UI treats unknown values as
     /// "command".
     pub quick_search: String,
+    /// Row icons: "finder" (macOS icons, default) or "emoji"; the UI treats unknown values as
+    /// "finder".
+    pub icons: String,
 }
 
 /// A volume the user added to the search index.
@@ -320,6 +323,7 @@ impl Default for Settings {
             keymap_commands: None,
             search: SearchSettings::default(),
             quick_search: "command".into(),
+            icons: "finder".into(),
         }
     }
 }
@@ -580,6 +584,7 @@ mod tests {
         assert_eq!(s.font_size, 15);
         assert!(!s.show_command_line);
         assert!(!s.show_drive_bar);
+        assert_eq!(s.icons, "finder");
         assert!(s.show_panel_header && s.show_panel_footer && s.show_fkey_bar);
     }
 

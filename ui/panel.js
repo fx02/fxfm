@@ -32,6 +32,7 @@ import {
   resultFolder,
   rowStyle,
   visibleRange,
+  iconKey,
 } from "./lib.mjs";
 
 export const VOLUME_ICON = { root: "💻", home: "🏠", volume: "💾", network: "🌐", server: "☁️" };
@@ -42,6 +43,31 @@ function el(tag, cls, text) {
   if (cls) e.className = cls;
   if (text !== undefined) e.textContent = text;
   return e;
+}
+
+/** Finder icons by `iconKey`: a data URL, or "" when macOS gave none (emoji then). */
+const iconUrls = new Map();
+const iconAsked = new Set();
+const panels = new Set();
+
+/** Asks for the icons of `keys` once; every panel redraws when they arrive. */
+function fetchIcons(keys, api) {
+  const missing = keys.filter((k) => !iconAsked.has(k));
+  if (!missing.length) return;
+  for (const k of missing) iconAsked.add(k);
+  api
+    .icons(missing)
+    .then((got) => {
+      for (const k of missing) iconUrls.set(k, got?.[k] ?? "");
+      for (const p of panels) {
+        p.rowsDirty = true;
+        p.renderRows();
+      }
+    })
+    .catch((e) => {
+      console.error("fxfm: file_icons", e);
+      for (const k of missing) iconUrls.set(k, "");
+    });
 }
 
 function rowIcon(e) {
@@ -96,6 +122,8 @@ export class Panel {
     this.active = false;
     this.message = null;
     this.rowH = 25;
+    this.iconStyle = "finder";
+    panels.add(this);
     this.navToken = 0;
     this.pendingTarget = null;
     this.sizeQueue = [];
@@ -153,6 +181,13 @@ export class Panel {
       const i = Number(r.dataset.i);
       if (ev.button === 0) this.api.onRowPress(this, i, ev);
       this.setCursor(i);
+    });
+    // Right click: the row under the pointer (the mousedown above put the cursor on it), or
+    // empty space below the rows.
+    this.listEl.addEventListener("contextmenu", (ev) => {
+      ev.preventDefault();
+      const r = ev.target.closest("[data-i]");
+      this.api.onContextMenu(this, r ? Number(r.dataset.i) : null, ev.clientX, ev.clientY);
     });
     this.rowsEl.addEventListener("dblclick", (ev) => {
       const r = ev.target.closest("[data-i]");
@@ -263,6 +298,32 @@ export class Panel {
     this.colors = colors;
     this.typeMatcher = matcher;
     this.renderRows();
+  }
+
+  /** Options → View → Icons: "finder" or "emoji". */
+  setIconStyle(style) {
+    if (style === this.iconStyle) return;
+    this.iconStyle = style;
+    this.rowsDirty = true;
+    this.renderRows();
+  }
+
+  /** The row's icon: Finder's (once it has arrived; `wanted` collects keys to ask for) or emoji. */
+  iconEl(e, wanted) {
+    const i = el("i");
+    const key = this.iconStyle === "finder" ? iconKey(e, this.location) : null;
+    const url = key && iconUrls.get(key);
+    if (url) {
+      const img = document.createElement("img");
+      img.src = url;
+      img.alt = "";
+      i.append(img);
+    } else if (key && url === undefined) {
+      wanted.add(key);
+    } else {
+      i.textContent = rowIcon(e);
+    }
+    return i;
   }
 
   setRowHeight(px) {
@@ -655,15 +716,17 @@ export class Panel {
     this.spacerEl.style.height = `${count * this.rowH}px`;
     this.rowsEl.style.transform = `translateY(${start * this.rowH}px)`;
     const rows = [];
+    const wanted = new Set();
     for (let i = start; i < end; i++) {
       const e = this.entries[i];
       const r = el("div");
       this.paintRow(r, i);
       r.dataset.i = i;
-      r.append(el("i", null, rowIcon(e)), document.createTextNode(e.up ? "[..]" : displayName(e)));
+      r.append(this.iconEl(e, wanted), document.createTextNode(e.up ? "[..]" : displayName(e)));
       rows.push(r);
     }
     this.rowsEl.replaceChildren(...rows);
+    if (wanted.size) fetchIcons([...wanted], this.api);
   }
 
   renderStatus() {

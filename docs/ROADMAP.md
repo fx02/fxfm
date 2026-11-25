@@ -2,13 +2,16 @@
 
 ## Next
 From the UI critique (docs/critique/UI_CRITIQUE_REPORT.md), not started:
-- Change attributes for local files (today only SFTP/SCP).
 - Folder tabs per panel.
 - Help menu with the key table (Start and Help menus are empty).
 - Quick filter (TC Ctrl+S) and folder history back/forward.
 - Undo of the last file operation.
 - Content search in Find files; directory compare/sync; operation queue; branch view; thumbnails.
 - Dialog selects in the dialog font; F8 confirmation names a single item; follow system dark mode; screen-reader labels.
+
+## Right-click menu
+- Paste into the folder the items came from is refused ("same location"); Finder makes `name copy` instead.
+- Not in the menu yet (possible later): View (F3), Pack files (Alt+F5), Change attributes / Properties, Open with…, Quick Look, Show in Finder.
 
 ## Search
 - A full rebuild briefly holds two indexes in memory (about 2x RAM) while the new one replaces the old. By design: dropping the old index first would leave searches without results for the whole scan.
@@ -33,6 +36,10 @@ From the UI critique (docs/critique/UI_CRITIQUE_REPORT.md), not started:
 - Writing promised items has no progress or Cancel in fxfm (only what the receiver shows itself).
 
 ## Done
+- **Fast F5, Enter and F2 selection** (2026-11-25): Enter pressed right after F5/F6/F7… (under 150 ms) is no longer swallowed: the short key delay applies only to a dialog opened by Enter, Escape or Space. F2 selects the whole name, extension included.
+- **Right-click menu and clipboard** (2026-11-24): right click (or Shift+F10) on a row: Open, Copy name, Copy path, Cut, Copy, Paste, Delete, Rename; Copy/Cut use the macOS clipboard (local files paste in Finder, Finder's copied files paste in a panel); Paste runs the copy/move without the F5 dialog.
+- **Change attributes on local files** (2026-11-24): Files → Change attributes… (octal and rwx boxes) also works on local files and folders (a symlink: its target), not only on SFTP/SCP; items inside archives are refused. Dates and macOS flags (hidden, locked) are not changed there yet.
+- **Finder icons** (2026-11-24): panel rows show the icons macOS uses in Finder (folder, file type, an application's own icon); Options → View → Icons switches back to emoji. Special folder icons (Desktop, Downloads…) and image thumbnails are not shown.
 - **Find files in its own window** (2026-11-21): Alt+F7 opens a native window (move, resize, maximize, full screen, other screens; geometry kept) instead of a dialog in the main window; going to a file, Feed to listbox, mounting a share and F3 on audio run in the main window over a small `findfiles://` event bridge. The maximize button is gone.
 - **Drag archive results** (2026-11-21): archive entries in a search results list can be dragged out as file promises too (not mixed with plain files).
 - **Drag-out from archives and servers** (2026-11-21): own AppKit dragging session instead of the `drag` crate; archive and server items (folders too) go out as file promises, extracted or downloaded on a background queue only when the receiver asks; local files may be moved (Finder's rules) and the panel refreshes after a move; a count badge on the drag image for several items.

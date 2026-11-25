@@ -13,6 +13,8 @@ import {
   modifierChoiceError,
   outputOptions,
   searchSettingsPatch,
+  ICON_STYLES,
+  iconStyle,
 } from "./lib.mjs";
 import { colorsSection } from "./colors.js";
 import { dialog, popModal, pushModal } from "./dialogs.js";
@@ -478,7 +480,16 @@ export function configureOptions() {
   const head = check(work.showPanelHeader !== false, "Show panel header (drive list, free space, path)");
   const foot = check(work.showPanelFooter !== false, "Show panel status line");
   const fkeys = check(work.showFkeyBar !== false, "Show function key bar");
-  view.append(line(fontLabel), line(cmdLabel), line(fkeys.label), line(drive.label), line(head.label), line(foot.label));
+  const iconSel = el("select");
+  for (const [id, name] of ICON_STYLES) {
+    const o = el("option", null, name);
+    o.value = id;
+    iconSel.append(o);
+  }
+  iconSel.value = iconStyle(work);
+  const iconLabel = el("label", "opt");
+  iconLabel.append("Icons: ", iconSel);
+  view.append(line(fontLabel), line(iconLabel), line(cmdLabel), line(fkeys.label), line(drive.label), line(head.label), line(foot.label));
 
   // Audio: the device list is read once, when the dialog opens.
   const audio = section("Audio");
@@ -748,6 +759,7 @@ export function configureOptions() {
     work.fontSize = Number.isFinite(size) ? Math.min(24, Math.max(12, size)) : ctx.settings().fontSize;
     work.showCommandLine = cmdBox.checked;
     work.showDriveBar = drive.box.checked;
+    work.icons = iconSel.value;
     work.showPanelHeader = head.box.checked;
     work.showPanelFooter = foot.box.checked;
     work.showFkeyBar = fkeys.box.checked;

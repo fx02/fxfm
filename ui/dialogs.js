@@ -6,6 +6,9 @@ import {
   displayLocation,
   archiveOf,
   CHOOSE_FOLDER,
+  NOTHING_TO_PASTE,
+  PASTE_NEEDS_FOLDER,
+  pasteSource,
   copyTargetDefault,
   deleteConfirmText,
   editTexts,
@@ -22,6 +25,7 @@ import {
   jobSucceeded,
   lastComponent,
   modalKeyBlocked,
+  openedByActivationKey,
   newNameError,
   operationPaths,
   operationSources,
@@ -55,6 +59,9 @@ export function topModal() {
   return modals[modals.length - 1] ?? null;
 }
 
+/** The last keydown seen by `handleModalKey` ({key, at}): did an activation key open the next modal? */
+let lastKey = null;
+
 /** Progress views waiting until no question/prompt is on top of the stack. */
 const deferredViews = new Set();
 
@@ -70,6 +77,9 @@ function blockingTop() {
  */
 export function pushModal(m, host = document.body) {
   m.openedAt = performance.now();
+  // Only a modal opened by an activation key (Enter that closed the previous dialog, Escape…)
+  // waits before taking such keys; one opened by F5 & co. takes Enter at once (fast F5, Enter).
+  m.noDelay ||= !openedByActivationKey(lastKey, m.openedAt);
   m.prevFocus = document.activeElement;
   modals.push(m);
   host.append(m.el);
@@ -97,6 +107,7 @@ export function popModal(m) {
  * auto-repeated Enter) are swallowed; typing always passes.
  */
 export function handleModalKey(e) {
+  lastKey = { key: e.key, at: performance.now() };
   const top = topModal();
   if (!top) return false;
   const onButton = document.activeElement?.tagName === "BUTTON";
@@ -692,7 +703,14 @@ export async function copyMoveTo(kind, { paths, cwd, dest, source = null, switch
   const r = await dialog({ title: verb, text: `${verb} ${countText(sources, "file(s)")} to:`, input: displayLocation(dest, remoteArchives), buttons });
   const target = r?.text.trim() ? realLocation(r.text.trim(), remoteArchives) : "";
   if (!target) return;
-  const jobKind = r.value === "switch" ? otherKind : kind;
+  await transfer(r.value === "switch" ? otherKind : kind, { paths, cwd, target, source });
+}
+
+/**
+ * Copies or moves `paths` into `target` without a dialog (after F5/F6 and for Paste); `source`:
+ * the panel whose marks a finished job clears (or null).
+ */
+async function transfer(jobKind, { paths, cwd, target, source }) {
   // A search results list can mix local items and entries of several archives; one job takes
   // one archive (or none), so each group gets its own job, one after the other.
   const groups = groupSources(paths, cwd);
@@ -720,6 +738,52 @@ export async function copyMoveTo(kind, { paths, cwd, dest, source = null, switch
       await Promise.all(ctx.panels().map((p) => p.refresh()));
     }
   }
+}
+
+// ---------------------------------------------------------------- clipboard
+
+/** fxfm's own last Copy/Cut to the clipboard: {kind, paths, cwd, change} (see `pasteSource`). */
+let clip = null;
+
+/** Copy names / Copy names with path: the active panel's marked items (or the cursor one) as text lines. */
+export async function copyNames(full) {
+  const src = ctx.active();
+  const sources = sourcesOf(src);
+  if (!sources.length) return;
+  const { paths } = operationPaths(src.location, sources);
+  const lines = full ? paths.map((p) => displayLocation(p, remoteArchives)) : sources.map((e) => e.name);
+  await ctx.invoke("clipboard_write", { text: lines.join("\n"), files: [] });
+  src.setMessage(`Copied ${full ? "path" : "name"}${lines.length > 1 ? "s" : ""} to the clipboard`);
+}
+
+/** Copy / Cut to clipboard: Paste in a panel copies / moves them; local files also paste in Finder. */
+export async function clipFiles(kind) {
+  const src = ctx.active();
+  const sources = sourcesOf(src);
+  if (!sources.length) return;
+  if (refusedInResults(src, sources, kind)) return;
+  const { cwd, paths } = operationPaths(src.location, sources);
+  const text = paths.map((p) => displayLocation(p, remoteArchives)).join("\n");
+  const change = await ctx.invoke("clipboard_write", { text, files: paths });
+  clip = { kind, paths, cwd, change };
+  src.setMessage(`${kind === "move" ? "Cut" : "Copied"} ${countText(sources, "file(s)")} to the clipboard`);
+}
+
+/** Paste from clipboard into the active panel's folder (no dialog; conflicts are asked as in F5). */
+export async function pasteFiles() {
+  const dst = ctx.active();
+  if (isSearchLocation(dst.location)) {
+    dst.setMessage(PASTE_NEEDS_FOLDER);
+    return;
+  }
+  const p = pasteSource(clip, await ctx.invoke("clipboard_files"));
+  if (!p) {
+    dst.setMessage(NOTHING_TO_PASTE);
+    return;
+  }
+  await transfer(p.kind, { paths: p.paths, cwd: p.cwd, target: dst.location, source: null });
+  // Moved items are gone from where they were: a second Paste has nothing to move.
+  if (p.kind === "move") clip = null;
 }
 
 /**
@@ -1003,8 +1067,8 @@ export function renameInline() {
   input.addEventListener("blur", close);
   pushModal(modal, panel.listEl);
   input.focus();
-  const sel = renameSelection(entry.name, entry.isDir);
-  input.setSelectionRange(sel.start, sel.end);
+  // The whole name, extension included (the owner's choice).
+  input.select();
 }
 
 let lastMask = "*.*";

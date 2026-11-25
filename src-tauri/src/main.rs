@@ -2,12 +2,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod audio;
+mod clipboard;
 mod commands;
 mod dragdrop;
 mod editwatch;
 mod fnkey;
 #[cfg(target_os = "macos")]
 mod fsevents;
+mod icons;
 mod jobs;
 mod keychain;
 mod launch;
@@ -108,6 +110,9 @@ fn main() {
             audio::audio_pause,
             audio::audio_volume,
             audio::audio_outputs,
+            icons::file_icons,
+            clipboard::clipboard_write,
+            clipboard::clipboard_files,
             search::commands::search_status,
             search::commands::search_build,
             search::commands::search_start,

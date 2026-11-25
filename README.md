@@ -145,7 +145,7 @@ Configuration → Keyboard chooses which Mac key acts as TC's **Alt** (default *
 - **Passwords** never go into `servers.json`.
   - *System mode*: macOS Keychain, service `fxfm`, account `<server id>/password` or `<server id>/passphrase`.
   - *Portable mode*: `secrets.json` in `fxfm-data/`, encrypted with a **master password** (Argon2id 64 MiB, XChaCha20-Poly1305). The master password is asked for once per launch, when needed, and is kept in memory only. Without it, passwords are not saved (a password that was entered but not saved is valid until exit, so reconnecting works).
-- **Operations**: F3, F4, F5, F6, F7, F8 and F2 also work on a server, as does **chmod** (Files → Change attributes…, no default key; SFTP and SCP only). F8 deletes permanently: "Delete N file(s) from the server? This cannot be undone.". An upload writes to a temporary `.<name>.fxfm-<pid>-<n>.part` next to the target and then replaces it, so an interruption never leaves a truncated original; on SFTP and SCP the existing file's permissions are kept (FTP and FTPS do not set permissions).
+- **Operations**: F3, F4, F5, F6, F7, F8 and F2 also work on a server, as does **chmod** (Files → Change attributes…, no default key; SFTP and SCP, and local files, not inside archives). F8 deletes permanently: "Delete N file(s) from the server? This cannot be undone.". An upload writes to a temporary `.<name>.fxfm-<pid>-<n>.part` next to the target and then replaces it, so an interruption never leaves a truncated original; on SFTP and SCP the existing file's permissions are kept (FTP and FTPS do not set permissions).
 - **Symbolic links**: Enter on a link to a folder enters the folder, and F8 deletes only the link. Some FTP servers show a link to a folder as a plain folder; there, F8 on it deletes the contents of the target folder.
 - **F4** on a file on a server edits a temporary copy; after saving, fxfm asks `"<name>" was changed. Upload it back to the server?`.
 - **Archives on a server**: Enter on an archive downloads it as an F4 copy and enters it. Changes inside (F5, F8, F2…) modify the copy, so fxfm offers to upload it back to the server. `[..]` at the archive root returns to the folder on the server.
@@ -184,8 +184,15 @@ Configuration → Options → *Colors* works like TC's Configuration → Color p
 - **In**: from Finder into a panel.
 - **Between panels**: dropping opens the F5 dialog with the target = the folder under the pointer or the panel's folder. **Shift** while dropping gives F6 (move). The dialog also has a *Move instead* / *Copy instead* button, in case you miss Shift.
 
+## Right-click menu and clipboard
+
+- **Right click** on a row (or **Shift+F10** on the cursor row) opens a menu: *Open*, *Copy name*, *Copy path*, *Cut*, *Copy*, *Paste*, *Delete* (Trash), *Rename*. It acts on the marked items when the clicked row is marked, otherwise only on that row (other marks are cleared, as in Finder). On empty space or `..` it offers only *Paste*.
+- **Copy / Cut** put the items on the macOS clipboard (local files as files, so Finder's Paste copies them; everything also as text). **Paste** copies (or, after Cut, moves) them into the panel's folder without the F5 dialog; existing files are asked about as in F5. Files copied in Finder paste into a panel too. Items in archives and on servers paste only inside fxfm.
+- *Copy name* / *Copy path* put the names or full paths (one per line) on the clipboard as text. All of these are also commands without default keys (Files and Mark menus) and can get keys in Configuration → Keyboard.
+
 ## Notes
 
+- **Icons**: Configuration → Options → View → *Icons* chooses the row icons: *Finder* (default) uses the icons macOS shows in Finder — the folder icon, each file type's icon and an application's own icon — and *Emoji* the older emoji icons.
 - **What the window shows**: Configuration → Options → View turns on or off the command line, the function key bar, the drive button bar (off by default; the drive dropdown and Alt+F1 / Alt+F2 stay), each panel's header (drive dropdown, free space, path) and each panel's status line. With all of them off only the file lists are left; Alt+F1 / Alt+F2 then opens the drive menu at the panel's corner, and quick search still shows its box while typing.
 - **Trash (F8)**: fxfm moves items to the Trash via `NSFileManager`, not via Finder. It is faster and does not need Automation permission, but Finder's "Put Back" does not work for items deleted by fxfm.
 - **PDF in the F3 viewer**: the PDF is shown in an iframe via the asset protocol, with an "Open in Quick Look" button always visible next to it. Whether WKWebView really renders the PDF in the iframe has not yet been checked by hand; if not, Quick Look is the fallback.
@@ -216,6 +223,8 @@ The table is generated from the command registry (`COMMANDS` in `crates/core/src
 | Mark | Unselect group | `NumSubtract`, `Ctrl+-` |
 | Mark | Invert selection | `NumMultiply`, `Ctrl+8` |
 | Mark | Select all | `Ctrl+A` |
+| Mark | Copy names to clipboard | — |
+| Mark | Copy names with path to clipboard | — |
 | Commands | Switch panel | `Tab` |
 | Commands | Directory hotlist | `Ctrl+D` |
 | Commands | Parent directory | `Backspace`, `Ctrl+PageUp` |
@@ -225,6 +234,10 @@ The table is generated from the command registry (`COMMANDS` in `crates/core/src
 | Commands | Search | `Alt+F7` |
 | Commands | Feed search results to listbox | — |
 | Files | Multi-rename… | `Ctrl+M` |
+| Files | Context menu | `Shift+F10` |
+| Files | Cut to clipboard | — |
+| Files | Copy to clipboard | — |
+| Files | Paste from clipboard | — |
 | Files | Change attributes… | — |
 | Net | Connect to server | `Ctrl+F` |
 | Net | Disconnect | `Ctrl+Shift+F` |

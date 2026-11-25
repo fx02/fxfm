@@ -1282,9 +1282,9 @@ test("chmodSummary: null when all changed, else 'Changed N of M' and one line pe
   );
 });
 
-test("CHMOD_ONLY_REMOTE matches the backend text", () => {
-  // Same as `CHMOD_ONLY_REMOTE` in src-tauri/src/remote.rs; change both together.
-  assert.equal(lib.CHMOD_ONLY_REMOTE, "Change attributes works on SFTP and SCP servers");
+test("CHMOD_NOT_IN_ARCHIVE matches the backend text", () => {
+  // Same as `CHMOD_NOT_IN_ARCHIVE` in src-tauri/src/remote.rs; change both together.
+  assert.equal(lib.CHMOD_NOT_IN_ARCHIVE, "Change attributes does not work inside archives");
 });
 
 test("remote_archive_parent_returns_to_server", () => {
@@ -2224,4 +2224,49 @@ test("findFilesGeometry keeps a usable size and a complete position", () => {
     width: 900, height: 600, maximized: true, x: -1200, y: 40,
   });
   assert.deepEqual(lib.findFilesGeometry({ width: 900, height: 600, x: 10 }), { width: 900, height: 600, maximized: false });
+});
+
+test("iconKey: folders, bundles, extensions", () => {
+  assert.equal(lib.iconKey({ up: true, name: "..", isDir: true }, "/x"), null);
+  assert.equal(lib.iconKey({ name: "Docs", isDir: true }, "/Users/u"), "dir");
+  assert.equal(lib.iconKey({ name: "Safari.app", isDir: true }, "/Applications"), "path:/Applications/Safari.app");
+  assert.equal(lib.iconKey({ name: "X.app", isDir: true }, "sftp://web/opt"), "dir");
+  assert.equal(lib.iconKey({ name: "A.PDF", isDir: false }, "/x"), "ext:pdf");
+  assert.equal(lib.iconKey({ name: ".bashrc", isDir: false }, "/x"), "file");
+  assert.equal(lib.iconKey({ name: "trail.", isDir: false }, "/x"), "file");
+  assert.equal(lib.iconStyle({ icons: "emoji" }), "emoji");
+  assert.equal(lib.iconStyle({}), "finder");
+});
+
+test("pasteSource: own Copy/Cut while the clipboard holds it, else files copied elsewhere", () => {
+  const clip = { kind: "move", paths: ["/a/x", "/a/y"], cwd: "/a", change: 7 };
+  assert.deepEqual(lib.pasteSource(clip, { change: 7, files: ["/a/x", "/a/y"] }), { kind: "move", paths: ["/a/x", "/a/y"], cwd: "/a" });
+  // Something else was copied since (e.g. in Finder): that is pasted, always as a copy.
+  assert.deepEqual(lib.pasteSource(clip, { change: 8, files: ["/b/z"] }), { kind: "copy", paths: ["/b/z"], cwd: "/b" });
+  // Own Copy of server items has no file URLs but still pastes.
+  const remote = { kind: "copy", paths: ["sftp://s/x"], cwd: "sftp://s/", change: 3 };
+  assert.deepEqual(lib.pasteSource(remote, { change: 3, files: [] }), { kind: "copy", paths: ["sftp://s/x"], cwd: "sftp://s/" });
+  assert.equal(lib.pasteSource(null, { change: 1, files: [] }), null);
+  assert.equal(lib.pasteSource(remote, { change: 4, files: [] }), null);
+});
+
+test("contextMenuItems: Open, copy name/path, clipboard, Delete, Rename; empty space and .. only Paste", () => {
+  const ids = (items) => items.map((i) => (i === "-" ? "-" : i[0]));
+  assert.deepEqual(ids(lib.contextMenuItems({ name: "a" }, 1)), [
+    "open", "-", "cm_copy_names_to_clip", "cm_copy_full_names_to_clip", "-",
+    "cm_cut_to_clipboard", "cm_copy_to_clipboard", "cm_paste_from_clipboard", "-", "cm_delete", "cm_rename",
+  ]);
+  assert.equal(lib.contextMenuItems({ name: "a" }, 1)[2][1], "Copy name");
+  assert.equal(lib.contextMenuItems({ name: "a" }, 3)[3][1], "Copy paths");
+  assert.deepEqual(lib.contextMenuItems(null, 0), [["cm_paste_from_clipboard", "Paste"]]);
+  assert.deepEqual(lib.contextMenuItems({ name: "..", up: true }, 0), [["cm_paste_from_clipboard", "Paste"]]);
+});
+
+test("openedByActivationKey: only Enter/Escape/Space just before the modal opened", () => {
+  assert.equal(lib.openedByActivationKey({ key: "Enter", at: 1000 }, 1100), true);
+  assert.equal(lib.openedByActivationKey({ key: "Escape", at: 1000 }, 1999), true);
+  // F5 then Enter fast: the dialog opened by F5 takes the Enter at once.
+  assert.equal(lib.openedByActivationKey({ key: "F5", at: 1000 }, 1001), false);
+  assert.equal(lib.openedByActivationKey({ key: "Enter", at: 1000 }, 2000), false);
+  assert.equal(lib.openedByActivationKey(null, 5), false);
 });

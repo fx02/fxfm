@@ -43,10 +43,15 @@ import {
   serverDrives,
   serverTarget,
   setFnHeld,
+  iconStyle,
+  contextMenuItems,
 } from "./lib.mjs";
 import {
+  clipFiles,
   copyMove,
   copyMoveTo,
+  copyNames,
+  pasteFiles,
   deleteItems,
   dialog,
   editChanged,
@@ -231,6 +236,95 @@ async function driveMenu(panel) {
   pushModal(modal);
 }
 
+// ---------------------------------------------------------------- context menu
+
+/**
+ * Right click on a row (or Shift+F10 on the cursor row): Open, Copy name/path, Cut/Copy/Paste,
+ * Delete, Rename for the marked items, or only that row when it is not marked (as in Finder);
+ * on empty space or `..` only Paste. `at`: the pointer, else below the cursor row.
+ */
+function contextMenu(panel, index, at = null) {
+  if (topModal()) return;
+  setActive(panel.side);
+  const entry = index == null ? null : panel.entries[index] ?? null;
+  if (entry && !entry.up && !panel.marked.has(entry.name) && panel.marked.size) {
+    panel.clearMarks();
+    panel.render();
+  }
+  const n = panel.marked.size || 1;
+  const items = contextMenuItems(entry, n).map((i) =>
+    i === "-" ? null : { label: i[1], run: () => (i[0] === "open" ? panel.enter() : dispatch(i[0])) },
+  );
+  if (!at) {
+    panel.ensureVisible();
+    const row = panel.rowsEl.querySelector(`[data-i="${index}"]`)?.getBoundingClientRect();
+    const box = row ?? panel.listEl.getBoundingClientRect();
+    at = { x: box.left + 24, y: row ? row.bottom : box.top };
+  }
+  popupMenu(at, items);
+}
+
+/** A small menu at `at` ({x, y}, kept inside the window); `items`: {label, run} or null (a line). */
+function popupMenu(at, items) {
+  const backdrop = document.createElement("div");
+  backdrop.className = "backdrop clear";
+  const menu = document.createElement("div");
+  menu.className = "popup";
+  const rows = [];
+  for (const it of items) {
+    if (!it) {
+      menu.append(Object.assign(document.createElement("div"), { className: "sep" }));
+      continue;
+    }
+    const i = rows.length;
+    const row = document.createElement("div");
+    row.className = "item";
+    row.textContent = it.label;
+    row.addEventListener("mouseenter", () => paint(i));
+    row.addEventListener("click", (e) => {
+      e.stopPropagation();
+      choose(i);
+    });
+    menu.append(row);
+    rows.push({ row, it });
+  }
+  let sel = 0;
+  const paint = (i) => {
+    sel = i;
+    rows.forEach((r, j) => r.row.classList.toggle("sel", j === i));
+  };
+  const modal = { el: backdrop };
+  const close = () => popModal(modal);
+  const choose = (i) => {
+    close();
+    rows[i].it.run();
+  };
+  modal.onKey = (e) => {
+    e.preventDefault();
+    if (e.key === "ArrowDown") paint((sel + 1) % rows.length);
+    else if (e.key === "ArrowUp") paint((sel - 1 + rows.length) % rows.length);
+    else if (e.key === "Home") paint(0);
+    else if (e.key === "End") paint(rows.length - 1);
+    else if (e.key === "Enter") choose(sel);
+    else if (e.key === "Escape" || e.key === "Tab") close();
+  };
+  const dismiss = (e) => {
+    if (e.target !== backdrop) return;
+    e.preventDefault();
+    close();
+  };
+  backdrop.addEventListener("mousedown", dismiss);
+  backdrop.addEventListener("contextmenu", (e) => e.preventDefault());
+  backdrop.append(menu);
+  paint(0);
+  pushModal(modal);
+  // Inside the window: flip left / up when it would stick out.
+  const w = menu.offsetWidth;
+  const h = menu.offsetHeight;
+  menu.style.left = `${Math.max(0, at.x + w > innerWidth ? at.x - w : at.x)}px`;
+  menu.style.top = `${Math.max(0, at.y + h > innerHeight ? at.y - h : at.y)}px`;
+}
+
 // ---------------------------------------------------------------- commands
 
 function setActive(side) {
@@ -306,6 +400,12 @@ export const handlers = {
   cm_connect: () => showConnect(),
   cm_disconnect: () => disconnectActive(),
   cm_chmod: () => chmodDialog(),
+  cm_context_menu: () => contextMenu(activePanel(), activePanel().cursorIndex),
+  cm_cut_to_clipboard: () => clipFiles("move"),
+  cm_copy_to_clipboard: () => clipFiles("copy"),
+  cm_paste_from_clipboard: () => pasteFiles(),
+  cm_copy_names_to_clip: () => copyNames(false),
+  cm_copy_full_names_to_clip: () => copyNames(true),
   cm_multi_rename: () => multiRename(),
   cm_exit: () => win.close(),
   cm_cmdline_focus: () => {
@@ -941,6 +1041,7 @@ function applySettings(s) {
   const rowH = Math.round(s.fontSize * 1.47);
   st.setProperty("--row-h", `${rowH}px`);
   for (const p of Object.values(app.panels)) p.setRowHeight(rowH);
+  for (const p of Object.values(app.panels)) p.setIconStyle(iconStyle(s));
   document.getElementById("cmdline").classList.toggle("off", !s.showCommandLine);
   document.body.classList.toggle("nodrives", s.showDriveBar !== true);
   document.body.classList.toggle("nohead", s.showPanelHeader === false);
@@ -962,6 +1063,7 @@ function makePanel(side) {
     // The results list (SEARCH_LOCATION) is listed from `app.results`, never by `list_dir`.
     listDir: (location) => (isSearchLocation(location) ? resultsListing(side) : invoke("list_dir", { location })),
     nearest: (location) => invoke("nearest_existing", { location }),
+    icons: (keys) => invoke("file_icons", { keys }),
     dirSize: (location, panel) => invoke("dir_size", { location, panel }),
     status: (text) => status(text),
     openRemoteArchive: (location) => downloadArchive(location),
@@ -991,6 +1093,7 @@ function makePanel(side) {
     onDriveMenu: (p) => driveMenu(p),
     onDrive: (p, path) => goDrive(p, path),
     onRowPress: (p, i, ev) => rowPress(p, i, ev),
+    onContextMenu: (p, i, x, y) => contextMenu(p, i, { x, y }),
   });
 }
 

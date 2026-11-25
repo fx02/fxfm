@@ -1,6 +1,6 @@
 [package]
 name = "fxfm"
-version = "0.1.2"
+version = "0.1.6"
 edition = "2021"
 
 [build-dependencies]
@@ -17,6 +17,7 @@ dirs = "7"
 libc = "0.2"
 notify = "8"
 sha2 = "0.10"
+base64 = "0.22"
 # F3 audio output (decoding is in fxfm-core).
 cpal = "0.18.2"
 
