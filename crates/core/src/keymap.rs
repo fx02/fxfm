@@ -373,6 +373,41 @@ pub static COMMANDS: &[CommandDef] = &[
         available: true,
     },
     CommandDef {
+        id: "cm_quick_filter",
+        menu: "Commands",
+        title: "Quick filter",
+        defaults: &["Ctrl+S"],
+        available: true,
+    },
+    CommandDef {
+        id: "cm_back",
+        menu: "Commands",
+        title: "Back",
+        defaults: &["Alt+Left"],
+        available: true,
+    },
+    CommandDef {
+        id: "cm_forward",
+        menu: "Commands",
+        title: "Forward",
+        defaults: &["Alt+Right"],
+        available: true,
+    },
+    CommandDef {
+        id: "cm_history_list",
+        menu: "Commands",
+        title: "Folder history",
+        defaults: &["Alt+Down"],
+        available: true,
+    },
+    CommandDef {
+        id: "cm_sync_dirs",
+        menu: "Commands",
+        title: "Synchronize dirs…",
+        defaults: &[],
+        available: true,
+    },
+    CommandDef {
         id: "cm_multi_rename",
         menu: "Files",
         title: "Multi-rename…",
@@ -474,6 +509,13 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "cm_config_options",
         menu: "Configuration",
         title: "Options…",
+        defaults: &[],
+        available: true,
+    },
+    CommandDef {
+        id: "cm_help_keys",
+        menu: "Help",
+        title: "Keyboard shortcuts",
         defaults: &[],
         available: true,
     },
@@ -721,13 +763,22 @@ mod tests {
         // Command as Ctrl: TC Ctrl+Up is Cmd+Up, which macOS leaves alone ...
         let cmd = mods(MacKey::Option, MacKey::Command);
         assert!(k.system_conflicts(&cmd).is_empty());
-        // ... and Control as Alt makes TC Alt+Up the reserved Control+Up.
+        // ... and Control as Alt makes TC Alt+Up the reserved Control+Up (and the default
+        // Alt+Left/Right/Down of the folder history too).
         k.bind(&c("Alt+Up"), "cm_root");
         let swapped = mods(MacKey::Control, MacKey::Option);
-        assert_eq!(
-            k.system_conflicts(&swapped),
-            vec![("Alt+Up".to_string(), "cm_root".to_string())]
-        );
+        let mut got = k.system_conflicts(&swapped);
+        got.sort();
+        let want: Vec<(String, String)> = [
+            ("Alt+Down", "cm_history_list"),
+            ("Alt+Left", "cm_back"),
+            ("Alt+Right", "cm_forward"),
+            ("Alt+Up", "cm_root"),
+        ]
+        .iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
+        assert_eq!(got, want);
     }
 
     #[test]

@@ -15,6 +15,7 @@ import {
   searchSettingsPatch,
   ICON_STYLES,
   iconStyle,
+  CONTEXT_ITEMS,
 } from "./lib.mjs";
 import { colorsSection } from "./colors.js";
 import { dialog, popModal, pushModal } from "./dialogs.js";
@@ -491,6 +492,14 @@ export function configureOptions() {
   iconLabel.append("Icons: ", iconSel);
   view.append(line(fontLabel), line(iconLabel), line(cmdLabel), line(fkeys.label), line(drive.label), line(head.label), line(foot.label));
 
+  // Right-click menu: every item can be switched off.
+  const menu = section("Right-click menu");
+  const offNow = new Set(work.contextMenuOff ?? []);
+  const menuChecks = CONTEXT_ITEMS.filter((i) => i !== "-").map(([id, label]) => ({ id, ...check(!offNow.has(id), label) }));
+  const menuGrid = el("div", "menugrid");
+  menuGrid.append(...menuChecks.map((m) => m.label));
+  menu.append(menuGrid);
+
   // Audio: the device list is read once, when the dialog opens.
   const audio = section("Audio");
   const savedOutput = work.audioOutput ?? "";
@@ -737,7 +746,7 @@ export function configureOptions() {
   );
 
   // Search (indexing) stays last: it is the longest section.
-  body.append(storage, editor, colors.el, view, audio, search);
+  body.append(storage, editor, colors.el, view, menu, audio, search);
 
   const close = () => {
     searchLive = null;
@@ -763,6 +772,7 @@ export function configureOptions() {
     work.showPanelHeader = head.box.checked;
     work.showPanelFooter = foot.box.checked;
     work.showFkeyBar = fkeys.box.checked;
+    work.contextMenuOff = menuChecks.filter((m) => !m.box.checked).map((m) => m.id);
     work.audioOutput = output.value || null;
     try {
       await ctx.invoke("save_settings", { settings: work });

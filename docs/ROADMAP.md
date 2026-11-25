@@ -3,15 +3,16 @@
 ## Next
 From the UI critique (docs/critique/UI_CRITIQUE_REPORT.md), not started:
 - Folder tabs per panel.
-- Help menu with the key table (Start and Help menus are empty).
-- Quick filter (TC Ctrl+S) and folder history back/forward.
 - Undo of the last file operation.
-- Content search in Find files; directory compare/sync; operation queue; branch view; thumbnails.
-- Dialog selects in the dialog font; F8 confirmation names a single item; follow system dark mode; screen-reader labels.
+- Content search in Find files; operation queue; branch view; thumbnails.
+- Screen-reader labels (VoiceOver).
 
 ## Right-click menu
-- Paste into the folder the items came from is refused ("same location"); Finder makes `name copy` instead.
-- Not in the menu yet (possible later): View (F3), Pack files (Alt+F5), Change attributes / Properties, Open with…, Quick Look, Show in Finder.
+- Open with, Quick Look and Show in Finder work on local files only (an archive or server item would first need a temporary copy).
+
+## Synchronize dirs
+- No saved comparisons; by content only for local files.
+- Several rows cannot be selected at once (only Defaults / Clear for all).
 
 ## Search
 - A full rebuild briefly holds two indexes in memory (about 2x RAM) while the new one replaces the old. By design: dropping the old index first would leave searches without results for the whole scan.
@@ -32,10 +33,13 @@ From the UI critique (docs/critique/UI_CRITIQUE_REPORT.md), not started:
 - The password is wiped on the Rust side; the JavaScript strings it passed through cannot be wiped and live until garbage collection.
 
 ## Drag & drop
-- A file promise dropped where an item with the same name exists fails with "already exists" (fxfm never overwrites there); a replace / keep both question like Finder's own copies would be nicer. Needs a check of what Finder does on a real Mac.
+- A file promise dropped where an item with the same name exists is written as `name 2.ext` beside it (never overwritten, no question). Whether Finder shows that new name at once needs a check with a real drag.
 - Writing promised items has no progress or Cancel in fxfm (only what the receiver shows itself).
 
 ## Done
+- **Synchronize dirs** (2026-11-25): Commands → Synchronize dirs… opens its own window and compares the two panels' folders (name, size, date, optionally content; subfolders; case- and NFC/NFD-insensitive names); modes Two-way, Mirror, Update and Delete-missing propose a direction per row, every row can be changed, and Synchronize runs the copies and Trash deletes as normal jobs after one confirmation.
+- **Quick filter, folder history, more right-click items** (2026-11-25): Ctrl+S filters the panel by text or mask; Alt+Left/Right go back/forward per panel, Alt+Down lists earlier folders; the right-click menu adds View, Open with…, Quick Look, Show in Finder, Pack files and Properties, and every item can be switched off in Options.
+- **Small fixes** (2026-11-25): Help → Keyboard shortcuts lists every command with its keys (the empty Start menu is gone); Paste into the folder the items came from makes Finder's `name copy`; F8 names a single item; a file promise dropped onto an existing name is kept beside it as `name 2.ext`; dialogs, menus and bars follow the system dark mode (panel colors stay as set in Options → Colors).
 - **Fast F5, Enter and F2 selection** (2026-11-25): Enter pressed right after F5/F6/F7… (under 150 ms) is no longer swallowed: the short key delay applies only to a dialog opened by Enter, Escape or Space. F2 selects the whole name, extension included.
 - **Right-click menu and clipboard** (2026-11-24): right click (or Shift+F10) on a row: Open, Copy name, Copy path, Cut, Copy, Paste, Delete, Rename; Copy/Cut use the macOS clipboard (local files paste in Finder, Finder's copied files paste in a panel); Paste runs the copy/move without the F5 dialog.
 - **Change attributes on local files** (2026-11-24): Files → Change attributes… (octal and rwx boxes) also works on local files and folders (a symlink: its target), not only on SFTP/SCP; items inside archives are refused. Dates and macOS flags (hidden, locked) are not changed there yet.

@@ -722,28 +722,65 @@ pub async fn open_find_files(
     app: AppHandle,
     geometry: Option<WindowGeometry>,
 ) -> Result<bool, String> {
-    if let Some(w) = app.get_webview_window(FIND_FILES_WINDOW) {
+    open_tool_window(
+        &app,
+        FIND_FILES_WINDOW,
+        "search.html",
+        "Find files",
+        (820.0, 560.0),
+        FIND_FILES_MIN,
+        geometry,
+    )
+}
+
+/// Label of the Synchronize dirs window (`sync.html`); there is one at a time.
+pub const SYNC_WINDOW: &str = "syncdirs";
+
+/// Commands → Synchronize dirs: opens its window like `open_find_files` (or focuses it).
+#[tauri::command]
+pub async fn open_sync_dirs(
+    app: AppHandle,
+    geometry: Option<WindowGeometry>,
+) -> Result<bool, String> {
+    open_tool_window(
+        &app,
+        SYNC_WINDOW,
+        "sync.html",
+        "Synchronize dirs",
+        (1000.0, 640.0),
+        (640.0, 420.0),
+        geometry,
+    )
+}
+
+/// A separate tool window `label` (one at a time): created hidden at its kept geometry (when
+/// that is still on a screen), or the open one is brought to the front. True when created.
+fn open_tool_window(
+    app: &AppHandle,
+    label: &str,
+    url: &str,
+    title: &str,
+    size: (f64, f64),
+    (min_w, min_h): (f64, f64),
+    geometry: Option<WindowGeometry>,
+) -> Result<bool, String> {
+    if let Some(w) = app.get_webview_window(label) {
         let _ = w.unminimize();
         w.show().map_err(|e| e.to_string())?;
         w.set_focus().map_err(|e| e.to_string())?;
         return Ok(false);
     }
-    let (min_w, min_h) = FIND_FILES_MIN;
-    let mut b = WebviewWindowBuilder::new(
-        &app,
-        FIND_FILES_WINDOW,
-        WebviewUrl::App("search.html".into()),
-    )
-    .title("Find files")
-    .inner_size(820.0, 560.0)
-    .min_inner_size(min_w, min_h)
-    .visible(false);
+    let mut b = WebviewWindowBuilder::new(app, label, WebviewUrl::App(url.into()))
+        .title(title)
+        .inner_size(size.0, size.1)
+        .min_inner_size(min_w, min_h)
+        .visible(false);
     let g = geometry.filter(|g| g.width.is_finite() && g.height.is_finite());
     if let Some(g) = g {
         b = b.inner_size(g.width.max(min_w), g.height.max(min_h));
     }
     match g.and_then(|g| g.x.zip(g.y)) {
-        Some((x, y)) if on_screen(&screens(&app), x, y) => b = b.position(x, y),
+        Some((x, y)) if on_screen(&screens(app), x, y) => b = b.position(x, y),
         _ => b = b.center(),
     }
     if g.is_some_and(|g| g.maximized) {

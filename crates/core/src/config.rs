@@ -250,6 +250,8 @@ pub struct Settings {
     /// Row icons: "finder" (macOS icons, default) or "emoji"; the UI treats unknown values as
     /// "finder".
     pub icons: String,
+    /// Right-click menu items switched off in Options (item ids, e.g. "quick_look"); empty: all on.
+    pub context_menu_off: Vec<String>,
 }
 
 /// A volume the user added to the search index.
@@ -324,6 +326,7 @@ impl Default for Settings {
             search: SearchSettings::default(),
             quick_search: "command".into(),
             icons: "finder".into(),
+            context_menu_off: Vec::new(),
         }
     }
 }
@@ -585,6 +588,7 @@ mod tests {
         assert!(!s.show_command_line);
         assert!(!s.show_drive_bar);
         assert_eq!(s.icons, "finder");
+        assert!(s.context_menu_off.is_empty());
         assert!(s.show_panel_header && s.show_panel_footer && s.show_fkey_bar);
     }
 

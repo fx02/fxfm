@@ -1196,6 +1196,13 @@ test("deleteConfirmText: server text, else the existing texts", () => {
   assert.equal(lib.deleteConfirmText("/a", 1, { toTrash: false }), "Do you really want to delete 1 file(s)/dir(s) permanently?");
 });
 
+test("deleteConfirmText: a single item is named", () => {
+  assert.equal(lib.deleteConfirmText("/a", 1, { toTrash: true, name: "b.txt" }), 'Do you really want to move "b.txt" to the Trash?');
+  assert.equal(lib.deleteConfirmText("sftp://m/", 1, { name: "x" }), 'Delete "x" from the server? This cannot be undone.');
+  assert.equal(lib.deleteConfirmText("/a/x.zip", 1, { inArchive: true, name: "y" }), 'Delete "y" from archive? This cannot be undone.');
+  assert.equal(lib.deleteConfirmText("/a", 2, { toTrash: true, name: "ignored" }), "Do you really want to move 2 file(s)/dir(s) to the Trash?");
+});
+
 test("lostToShow: drops names closed on purpose (until the next connect), and duplicates", () => {
   const closed = new Set(["a"]);
   assert.deepEqual(lib.lostToShow(["a", "b", "c", "c"], closed), ["b", "c"]);
@@ -2250,16 +2257,46 @@ test("pasteSource: own Copy/Cut while the clipboard holds it, else files copied 
   assert.equal(lib.pasteSource(remote, { change: 4, files: [] }), null);
 });
 
-test("contextMenuItems: Open, copy name/path, clipboard, Delete, Rename; empty space and .. only Paste", () => {
+test("contextMenuItems: all items in order; empty space and .. only Paste", () => {
   const ids = (items) => items.map((i) => (i === "-" ? "-" : i[0]));
   assert.deepEqual(ids(lib.contextMenuItems({ name: "a" }, 1)), [
-    "open", "-", "cm_copy_names_to_clip", "cm_copy_full_names_to_clip", "-",
-    "cm_cut_to_clipboard", "cm_copy_to_clipboard", "cm_paste_from_clipboard", "-", "cm_delete", "cm_rename",
+    "open", "cm_view", "open_with", "quick_look", "show_in_finder", "-",
+    "cm_copy_names_to_clip", "cm_copy_full_names_to_clip", "-",
+    "cm_cut_to_clipboard", "cm_copy_to_clipboard", "cm_paste_from_clipboard", "-",
+    "cm_packfiles", "cm_delete", "cm_rename", "-", "cm_chmod",
   ]);
-  assert.equal(lib.contextMenuItems({ name: "a" }, 1)[2][1], "Copy name");
-  assert.equal(lib.contextMenuItems({ name: "a" }, 3)[3][1], "Copy paths");
+  assert.equal(lib.contextMenuItems({ name: "a" }, 3)[7][1], "Copy paths");
   assert.deepEqual(lib.contextMenuItems(null, 0), [["cm_paste_from_clipboard", "Paste"]]);
   assert.deepEqual(lib.contextMenuItems({ name: "..", up: true }, 0), [["cm_paste_from_clipboard", "Paste"]]);
+  assert.deepEqual(lib.contextMenuItems(null, 0, ["cm_paste_from_clipboard"]), []);
+});
+
+test("contextMenuItems: switched-off items and their lines go; server items lose the local ones", () => {
+  const ids = (items) => items.map((i) => (i === "-" ? "-" : i[0]));
+  const off = ["cm_copy_names_to_clip", "cm_copy_full_names_to_clip", "cm_chmod", "cm_view", "open_with", "quick_look", "show_in_finder"];
+  assert.deepEqual(ids(lib.contextMenuItems({ name: "a" }, 1, off)), [
+    "open", "-", "cm_cut_to_clipboard", "cm_copy_to_clipboard", "cm_paste_from_clipboard", "-", "cm_packfiles", "cm_delete", "cm_rename",
+  ]);
+  assert.deepEqual(ids(lib.contextMenuItems({ name: "a" }, 1, [], false)).slice(0, 3), ["open", "cm_view", "-"]);
+});
+
+test("filterMatch: text inside the name, or masks with * and ?", () => {
+  assert.equal(lib.filterMatch("Report.PDF", "port"), true);
+  assert.equal(lib.filterMatch("Report.PDF", "*.pdf"), true);
+  assert.equal(lib.filterMatch("a.txt", "*.pdf;*.txt"), true);
+  assert.equal(lib.filterMatch("a.txt", "*.pdf"), false);
+  assert.equal(lib.filterMatch("a.txt", "b"), false);
+  assert.equal(lib.filterMatch("a.txt", "  "), true);
+});
+
+test("pushHistory: appends, replaces an equal last place, keeps HISTORY_MAX", () => {
+  let h = lib.pushHistory([], { location: "/a" });
+  h = lib.pushHistory(h, { location: "/b", cursorName: "x" });
+  h = lib.pushHistory(h, { location: "/b", cursorName: "y" });
+  assert.deepEqual(h, [{ location: "/a" }, { location: "/b", cursorName: "y" }]);
+  for (let i = 0; i < 60; i++) h = lib.pushHistory(h, { location: `/${i}` });
+  assert.equal(h.length, lib.HISTORY_MAX);
+  assert.equal(h[h.length - 1].location, "/59");
 });
 
 test("openedByActivationKey: only Enter/Escape/Space just before the modal opened", () => {
@@ -2269,4 +2306,132 @@ test("openedByActivationKey: only Enter/Escape/Space just before the modal opene
   assert.equal(lib.openedByActivationKey({ key: "F5", at: 1000 }, 1001), false);
   assert.equal(lib.openedByActivationKey({ key: "Enter", at: 1000 }, 2000), false);
   assert.equal(lib.openedByActivationKey(null, 5), false);
+});
+
+test("copyName: Finder's copy names, extension kept, folders whole", () => {
+  assert.equal(lib.copyName("a.txt", new Set(["a.txt"])), "a copy.txt");
+  assert.equal(lib.copyName("a.txt", new Set(["a.txt", "a copy.txt"])), "a copy 2.txt");
+  assert.equal(lib.copyName("x.tar.gz", new Set()), "x copy.tar.gz");
+  assert.equal(lib.copyName("README", new Set()), "README copy");
+  assert.equal(lib.copyName("v1.2", new Set(), true), "v1.2 copy");
+});
+
+test("keyTableRows: every command with its bound keys, or a dash", () => {
+  const cmds = [{ id: "cm_copy", menu: "Files", title: "Copy" }, { id: "cm_x", menu: "Help", title: "X" }];
+  const rows = lib.keyTableRows(cmds, { F5: "cm_copy", "Shift+F5": "cm_copy", F6: "cm_move" }, (k) => `[${k}]`);
+  assert.deepEqual(rows, [["Files", "Copy", "[F5], [Shift+F5]"], ["Help", "X", "—"]]);
+});
+
+const srow = (rel, state, l, r, ld = "/L", rd = "/R") => ({
+  rel,
+  state,
+  leftDir: ld,
+  rightDir: rd,
+  left: l === null ? null : { name: l ?? rel, isDir: false, size: 10, mtime: 0 },
+  right: r === null ? null : { name: r ?? rel, isDir: false, size: 20, mtime: 0 },
+});
+
+test("syncDefaultAction / syncActionAllowed / syncSymbol", () => {
+  assert.equal(lib.syncDefaultAction("leftOnly"), "right");
+  assert.equal(lib.syncDefaultAction("leftNewer"), "right");
+  assert.equal(lib.syncDefaultAction("rightOnly"), "left");
+  assert.equal(lib.syncDefaultAction("rightNewer"), "left");
+  for (const s of ["equal", "differs", "typeMismatch"]) assert.equal(lib.syncDefaultAction(s), "none");
+  assert.equal(lib.syncActionAllowed(srow("a", "leftOnly", "a", null), "left"), false);
+  assert.equal(lib.syncActionAllowed(srow("a", "leftOnly", "a", null), "right"), true);
+  assert.equal(lib.syncActionAllowed(srow("a", "typeMismatch"), "right"), false);
+  assert.equal(lib.syncActionAllowed(srow("a", "typeMismatch"), "none"), true);
+  assert.equal(lib.syncActionAllowed(srow("a", "nameClash", "a", null), "right"), false);
+  assert.equal(lib.syncModeAction("mirrorRight", srow("a", "nameClash", "a", null)), "none");
+  const both = srow("d", "equal");
+  both.left.isDir = true;
+  both.right.isDir = true;
+  assert.equal(lib.syncActionAllowed(both, "right"), false);
+  assert.deepEqual(lib.syncPlan([both], ["right"]), []);
+  assert.equal(lib.syncSymbol("right", "differs"), "→");
+  assert.equal(lib.syncSymbol("none", "equal"), "=");
+  assert.equal(lib.syncSymbol("none", "differs"), "≠");
+});
+
+test("syncPlan: one job per folder pair and direction, into the folder; never for none or mismatch", () => {
+  const rows = [
+    srow("a", "leftNewer"),
+    srow("b", "leftOnly", "b", null),
+    srow("c", "rightNewer"),
+    srow("d/x", "leftOnly", "x", null, "/L/d", "/R/d"),
+    srow("e", "equal"),
+    srow("f", "typeMismatch"),
+  ];
+  const jobs = lib.syncPlan(rows, ["right", "right", "left", "right", "none", "right"]);
+  assert.deepEqual(jobs, [
+    { kind: "copy", sources: ["/L/a", "/L/b"], dest: "/R/", cwd: "/L" },
+    { kind: "copy", sources: ["/R/c"], dest: "/L/", cwd: "/R" },
+    { kind: "copy", sources: ["/L/d/x"], dest: "/R/d/", cwd: "/L/d" },
+  ]);
+  assert.deepEqual(lib.syncCounts(rows, ["right", "right", "left", "right", "none", "right"]), { right: 3, left: 1, rightBytes: 30, leftBytes: 20, delRight: 0, delLeft: 0 });
+});
+
+test("syncPlan: a target spelled differently (NFD/NFC) is overwritten at its exact path", () => {
+  const rows = [srow("č.txt", "leftNewer", "č.txt", "č.txt", "sftp://s/a", "/R/")];
+  assert.deepEqual(lib.syncPlan(rows, ["right"]), [{ kind: "copy", sources: ["sftp://s/a/č.txt"], dest: "/R/č.txt", cwd: "sftp://s/a" }]);
+  assert.deepEqual(lib.syncPlan(rows, ["left"]), [{ kind: "copy", sources: ["/R/č.txt"], dest: "sftp://s/a/č.txt", cwd: "/R/" }]);
+});
+
+test("syncModeAction: mirror copies every difference one way and deletes what the source lacks", () => {
+  const rows = {
+    lo: srow("lo", "leftOnly", "lo", null),
+    ro: srow("ro", "rightOnly", null, "ro"),
+    ln: srow("ln", "leftNewer"),
+    rn: srow("rn", "rightNewer"),
+    df: srow("df", "differs"),
+    eq: srow("eq", "equal"),
+    tm: srow("tm", "typeMismatch"),
+  };
+  const run = (mode) => Object.fromEntries(Object.entries(rows).map(([k, r]) => [k, lib.syncModeAction(mode, r)]));
+  assert.deepEqual(run("mirrorRight"), { lo: "right", ro: "delRight", ln: "right", rn: "right", df: "right", eq: "none", tm: "none" });
+  assert.deepEqual(run("mirrorLeft"), { lo: "delLeft", ro: "left", ln: "left", rn: "left", df: "left", eq: "none", tm: "none" });
+  assert.deepEqual(run("updateRight"), { lo: "right", ro: "none", ln: "right", rn: "none", df: "none", eq: "none", tm: "none" });
+  assert.deepEqual(run("updateLeft"), { lo: "none", ro: "left", ln: "none", rn: "left", df: "none", eq: "none", tm: "none" });
+  assert.deepEqual(run("deleteRight"), { lo: "none", ro: "delRight", ln: "none", rn: "none", df: "none", eq: "none", tm: "none" });
+  assert.deepEqual(run("deleteLeft"), { lo: "delLeft", ro: "none", ln: "none", rn: "none", df: "none", eq: "none", tm: "none" });
+  assert.deepEqual(run("twoWay"), { lo: "right", ro: "left", ln: "right", rn: "left", df: "none", eq: "none", tm: "none" });
+});
+
+test("syncActionAllowed / syncPlan: deletes need that side's item, never a shared folder; copies come first", () => {
+  assert.equal(lib.syncActionAllowed(srow("lo", "leftOnly", "lo", null), "delRight"), false);
+  assert.equal(lib.syncActionAllowed(srow("lo", "leftOnly", "lo", null), "delLeft"), true);
+  const both = srow("d", "equal");
+  both.left.isDir = true;
+  both.right.isDir = true;
+  assert.equal(lib.syncActionAllowed(both, "delRight"), false);
+  const rows = [srow("ro", "rightOnly", null, "ro"), srow("lo", "leftOnly", "lo", null), srow("x", "leftOnly", "x", null, "/L/d", "/R/d")];
+  assert.deepEqual(lib.syncPlan(rows, ["delRight", "right", "delLeft"]), [
+    { kind: "copy", sources: ["/L/lo"], dest: "/R/", cwd: "/L" },
+    { kind: "delete", paths: ["/R/ro"], toTrash: true },
+    { kind: "delete", paths: ["/L/d/x"], toTrash: true },
+  ]);
+  assert.deepEqual(lib.syncCounts(rows, ["delRight", "right", "delLeft"]), { right: 1, left: 0, rightBytes: 10, leftBytes: 0, delRight: 1, delLeft: 1 });
+  assert.equal(lib.syncSymbol("delRight", "rightOnly"), "→✕");
+  assert.equal(lib.syncSymbol("delLeft", "leftOnly"), "✕←");
+});
+
+test("syncSort: by direction → ← = ≠, by size/date/name, missing side last, desc", () => {
+  const rows = [
+    srow("e", "equal"),
+    srow("d", "differs"),
+    srow("l", "rightNewer"),
+    srow("r2", "leftOnly", "r2", null),
+    srow("r1", "leftNewer"),
+    srow("x", "rightOnly", null, "x"),
+  ];
+  const actions = ["none", "none", "left", "right", "right", "delRight"];
+  const all = [0, 1, 2, 3, 4, 5];
+  const rels = (idx) => idx.map((i) => rows[i].rel);
+  assert.deepEqual(rels(lib.syncSort(rows, actions, all, "action")), ["r1", "r2", "x", "l", "e", "d"]);
+  assert.deepEqual(rels(lib.syncSort(rows, actions, all, "action", true)), ["d", "e", "l", "x", "r1", "r2"]);
+  assert.deepEqual(rels(lib.syncSort(rows, actions, all, "leftName")), ["d", "e", "l", "r1", "r2", "x"]);
+  assert.deepEqual(rels(lib.syncSort(rows, actions, all, "leftName", true)), ["r2", "r1", "l", "e", "d", "x"]);
+  rows[0].right.size = 5;
+  assert.deepEqual(rels(lib.syncSort(rows, actions, all, "rightSize")), ["e", "d", "l", "r1", "x", "r2"]);
+  assert.deepEqual(rels(lib.syncSort(rows, actions, [2, 0], null)), ["l", "e"]);
 });

@@ -4,6 +4,7 @@
 mod audio;
 mod clipboard;
 mod commands;
+mod dirsync;
 mod dragdrop;
 mod editwatch;
 mod fnkey;
@@ -14,6 +15,7 @@ mod jobs;
 mod keychain;
 mod launch;
 mod menu;
+mod openwith;
 mod remote;
 mod search;
 mod smb;
@@ -75,6 +77,7 @@ fn main() {
             commands::location_in_archive,
             commands::open_viewer,
             commands::open_find_files,
+            commands::open_sync_dirs,
             commands::edit_file,
             commands::open_remote_archive,
             commands::cancel_download,
@@ -113,6 +116,11 @@ fn main() {
             icons::file_icons,
             clipboard::clipboard_write,
             clipboard::clipboard_files,
+            openwith::open_with_apps,
+            openwith::open_with,
+            openwith::show_in_finder,
+            dirsync::sync_compare,
+            dirsync::sync_cancel,
             search::commands::search_status,
             search::commands::search_build,
             search::commands::search_start,

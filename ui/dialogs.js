@@ -7,6 +7,8 @@ import {
   archiveOf,
   CHOOSE_FOLDER,
   NOTHING_TO_PASTE,
+  ALREADY_HERE,
+  copyName,
   PASTE_NEEDS_FOLDER,
   pasteSource,
   copyTargetDefault,
@@ -268,6 +270,46 @@ export async function withPassword(fn) {
 
 function message(title, text) {
   return dialog({ title, text, buttons: [{ label: "OK", value: "ok", default: true }] });
+}
+
+/** A read-only table (`head`: column titles, `rows`: arrays of cell texts) with OK; Enter/Escape close it. */
+export function showTable(title, head, rows) {
+  return new Promise((resolve) => {
+    const { backdrop, box, body, row } = frame(title);
+    box.classList.add("tablebox");
+    const table = el("table");
+    const tr = el("tr");
+    for (const h of head) tr.append(el("th", null, h));
+    table.append(tr);
+    for (const r of rows) {
+      const line = el("tr");
+      for (const c of r) line.append(el("td", null, c));
+      table.append(line);
+    }
+    const scroll = el("div", "scroll");
+    scroll.append(table);
+    body.append(scroll);
+    const ok = el("button", null, "OK");
+    row.append(ok);
+    const modal = { el: backdrop };
+    const close = () => {
+      popModal(modal);
+      resolve();
+    };
+    ok.addEventListener("click", close);
+    modal.onKey = (e) => {
+      if (e.key === "Enter" || e.key === "Escape") {
+        e.preventDefault();
+        close();
+      } else if (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "PageDown" || e.key === "PageUp") {
+        e.preventDefault();
+        const step = e.key.startsWith("Page") ? scroll.clientHeight - 20 : 24;
+        scroll.scrollTop += e.key === "ArrowDown" || e.key === "PageDown" ? step : -step;
+      }
+    };
+    pushModal(modal);
+    ok.focus();
+  });
 }
 
 // ---------------------------------------------------------------- jobs
@@ -740,6 +782,28 @@ async function transfer(jobKind, { paths, cwd, target, source }) {
   }
 }
 
+// ---------------------------------------------------------------- synchronize dirs
+
+/**
+ * Runs the copy jobs of a synchronization one after the other. Every row was given its
+ * direction by the user, so an existing target is overwritten without asking (one shared
+ * "Overwrite all"); a cancelled or failed job stops the rest. Resolves with how many ran fully.
+ */
+export async function runSyncJobs(jobs) {
+  const shared = { all: { kind: "overwriteAll" } };
+  let ok = 0;
+  try {
+    for (const req of jobs) {
+      const done = await runJob(req, null, { recheck: false, shared });
+      if (!done || !jobSucceeded(done)) break;
+      ok += 1;
+    }
+  } finally {
+    await Promise.all(ctx.panels().map((p) => p.refresh()));
+  }
+  return ok;
+}
+
 // ---------------------------------------------------------------- clipboard
 
 /** fxfm's own last Copy/Cut to the clipboard: {kind, paths, cwd, change} (see `pasteSource`). */
@@ -781,9 +845,26 @@ export async function pasteFiles() {
     dst.setMessage(NOTHING_TO_PASTE);
     return;
   }
-  await transfer(p.kind, { paths: p.paths, cwd: p.cwd, target: dst.location, source: null });
+  const here = dst.location;
+  const same = p.paths.filter((x) => parentLocation(x) === here);
+  const rest = p.paths.filter((x) => parentLocation(x) !== here);
+  if (p.kind === "move" && !rest.length) {
+    dst.setMessage(ALREADY_HERE);
+    return;
+  }
+  if (rest.length) await transfer(p.kind, { paths: rest, cwd: p.cwd, target: here, source: null });
   // Moved items are gone from where they were: a second Paste has nothing to move.
   if (p.kind === "move") clip = null;
+  // Copied into their own folder: each gets Finder's "name copy" (a target without "/" is the new name).
+  if (p.kind === "copy" && same.length) {
+    const taken = new Set(dst.entries.map((e) => e.name));
+    for (const x of same) {
+      const old = lastComponent(x);
+      const name = copyName(old, taken, dst.entries.find((e) => e.name === old)?.isDir);
+      taken.add(name);
+      await transfer("copy", { paths: [x], cwd: here, target: joinLocation(here, name), source: null });
+    }
+  }
 }
 
 /**
@@ -962,7 +1043,7 @@ export async function deleteItems(toTrash) {
   }
   const r = await dialog({
     title: "Delete",
-    text: deleteConfirmText(src.location, sources.length, { inArchive, toTrash }),
+    text: deleteConfirmText(src.location, sources.length, { inArchive, toTrash, name: sources[0].name }),
     buttons: YES_NO,
   });
   if (r !== "yes") return;

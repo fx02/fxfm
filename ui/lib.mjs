@@ -479,6 +479,23 @@ function extensionStart(name) {
   return dot > 0 ? dot : -1;
 }
 
+/**
+ * Finder's name for a copy pasted into its own folder: "a copy.txt", then "a copy 2.txt"…;
+ * a folder keeps any dots ("v1.2 copy"). `taken`: Set of the names already there.
+ */
+export function copyName(name, taken, isDir = false) {
+  const at = isDir ? -1 : extensionStart(name);
+  const base = at < 0 ? name : name.slice(0, at);
+  const ext = at < 0 ? "" : name.slice(at);
+  for (let n = 1; ; n++) {
+    const candidate = `${base} copy${n > 1 ? ` ${n}` : ""}${ext}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
+/** Status text when a Cut is pasted into the folder it came from. */
+export const ALREADY_HERE = "The items are already in this folder";
+
 /** First free "name (n).ext" (n ≥ 2) not in `existing` (Set or array of names). */
 export function suggestRename(name, existing) {
   const taken = existing instanceof Set ? existing : new Set(existing);
@@ -1849,10 +1866,12 @@ export function chmodSummary(results) {
 }
 
 /** F8 / Shift+F8 question: on a server always permanent, else the archive / Trash / permanent text. */
-export function deleteConfirmText(location, n, { inArchive = false, toTrash = false } = {}) {
-  if (parseRemote(location)) return `Delete ${n} file(s) from the server? This cannot be undone.`;
-  if (inArchive) return `Delete ${n} file(s) from archive? This cannot be undone.`;
-  const what = `${n} file(s)/dir(s)`;
+export function deleteConfirmText(location, n, { inArchive = false, toTrash = false, name = null } = {}) {
+  // One item is named (as in TC); several are counted.
+  const one = n === 1 && name ? `"${name}"` : null;
+  if (parseRemote(location)) return `Delete ${one ?? `${n} file(s)`} from the server? This cannot be undone.`;
+  if (inArchive) return `Delete ${one ?? `${n} file(s)`} from archive? This cannot be undone.`;
+  const what = one ?? `${n} file(s)/dir(s)`;
   return toTrash ? `Do you really want to move ${what} to the Trash?` : `Do you really want to delete ${what} permanently?`;
 }
 
@@ -2494,25 +2513,250 @@ export function pasteSource(clip, board) {
   return { kind: "copy", paths: board.files, cwd: parentLocation(board.files[0]) };
 }
 
+/** Every right-click item in menu order ([id, label] or "-"); ids are command ids or own actions. */
+export const CONTEXT_ITEMS = [
+  ["open", "Open"],
+  ["cm_view", "View"],
+  ["open_with", "Open with…"],
+  ["quick_look", "Quick Look"],
+  ["show_in_finder", "Show in Finder"],
+  "-",
+  ["cm_copy_names_to_clip", "Copy name"],
+  ["cm_copy_full_names_to_clip", "Copy path"],
+  "-",
+  ["cm_cut_to_clipboard", "Cut"],
+  ["cm_copy_to_clipboard", "Copy"],
+  ["cm_paste_from_clipboard", "Paste"],
+  "-",
+  ["cm_packfiles", "Pack files…"],
+  ["cm_delete", "Delete"],
+  ["cm_rename", "Rename"],
+  "-",
+  ["cm_chmod", "Properties…"],
+];
+
+/** Items that need a local file (macOS opens it itself). */
+const LOCAL_ONLY = new Set(["open_with", "quick_look", "show_in_finder"]);
+
 /**
- * Right-click menu of a panel as [commandId, label] pairs and "-" separators. `entry`: the row
- * under the pointer (null or `..`: only Paste); `n`: how many items the commands act on.
+ * Right-click menu of a panel as [id, label] pairs and "-" separators. `entry`: the row under
+ * the pointer (null or `..`: only Paste); `n`: how many items the commands act on; `off`: ids
+ * switched off in Options; `local`: the items are local files (not in an archive or on a server).
+ * Separators never lead, trail or repeat.
  */
-export function contextMenuItems(entry, n) {
-  const paste = ["cm_paste_from_clipboard", "Paste"];
-  if (!entry || entry.up) return [paste];
+export function contextMenuItems(entry, n, off = [], local = true) {
+  const skip = new Set(off);
+  const want = !entry || entry.up ? ["cm_paste_from_clipboard"] : null;
   const s = n > 1 ? "s" : "";
-  return [
-    ["open", "Open"],
-    "-",
-    ["cm_copy_names_to_clip", `Copy name${s}`],
-    ["cm_copy_full_names_to_clip", `Copy path${s}`],
-    "-",
-    ["cm_cut_to_clipboard", "Cut"],
-    ["cm_copy_to_clipboard", "Copy"],
-    paste,
-    "-",
-    ["cm_delete", "Delete"],
-    ["cm_rename", "Rename"],
-  ];
+  const out = [];
+  for (const it of CONTEXT_ITEMS) {
+    if (it === "-") {
+      if (out.length && out[out.length - 1] !== "-") out.push("-");
+      continue;
+    }
+    const [id, label] = it;
+    if (skip.has(id) || (want && !want.includes(id)) || (!local && LOCAL_ONLY.has(id))) continue;
+    out.push([id, id === "cm_copy_names_to_clip" || id === "cm_copy_full_names_to_clip" ? label + s : label]);
+  }
+  while (out[out.length - 1] === "-") out.pop();
+  return out;
+}
+
+/**
+ * Quick filter (Ctrl+S): `pattern` with `*` or `?` is a mask (several split by ";"),
+ * anything else must appear in the name; case does not matter.
+ */
+export function filterMatch(name, pattern) {
+  const p = pattern.trim();
+  if (!p) return true;
+  if (/[*?]/.test(p)) return matchMask(name, p);
+  return name.normalize("NFC").toLowerCase().includes(p.normalize("NFC").toLowerCase());
+}
+
+/** Folder history: at most this many places back (and forward). */
+export const HISTORY_MAX = 50;
+
+/** `list` with `item` added at the end (an equal last location is replaced), capped at HISTORY_MAX. */
+export function pushHistory(list, item) {
+  const out = list.length && list[list.length - 1].location === item.location ? list.slice(0, -1) : [...list];
+  out.push(item);
+  return out.slice(-HISTORY_MAX);
+}
+
+/**
+ * Help → Keyboard shortcuts: [menu, title, keys] per command in registry order; `keys` are the
+ * combos bound to it in `keymap` (combo → id), labelled with `label`, or "—".
+ */
+export function keyTableRows(commands, keymap, label) {
+  return commands.map((c) => {
+    const keys = Object.keys(keymap).filter((k) => keymap[k] === c.id);
+    return [c.menu, c.title, keys.length ? keys.map(label).join(", ") : "—"];
+  });
+}
+
+// ---------------------------------------------------------------- synchronize dirs
+
+/**
+ * Synchronize dirs modes: [id, label]. Each proposes a direction per row (`syncModeAction`);
+ * the user can still change every row before Synchronize.
+ */
+export const SYNC_MODES = [
+  ["twoWay", "Two-way (newer and missing go both ways)"],
+  ["mirrorRight", "Mirror → (make the right side like the left)"],
+  ["mirrorLeft", "Mirror ← (make the left side like the right)"],
+  ["updateRight", "Update → (new and newer files to the right)"],
+  ["updateLeft", "Update ← (new and newer files to the left)"],
+  ["deleteRight", "Delete on the right what the left lacks"],
+  ["deleteLeft", "Delete on the left what the right lacks"],
+];
+
+/** Default direction of a compared row (`state` from `sync_compare`): newer / one-sided goes over. */
+export function syncDefaultAction(state) {
+  return syncModeAction("twoWay", { state });
+}
+
+/**
+ * Direction `mode` proposes for `row`: "right" / "left" (copy that way), "delRight" / "delLeft"
+ * (move the item on that side to the Trash) or "none". Mirror copies every difference one way
+ * and deletes what the source lacks; Update only copies new and newer items one way.
+ */
+export function syncModeAction(mode, row) {
+  const s = row.state;
+  const pick = (a) => (syncActionAllowed(row, a) ? a : "none");
+  switch (mode) {
+    case "mirrorRight":
+      if (s === "rightOnly") return pick("delRight");
+      return ["leftOnly", "leftNewer", "rightNewer", "differs"].includes(s) ? pick("right") : "none";
+    case "mirrorLeft":
+      if (s === "leftOnly") return pick("delLeft");
+      return ["rightOnly", "rightNewer", "leftNewer", "differs"].includes(s) ? pick("left") : "none";
+    case "updateRight":
+      return s === "leftOnly" || s === "leftNewer" ? pick("right") : "none";
+    case "updateLeft":
+      return s === "rightOnly" || s === "rightNewer" ? pick("left") : "none";
+    case "deleteRight":
+      return s === "rightOnly" ? pick("delRight") : "none";
+    case "deleteLeft":
+      return s === "leftOnly" ? pick("delLeft") : "none";
+    default:
+      if (s === "leftOnly" || s === "leftNewer") return "right";
+      if (s === "rightOnly" || s === "rightNewer") return "left";
+      return "none";
+  }
+}
+
+/** May `row` get `action`? Copying needs the source item, deleting the item on that side. */
+export function syncActionAllowed(row, action) {
+  if (action === "none") return true;
+  if (row.state === "typeMismatch" || row.state === "nameClash") return false;
+  // A folder on both sides is compared inside; copying or deleting it whole would hit every file in it.
+  if (row.left?.isDir && row.right?.isDir) return false;
+  if (action === "right" || action === "delLeft") return Boolean(row.left);
+  if (action === "left" || action === "delRight") return Boolean(row.right);
+  return false;
+}
+
+/** The symbol of an action in the list. */
+export function syncSymbol(action, state) {
+  const sym = { right: "→", left: "←", delRight: "→✕", delLeft: "✕←" }[action];
+  if (sym) return sym;
+  return state === "equal" ? "=" : "≠";
+}
+
+const syncJoin = (dir, name) => `${dir.replace(/\/+$/, "")}/${name}`;
+
+/**
+ * Jobs for the rows with an action (`actions[i]` for `rows[i]`), copies first, then deletes:
+ * sources from one folder into the same folder on the other side are one copy job (dest ends
+ * with "/": into that folder); a file spelled differently on the target (NFC/NFD) is copied
+ * onto that exact path instead, so no second file appears. Deletes go to the Trash (servers and
+ * archives: permanently, the delete job asks).
+ */
+export function syncPlan(rows, actions) {
+  const groups = new Map();
+  const jobs = [];
+  const del = { delLeft: [], delRight: [] };
+  rows.forEach((row, i) => {
+    const a = actions[i];
+    if (a === "none" || !syncActionAllowed(row, a)) return;
+    if (a === "delLeft" || a === "delRight") {
+      del[a].push(a === "delLeft" ? syncJoin(row.leftDir, row.left.name) : syncJoin(row.rightDir, row.right.name));
+      return;
+    }
+    const [src, srcDir, dst, dstDir] = a === "right" ? [row.left, row.leftDir, row.right, row.rightDir] : [row.right, row.rightDir, row.left, row.leftDir];
+    const from = syncJoin(srcDir, src.name);
+    if (dst && dst.name !== src.name) {
+      jobs.push({ kind: "copy", sources: [from], dest: syncJoin(dstDir, dst.name), cwd: srcDir });
+      return;
+    }
+    const key = `${a}\n${srcDir}\n${dstDir}`;
+    if (!groups.has(key)) {
+      const job = { kind: "copy", sources: [], dest: `${dstDir.replace(/\/+$/, "")}/`, cwd: srcDir };
+      groups.set(key, job);
+      jobs.push(job);
+    }
+    groups.get(key).sources.push(from);
+  });
+  for (const paths of [del.delRight, del.delLeft]) if (paths.length) jobs.push({ kind: "delete", paths, toTrash: true });
+  return jobs;
+}
+
+/** Counts for the summary line: items and bytes copied each way, items deleted on each side. */
+export function syncCounts(rows, actions) {
+  const c = { right: 0, left: 0, rightBytes: 0, leftBytes: 0, delRight: 0, delLeft: 0 };
+  rows.forEach((row, i) => {
+    const a = actions[i];
+    if (a === "none" || !syncActionAllowed(row, a)) return;
+    c[a] += 1;
+    if (a === "right" || a === "left") {
+      const src = a === "right" ? row.left : row.right;
+      c[`${a}Bytes`] += src.isDir ? 0 : src.size;
+    }
+  });
+  return c;
+}
+
+/** Synchronize dirs window ↔ main window: the window asks, the main window answers. */
+export const SYNC_ACTION = "syncdirs://action";
+export const SYNC_REPLY = "syncdirs://reply";
+
+/** Sort order of the direction column: → first (with deletes on the right), then ←, unchanged, ignored. */
+const SYNC_ACTION_RANK = { right: 0, delRight: 1, left: 2, delLeft: 3 };
+
+/** Columns of the Synchronize dirs list, left to right (the header's sort keys). */
+export const SYNC_COLUMNS = ["leftName", "leftSize", "leftDate", "action", "rightDate", "rightSize", "rightName"];
+
+/**
+ * `indexes` (into `rows`) sorted by `column` (one of SYNC_COLUMNS; null keeps the compare order),
+ * descending when `desc`. Rows missing the item of that side sort after the others; ties go by
+ * path. By direction: copies → (and deletes on the right), copies ← (and deletes on the left),
+ * equal, then the not copied differences.
+ */
+export function syncSort(rows, actions, indexes, column, desc = false) {
+  if (!column) return [...indexes];
+  const side = column.startsWith("left") ? "left" : "right";
+  const key = (i) => {
+    const row = rows[i];
+    if (column === "action") {
+      const a = actions[i];
+      return a in SYNC_ACTION_RANK ? SYNC_ACTION_RANK[a] : row.state === "equal" ? 4 : 5;
+    }
+    const item = row[side];
+    if (!item) return null;
+    if (column.endsWith("Size")) return item.isDir ? -1 : item.size;
+    if (column.endsWith("Date")) return item.mtime;
+    return row.rel.toLowerCase();
+  };
+  // Keys once per row, one collator: big lists sort in one pass of cheap comparisons.
+  const keys = new Map(indexes.map((i) => [i, key(i)]));
+  const text = new Intl.Collator(undefined, { numeric: true });
+  const byPath = (a, b) => text.compare(rows[a].rel, rows[b].rel);
+  return [...indexes].sort((a, b) => {
+    const ka = keys.get(a);
+    const kb = keys.get(b);
+    if (ka === null || kb === null) return ka === kb ? byPath(a, b) : ka === null ? 1 : -1;
+    let c = typeof ka === "string" ? text.compare(ka, kb) : ka - kb;
+    if (desc) c = -c;
+    return c || byPath(a, b);
+  });
 }

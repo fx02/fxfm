@@ -19,7 +19,6 @@ const MENUS: &[&str] = &[
     "Net",
     "Show",
     "Configuration",
-    "Start",
     "Help",
 ];
 

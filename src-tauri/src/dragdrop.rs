@@ -211,15 +211,15 @@ impl FirstError {
 }
 
 /// Writes the archive or server entry `location` (a folder with everything in it) to `dest`,
-/// the path the receiver of a promise named. `dest` must not exist yet. Runs the same copy
-/// as F5 (archive extraction, or a download on a forked connection).
+/// the path the receiver of a promise named. An existing item there is never replaced: the
+/// copy is kept beside it as `name 2.ext` (`name 3.ext`…), as Finder keeps both. Runs the same
+/// copy as F5 (archive extraction, or a download on a forked connection).
 pub fn write_promise(ctx: &vfs::Ctx, location: &str, dest: &Path) -> Result<(), String> {
     if !dest.is_absolute() {
         return Err(format!("Not a local path: {}", dest.display()));
     }
-    if dest.symlink_metadata().is_ok() {
-        return Err(format!("{} already exists", dest.display()));
-    }
+    let free = free_name(dest);
+    let dest = free.as_path();
     let to = dest
         .to_str()
         .ok_or_else(|| format!("Not a valid path: {}", dest.display()))?;
@@ -234,6 +234,26 @@ pub fn write_promise(ctx: &vfs::Ctx, location: &str, dest: &Path) -> Result<(), 
         return Err(format!("{location} could not be copied"));
     }
     Ok(())
+}
+
+/// `dest` when nothing exists there, else the first free `name N.ext` beside it (N from 2).
+fn free_name(dest: &Path) -> std::path::PathBuf {
+    if dest.symlink_metadata().is_err() {
+        return dest.to_path_buf();
+    }
+    let name = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    // A leading dot is part of the name (`.bashrc` has no extension).
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if i > 0 => (&name[..i], &name[i..]),
+        _ => (name.as_str(), ""),
+    };
+    (2..)
+        .map(|n| dest.with_file_name(format!("{stem} {n}{ext}")))
+        .find(|p| p.symlink_metadata().is_err())
+        .expect("a free name")
 }
 
 /// `drag://ended` payload: `result` is "dropped", "cancelled" or "error" (with `message`);
@@ -987,13 +1007,26 @@ mod tests {
     }
 
     #[test]
-    fn never_writes_over_an_existing_item() {
+    fn keeps_both_when_the_name_exists() {
         let (t, ctx, tar) = archive_fixture();
         let dest = t.path().join("out/x.txt");
         std::fs::write(&dest, b"mine").unwrap();
-        let e = write_promise(&ctx, &format!("{}/x.txt", s(&tar)), &dest).unwrap_err();
-        assert_eq!(e, format!("{} already exists", dest.display()));
+        std::fs::write(t.path().join("out/x 2.txt"), b"also mine").unwrap();
+        write_promise(&ctx, &format!("{}/x.txt", s(&tar)), &dest).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"mine");
+        assert_eq!(
+            std::fs::read(t.path().join("out/x 2.txt")).unwrap(),
+            b"also mine"
+        );
+        assert_eq!(std::fs::read(t.path().join("out/x 3.txt")).unwrap(), b"xx");
+        let dir = t.path().join("out/d");
+        std::fs::create_dir(&dir).unwrap();
+        write_promise(&ctx, &format!("{}/d", s(&tar)), &dir).unwrap();
+        assert!(t.path().join("out/d 2/b.txt").exists());
+        assert_eq!(
+            free_name(&t.path().join("out/.rc")),
+            t.path().join("out/.rc")
+        );
     }
 
     #[test]

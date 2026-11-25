@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "findfiles",
-  "description": "Find files window (Alt+F7): core APIs (events, window geometry), show itself, take focus, close (the close handler destroys the window) and the app's own commands.",
-  "windows": ["findfiles"],
+  "description": "Find files window (Alt+F7) and Synchronize dirs window: core APIs (events, window geometry), show itself, take focus, close (the close handler destroys the window) and the app's own commands.",
+  "windows": ["findfiles", "syncdirs"],
   "permissions": [
     "core:default",
     "core:window:allow-show",

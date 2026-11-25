@@ -14,6 +14,7 @@ pub mod search;
 pub mod secrets;
 pub mod servers;
 pub mod storage;
+pub mod sync;
 pub mod vfs;
 pub mod viewer;
 pub mod volumes;

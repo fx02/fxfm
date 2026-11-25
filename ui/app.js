@@ -45,6 +45,9 @@ import {
   setFnHeld,
   iconStyle,
   contextMenuItems,
+  archiveOf,
+  parseRemote,
+  keyTableRows,
 } from "./lib.mjs";
 import {
   clipFiles,
@@ -66,12 +69,14 @@ import {
   askPassword,
   withPassword,
   renameInline,
+  showTable,
   topModal,
 } from "./dialogs.js";
 import { cancelDrag, initDragDrop, rowPress } from "./dragdrop.js";
 import { configureKeyboard, configureOptions, firstRunConflictHint, initConfig, optionsSearchReload, optionsSearchStatus } from "./config.js";
 import { initHotlist, showHotlist } from "./hotlist.js";
 import { initMultiRename, multiRename } from "./multirename.js";
+import { initSync, syncDirs } from "./sync.js";
 import {
   chmodDialog,
   connectFlow,
@@ -252,9 +257,20 @@ function contextMenu(panel, index, at = null) {
     panel.render();
   }
   const n = panel.marked.size || 1;
-  const items = contextMenuItems(entry, n).map((i) =>
-    i === "-" ? null : { label: i[1], run: () => (i[0] === "open" ? panel.enter() : dispatch(i[0])) },
+  const path = entry && !entry.up ? (entry.path ?? joinLocation(panel.location, entry.name)) : null;
+  // Open with / Quick Look / Show in Finder need a plain local file (not a server, not inside an
+  // archive: an archive entry's path does not exist on disk).
+  const local = Boolean(path) && !parseRemote(path) && !entry.inArchive && !archiveOf(panel.location);
+  const own = {
+    open: () => panel.enter(),
+    open_with: () => openWithMenu(path, at),
+    quick_look: () => invoke("quick_look", { path }).catch((e) => status(`Quick Look: ${e}`)),
+    show_in_finder: () => invoke("show_in_finder", { path }).catch((e) => status(`Show in Finder: ${e}`)),
+  };
+  const items = contextMenuItems(entry, n, app.settings.contextMenuOff ?? [], local).map((i) =>
+    i === "-" ? null : { label: i[1], run: () => (own[i[0]] ? own[i[0]]() : dispatch(i[0])) },
   );
+  if (!items.length) return;
   if (!at) {
     panel.ensureVisible();
     const row = panel.rowsEl.querySelector(`[data-i="${index}"]`)?.getBoundingClientRect();
@@ -262,6 +278,33 @@ function contextMenu(panel, index, at = null) {
     at = { x: box.left + 24, y: row ? row.bottom : box.top };
   }
   popupMenu(at, items);
+}
+
+/** Open with…: the apps macOS offers for `path` (default first) as a second menu at `at`. */
+async function openWithMenu(path, at) {
+  const apps = await invoke("open_with_apps", { path }).catch(() => []);
+  if (!apps.length) {
+    status("No application to open it with");
+    return;
+  }
+  const items = apps.map((a, i) => ({
+    label: i === 0 ? `${a.name} (default)` : a.name,
+    run: () => invoke("open_with", { path, app: a.path }).catch((e) => status(`Open with: ${e}`)),
+  }));
+  popupMenu(at, items);
+}
+
+/** Alt+Down: the panel's earlier folders, newest first; picking one goes there. */
+function historyMenu(panel) {
+  if (!panel.back.length) {
+    status("No earlier folders");
+    return;
+  }
+  const items = panel.back
+    .map((h, i) => ({ label: displayLocation(h.location, remoteArchives), run: () => panel.goBackTo(i) }))
+    .reverse();
+  const box = panel.listEl.getBoundingClientRect();
+  popupMenu({ x: box.left + 24, y: box.top }, items);
 }
 
 /** A small menu at `at` ({x, y}, kept inside the window); `items`: {label, run} or null (a line). */
@@ -400,13 +443,24 @@ export const handlers = {
   cm_connect: () => showConnect(),
   cm_disconnect: () => disconnectActive(),
   cm_chmod: () => chmodDialog(),
+  cm_help_keys: () =>
+    showTable(
+      "Keyboard shortcuts",
+      ["Menu", "Command", "Keys"],
+      keyTableRows([...app.commands.values()], app.keymap, (k) => comboLabel(k, keyMods())),
+    ),
   cm_context_menu: () => contextMenu(activePanel(), activePanel().cursorIndex),
+  cm_quick_filter: () => activePanel().openFilter(),
+  cm_back: () => activePanel().goHistory(-1),
+  cm_forward: () => activePanel().goHistory(1),
+  cm_history_list: () => historyMenu(activePanel()),
   cm_cut_to_clipboard: () => clipFiles("move"),
   cm_copy_to_clipboard: () => clipFiles("copy"),
   cm_paste_from_clipboard: () => pasteFiles(),
   cm_copy_names_to_clip: () => copyNames(false),
   cm_copy_full_names_to_clip: () => copyNames(true),
   cm_multi_rename: () => multiRename(),
+  cm_sync_dirs: () => syncDirs(),
   cm_exit: () => win.close(),
   cm_cmdline_focus: () => {
     if (app.settings.showCommandLine) cmdInput().focus();
@@ -1094,6 +1148,7 @@ function makePanel(side) {
     onDrive: (p, path) => goDrive(p, path),
     onRowPress: (p, i, ev) => rowPress(p, i, ev),
     onContextMenu: (p, i, x, y) => contextMenu(p, i, { x, y }),
+    onFilterDone: (p) => p.focus(),
   });
 }
 
@@ -1214,6 +1269,7 @@ async function main() {
     status,
     mods: keyMods,
   });
+  await initSync({ invoke, panels: () => app.panels, status, focusMain: () => win.setFocus().catch(() => {}) });
   initMultiRename({
     invoke,
     active: activePanel,

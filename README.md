@@ -1,6 +1,6 @@
 # fxfm
 
-fxfm is a Total Commander-style dual-panel file manager for macOS (Rust + Tauri 2). The keys are TC's (F3–F8, Tab, Ctrl+D…; by default TC's Ctrl is the Mac **Control** key and TC's Alt is **Option**, and Configuration → Keyboard can make Command either of them, see "Alt and Ctrl keys"), and the menu lives in the macOS menu bar (Files, Mark, Commands, Net, Show, Configuration, Start, Help). It works with local disks, archives (as folders) and servers (SFTP, SCP, FTP, FTPS).
+fxfm is a Total Commander-style dual-panel file manager for macOS (Rust + Tauri 2). The keys are TC's (F3–F8, Tab, Ctrl+D…; by default TC's Ctrl is the Mac **Control** key and TC's Alt is **Option**, and Configuration → Keyboard can make Command either of them, see "Alt and Ctrl keys"), and the menu lives in the macOS menu bar (Files, Mark, Commands, Net, Show, Configuration, Help; Help → Keyboard shortcuts lists every command with its keys). It works with local disks, archives (as folders) and servers (SFTP, SCP, FTP, FTPS).
 
 Requires macOS 15 (Sequoia) or later.
 
@@ -114,6 +114,21 @@ Archives open as folders. Supported formats: `.zip`, `.tar`, `.tgz` / `.tar.gz`,
 - **Options → Search** (always the last section of Options): *Index while fxfm is running* (turning it off asks first and deletes the index file), the volumes with on/off, state, entry count and *Refresh now*, excluded folders, archive indexing with the gz limit and the network-archives switch, the network refresh interval, folders macOS refused (*Retry*, and the Full Disk Access hint), and *Rebuild index*.
 - **Where the index lives**: in the data folder, as `index/index.bin`: `~/Library/Application Support/fxfm/index/` in system mode, `fxfm-data/index/` in portable mode (it can be large: budget up to about 300 MB for 3 million entries). An unreadable or old index is rebuilt.
 
+## Quick filter (Ctrl+S) and folder history
+
+- **Ctrl+S** opens a filter box above the panel's status line: the list shows only the names that contain the typed text, or that match a mask with `*`/`?` (several masks split by `;`, e.g. `*.pdf;*.docx`); the box shows how many items are left. **Enter**, **Tab**, **Up**/**Down** go back to the list and keep the filter; **Escape** clears it. Moving to another folder clears it too. Hidden items lose their marks, so no command acts on what is not shown.
+- **Alt+Left** / **Alt+Right** go back / forward through the folders visited in that panel (50 places); **Alt+Down** lists the earlier folders, newest first. Each panel has its own history; it is not kept after quitting.
+
+## Synchronize dirs
+
+Commands → **Synchronize dirs…** opens its own window (move it, resize it, maximize it or make it full screen; it keeps its place) and compares the folders of the left and right panel (local folders, archives and servers alike). The left half of the list is the left folder, the right half the right folder, the direction is in the middle.
+
+- **Mode** proposes a direction for every row: *Two-way* (newer and missing items go both ways), *Mirror →* / *Mirror ←* (make one side like the other: every difference is copied that way and what the source lacks goes to the Trash), *Update →* / *Update ←* (only new and newer files go that way), *Delete on the right/left what the other side lacks*. Every row can still be changed: **→** / **←** copy that way, **Shift+→** / **Shift+←** move the item on that side to the Trash (`→✕`, `✕←`), **Space** skips it; or click the symbol. *Reset to mode* and *Skip all* set all rows.
+- **Options**: *Subfolders* (enter folders present on both sides), *By content* (same-size local files are compared byte by byte; a file only touched counts as equal), *Ignore dates* (equal size = equal file), *Show equal*.
+- **Rules**: names match regardless of Unicode form (NFC/NFD) and of case (as on macOS); a side with two names that differ only in case (a case-sensitive server) is listed but never copied; dates within 2 seconds are equal (FAT, SMB and FTP round them); a folder on one side only is one row and is copied or deleted whole; a folder present on both sides is compared inside and never copied or deleted whole; a folder that is a symbolic link is not entered; a file on one side and a folder of the same name on the other is never touched; `.DS_Store` is left out.
+- **Sorting**: click a column header to sort by it (again: the other way, a third time: back to the compare order); the middle header sorts by direction: → first (with deletes on the right), then ←, equal, and the not copied differences last. The order is kept.
+- **Synchronize** lists what will happen (copies each way, items moved to the Trash) and asks once; deleting on a server or inside an archive is permanent and says so. The copies and deletes then run in the main window with the normal jobs (progress, Cancel, Retry/Skip): copies first, deletes last; existing files in the chosen direction are overwritten without another question. The folders are compared again afterwards.
+
 ## Quick search (Cmd+letters)
 
 In the active panel, Command+letter jumps to the first entry whose name starts with that letter (TC's Alt+letters); more letters typed with Command narrow it (Cmd+F, Cmd+X → first name starting with "fx"). A small box over the status line shows the typed text; a letter that matches nothing is not added. Up/Down go to the previous/next match, Backspace drops a letter, Esc or a 3-second pause closes the box, and any other key closes it and works as usual (Enter opens the found entry). Cmd+Q and Cmd+H stay with macOS, and a key bound in Configuration → Keyboard keeps its command. The keys are set in Configuration → Keyboard → *Quick search*: Command+letters (default), Control+Command+letters, Option+letters, letters alone, or off.
@@ -180,14 +195,14 @@ Configuration → Options → *Colors* works like TC's Configuration → Color p
 
 ## Drag & drop
 
-- **Out**: dragging the selected items (or the row under the pointer) from a panel into other applications, e.g. Finder. Local files follow the receiver's rules: Finder moves them on the same disk and copies them to another one (Option copies, Command moves), and the panel refreshes after a move. Items inside archives and on servers (SFTP/SCP/FTP/FTPS) are always copied: they are extracted or downloaded only when the receiver asks for them, straight to the place it names (folders with everything in them); an item that already exists there is not overwritten, and errors show in the status bar. With more than one item the drag image shows their number.
+- **Out**: dragging the selected items (or the row under the pointer) from a panel into other applications, e.g. Finder. Local files follow the receiver's rules: Finder moves them on the same disk and copies them to another one (Option copies, Command moves), and the panel refreshes after a move. Items inside archives and on servers (SFTP/SCP/FTP/FTPS) are always copied: they are extracted or downloaded only when the receiver asks for them, straight to the place it names (folders with everything in them); an item that already exists there is not overwritten (the copy is kept beside it as `name 2.ext`), and errors show in the status bar. With more than one item the drag image shows their number.
 - **In**: from Finder into a panel.
 - **Between panels**: dropping opens the F5 dialog with the target = the folder under the pointer or the panel's folder. **Shift** while dropping gives F6 (move). The dialog also has a *Move instead* / *Copy instead* button, in case you miss Shift.
 
 ## Right-click menu and clipboard
 
-- **Right click** on a row (or **Shift+F10** on the cursor row) opens a menu: *Open*, *Copy name*, *Copy path*, *Cut*, *Copy*, *Paste*, *Delete* (Trash), *Rename*. It acts on the marked items when the clicked row is marked, otherwise only on that row (other marks are cleared, as in Finder). On empty space or `..` it offers only *Paste*.
-- **Copy / Cut** put the items on the macOS clipboard (local files as files, so Finder's Paste copies them; everything also as text). **Paste** copies (or, after Cut, moves) them into the panel's folder without the F5 dialog; existing files are asked about as in F5. Files copied in Finder paste into a panel too. Items in archives and on servers paste only inside fxfm.
+- **Right click** on a row (or **Shift+F10** on the cursor row) opens a menu: *Open*, *View*, *Open with…* (the apps macOS offers, default first), *Quick Look*, *Show in Finder*, *Copy name*, *Copy path*, *Cut*, *Copy*, *Paste*, *Pack files…*, *Delete* (Trash), *Rename*, *Properties…* (Change attributes). It acts on the marked items when the clicked row is marked, otherwise only on that row (other marks are cleared, as in Finder). On empty space or `..` it offers only *Paste*. Open with, Quick Look and Show in Finder are offered for local files only. Every item can be switched off in Configuration → Options → Right-click menu.
+- **Copy / Cut** put the items on the macOS clipboard (local files as files, so Finder's Paste copies them; everything also as text). **Paste** copies (or, after Cut, moves) them into the panel's folder without the F5 dialog; existing files are asked about as in F5. Pasted into the folder they came from, copies get Finder's names (`a copy.txt`, `a copy 2.txt`); a Cut pasted there does nothing. Files copied in Finder paste into a panel too. Items in archives and on servers paste only inside fxfm.
 - *Copy name* / *Copy path* put the names or full paths (one per line) on the clipboard as text. All of these are also commands without default keys (Files and Mark menus) and can get keys in Configuration → Keyboard.
 
 ## Notes
@@ -233,6 +248,11 @@ The table is generated from the command registry (`COMMANDS` in `crates/core/src
 | Commands | Target = Source | — |
 | Commands | Search | `Alt+F7` |
 | Commands | Feed search results to listbox | — |
+| Commands | Quick filter | `Ctrl+S` |
+| Commands | Back | `Alt+Left` |
+| Commands | Forward | `Alt+Right` |
+| Commands | Folder history | `Alt+Down` |
+| Commands | Synchronize dirs… | — |
 | Files | Multi-rename… | `Ctrl+M` |
 | Files | Context menu | `Shift+F10` |
 | Files | Cut to clipboard | — |
@@ -248,6 +268,7 @@ The table is generated from the command registry (`COMMANDS` in `crates/core/src
 | Commands | Command line | `Ctrl+Enter` |
 | Configuration | Keyboard… | — |
 | Configuration | Options… | — |
+| Help | Keyboard shortcuts | — |
 <!-- keys:end -->
 
 Fixed keys in a panel (not remappable): Up/Down, PageUp/PageDown, Home/End, **Left = first visible row in the window**, **Right = last visible row in the window**; if the cursor is already there, the next press moves by a whole window (the first row of the previous window, or the last row of the next one), Enter.

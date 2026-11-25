@@ -1,6 +1,8 @@
 // One TC file panel: drive bar, path row, current-path bar, virtual list, status line.
 
 import {
+  filterMatch,
+  pushHistory,
   quickSearchFind,
   remoteArchiveOf,
   archiveKindOf,
@@ -136,6 +138,11 @@ export class Panel {
     /** Settings colors and their compiled file-type matcher (see `setColors`). */
     this.colors = null;
     this.typeMatcher = compileTypeRules([]);
+    /** Quick filter text (Ctrl+S); "" shows everything. Cleared when the folder changes. */
+    this.filter = "";
+    /** Folder history: places left before ([{location, cursorName}], newest last) and after. */
+    this.back = [];
+    this.forward = [];
     this.build(root);
   }
 
@@ -165,6 +172,20 @@ export class Panel {
     this.qsEl = el("div", "quicksearch");
     this.qsEl.hidden = true;
     this.statusEl.append(this.qsEl);
+    // Quick filter box (TC Ctrl+S): shown above the status line while a filter is set.
+    this.filterBox = el("div", "qfilter");
+    this.filterBox.hidden = true;
+    this.filterInput = el("input");
+    this.filterInput.type = "text";
+    this.filterInput.spellcheck = false;
+    this.filterCount = el("span", "count");
+    this.filterBox.append(el("span", null, "Filter:"), this.filterInput, this.filterCount);
+    this.statusEl.append(this.filterBox);
+    this.filterInput.addEventListener("input", () => this.setFilter(this.filterInput.value));
+    this.filterInput.addEventListener("keydown", (e) => this.filterKey(e));
+    this.filterInput.addEventListener("blur", () => {
+      if (!this.filter) this.filterBox.hidden = true;
+    });
     root.append(this.drivesEl, pathRow, this.curEl, this.listEl, this.statusEl);
 
     root.addEventListener("mousedown", () => this.focus());
@@ -212,8 +233,9 @@ export class Panel {
    * Lists `location`; on success it becomes the panel's folder. Returns navigate()'s result.
    * A later go() supersedes an earlier one; refresh() never supersedes a user navigation.
    */
-  async go(location, cursorName, { refresh = false } = {}) {
+  async go(location, cursorName, { refresh = false, history = true } = {}) {
     if (!refresh) this.quickSearchEnd();
+    const from = this.location ? { location: this.location, cursorName: this.cursorName } : null;
     const token = ++this.navToken;
     if (!refresh) this.pendingTarget = location;
     const r = await navigate(this, location, this.api.listDir, {
@@ -230,6 +252,13 @@ export class Panel {
     this.location = r.location;
     this.raw = r.entries;
     if (moved) {
+      // A new place for Back (not a results list, not when Back/Forward itself moved).
+      if (history && from && !isSearchLocation(from.location)) {
+        this.back = pushHistory(this.back, from);
+        this.forward = [];
+      }
+      this.filter = "";
+      this.filterBox.hidden = true;
       this.marked.clear();
       this.dirSizes.clear();
       this.sizeQueue = [];
@@ -254,7 +283,10 @@ export class Panel {
    */
   rebuild(cursorName = this.cursorName, fallbackIndex = this.cursorIndex) {
     const showHidden = this.api.showHidden();
-    const shown = showHidden ? this.raw : this.raw.filter((e) => !e.hidden);
+    const visible = showHidden ? this.raw : this.raw.filter((e) => !e.hidden);
+    // Filtered-out items also lose their marks: no command acts on what cannot be seen.
+    const shown = this.filter ? visible.filter((e) => filterMatch(e.name, this.filter)) : visible;
+    this.filterCount.textContent = this.filter ? `${shown.length} of ${visible.length}` : "";
     // No "[..]" where there is no parent: "/" and a server root. The results list has one (back).
     const noParent = this.location === "/" || parentLocation(this.location) === null;
     this.entries = noParent && !isSearchLocation(this.location) ? shown : [UP, ...shown];
@@ -467,6 +499,78 @@ export class Panel {
   }
 
   // ---- quick search (TC Alt+letters) ----
+
+  // ---- quick filter (Ctrl+S) and folder history ----
+
+  /** Ctrl+S: opens the filter box (or goes back into it) with the current filter. */
+  openFilter() {
+    this.quickSearchEnd();
+    this.filterBox.hidden = false;
+    this.filterInput.value = this.filter;
+    this.filterInput.focus();
+    this.filterInput.select();
+  }
+
+  setFilter(text) {
+    this.filter = text;
+    this.rebuild(this.cursorName, 0);
+  }
+
+  /**
+   * Keys in the filter box: Escape clears the filter and closes it; Enter, Tab, Up and Down
+   * keep it and give the keys back to the list (Up/Down also move the cursor).
+   */
+  filterKey(e) {
+    const back = () => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.filterInput.blur();
+      this.api.onFilterDone?.(this);
+    };
+    if (e.key === "Escape") {
+      this.filterInput.value = "";
+      this.setFilter("");
+      back();
+    } else if (e.key === "Enter" || e.key === "Tab") {
+      back();
+    } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      back();
+      this.setCursor(this.cursorIndex + (e.key === "ArrowDown" ? 1 : -1));
+    }
+  }
+
+  /** Alt+Left / Alt+Right: the previous / next place in this panel's history. */
+  async goHistory(dir) {
+    const from = dir < 0 ? this.back : this.forward;
+    if (!from.length) return false;
+    const to = from[from.length - 1];
+    const here = { location: this.location, cursorName: this.cursorName };
+    const r = await this.go(to.location, to.cursorName ?? undefined, { history: false });
+    if (!r.ok) return false;
+    if (dir < 0) {
+      this.back = this.back.slice(0, -1);
+      if (!isSearchLocation(here.location)) this.forward = pushHistory(this.forward, here);
+    } else {
+      this.forward = this.forward.slice(0, -1);
+      if (!isSearchLocation(here.location)) this.back = pushHistory(this.back, here);
+    }
+    return true;
+  }
+
+  /** Alt+Down list: jumps to `index` in `back` (older places move to Forward like repeated Back). */
+  async goBackTo(index) {
+    const to = this.back[index];
+    if (!to) return;
+    const here = { location: this.location, cursorName: this.cursorName };
+    const r = await this.go(to.location, to.cursorName ?? undefined, { history: false });
+    if (!r.ok) return;
+    const skipped = this.back.slice(index + 1).reverse();
+    this.back = this.back.slice(0, index);
+    let fwd = this.forward;
+    if (!isSearchLocation(here.location)) fwd = pushHistory(fwd, here);
+    for (const h of skipped) fwd = pushHistory(fwd, h);
+    this.forward = fwd;
+  }
 
   /** True while the quick search box is open. */
   get quickSearching() {
