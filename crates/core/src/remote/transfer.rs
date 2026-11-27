@@ -193,6 +193,15 @@ fn fatal(e: &RemoteError) -> Option<Stop> {
     }
 }
 
+/// Error for a listed name that is not a plain file name.
+pub const UNSAFE_NAME: &str = "the server listed an unsafe name; it was skipped";
+
+/// A name a server listed that is not a single path component (empty, ".", "..", or with
+/// "/" or NUL): following it would reach outside the folder being copied or deleted.
+pub fn unsafe_name(name: &str) -> bool {
+    name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\0')
+}
+
 fn io_err(e: io::Error) -> RemoteError {
     RemoteError::Other(e.to_string())
 }
@@ -444,6 +453,14 @@ impl<'a, 'p> Downloader<'a, 'p> {
         children.sort_by(|a, b| a.name.cmp(&b.name));
         let mut complete = true;
         for e in children {
+            // A listed name with "/" (or "..") would write outside `dst`: never followed.
+            if unsafe_name(&e.name) {
+                self.ans
+                    .on_error(&format!("{shown}/{}", e.name), UNSAFE_NAME)?;
+                self.summary.skipped += 1;
+                complete = false;
+                continue;
+            }
             complete &= self.item(&join_path(src, &e.name), &dst.join(&e.name))?;
         }
         if created {
@@ -454,6 +471,15 @@ impl<'a, 'p> Downloader<'a, 'p> {
 
     fn file(&mut self, src: &str, st: &RemoteStat, dst: &Path) -> Result<bool, Stop> {
         let shown = self.shown(src);
+        // Downloads go into an empty staging folder: something already there is another item
+        // whose name differs only in case (a case-sensitive server, a disk that ignores case).
+        // Writing over it would lose that item, and a move would delete both originals.
+        if fs::symlink_metadata(dst).is_ok() {
+            self.ans
+                .on_error(&shown, crate::archive::read::SAME_FILE_NAME)?;
+            self.skip(src, Some(st));
+            return Ok(false);
+        }
         loop {
             self.ans.check_cancel()?;
             let base = self.progress.done_bytes();
@@ -832,10 +858,18 @@ impl<'a, 'p> Uploader<'a, 'p> {
         } else {
             self.fs.rename(part, target)
         };
-        if r.is_err() {
+        if let Err(e) = r {
+            // A replace that removed the target and then failed leaves the upload as the only
+            // copy: the .part stays (and the error says where).
+            if existing.is_some() && matches!(self.fs.stat(target), Ok(None)) {
+                return Err(RemoteError::Other(format!(
+                    "{target}: {e}; the uploaded file is kept as {part}"
+                )));
+            }
             self.drop_part(part);
+            return Err(e);
         }
-        r
+        Ok(())
     }
 
     fn drop_part(&self, part: &str) {
@@ -921,6 +955,11 @@ impl<'a> Remover<'a> {
             };
             let before = self.summary.skipped;
             for e in children {
+                // Never delete through a name that points elsewhere.
+                if unsafe_name(&e.name) {
+                    self.fail(&format!("{shown}/{}", e.name), UNSAFE_NAME)?;
+                    continue;
+                }
                 self.tree(fs, &join_path(path, &e.name))?;
             }
             // A folder with skipped content cannot be removed.
@@ -986,6 +1025,124 @@ mod tests {
         let v = obs.0.lock().unwrap();
         assert_eq!(v.len(), 2);
         assert_eq!((v[1].done_bytes, v[1].total_bytes), (501, 1000));
+    }
+
+    /// MemFs whose listing of "/s" also has a name that points outside the folder.
+    struct Evil(MemFs);
+    impl RemoteFs for Evil {
+        fn display(&self) -> String {
+            self.0.display()
+        }
+        fn home(&self) -> Result<String, RemoteError> {
+            self.0.home()
+        }
+        fn list(&self, path: &str) -> Result<Vec<crate::listing::Entry>, RemoteError> {
+            let mut v = self.0.list(path)?;
+            if path == "/s" {
+                let mut bad = v[0].clone();
+                bad.name = "../evil.txt".into();
+                v.push(bad);
+            }
+            Ok(v)
+        }
+        fn stat(&self, path: &str) -> Result<Option<RemoteStat>, RemoteError> {
+            self.0.stat(path)
+        }
+        fn read_link(&self, path: &str) -> Result<String, RemoteError> {
+            self.0.read_link(path)
+        }
+        fn read_to(
+            &self,
+            path: &str,
+            out: &mut dyn std::io::Write,
+            p: &mut dyn FnMut(u64) -> bool,
+        ) -> Result<(), RemoteError> {
+            self.0.read_to(path, out, p)
+        }
+        fn write_from(
+            &self,
+            path: &str,
+            input: &mut dyn std::io::Read,
+            p: &mut dyn FnMut(u64) -> bool,
+        ) -> Result<(), RemoteError> {
+            self.0.write_from(path, input, p)
+        }
+        fn mkdir(&self, path: &str) -> Result<(), RemoteError> {
+            self.0.mkdir(path)
+        }
+        fn remove_file(&self, path: &str) -> Result<(), RemoteError> {
+            self.0.remove_file(path)
+        }
+        fn remove_dir(&self, path: &str) -> Result<(), RemoteError> {
+            self.0.remove_dir(path)
+        }
+        fn rename(&self, from: &str, to: &str) -> Result<(), RemoteError> {
+            self.0.rename(from, to)
+        }
+        fn replace(&self, from: &str, to: &str) -> Result<(), RemoteError> {
+            self.0.replace(from, to)
+        }
+        fn symlink(&self, target: &str, link: &str) -> Result<(), RemoteError> {
+            self.0.symlink(target, link)
+        }
+        fn set_mode(&self, path: &str, mode: u32) -> Result<(), RemoteError> {
+            self.0.set_mode(path, mode)
+        }
+        fn fork(&self) -> Result<std::sync::Arc<dyn RemoteFs>, RemoteError> {
+            self.0.fork()
+        }
+        fn close(&self) {}
+    }
+
+    /// A name with "/" from a listing is reported and skipped: nothing is written next to the
+    /// target folder, and deleting the folder leaves it (and the real file) in place.
+    #[test]
+    fn unsafe_listed_names_never_reach_outside() {
+        assert!(unsafe_name("../x") && unsafe_name("a/b") && unsafe_name("..") && unsafe_name(""));
+        assert!(!unsafe_name("..hidden") && !unsafe_name("a b.txt"));
+        let t = tempfile::tempdir().unwrap();
+        let out = t.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let m = MemFs::new();
+        m.put_file("/s/a.txt", b"aaa", 0o644, 0);
+        m.put_file("/evil.txt", b"evil", 0o644, 0);
+        let evil = Evil(m.clone());
+        let obs = Count::default();
+        let mut p = ProgressState::new(3, 1);
+        let _ = download_tree(&evil, &["/s".to_string()], &out, &obs, &mut p);
+        assert_eq!(fs::read(out.join("s/a.txt")).unwrap(), b"aaa");
+        assert!(!out.join("evil.txt").exists());
+        assert!(!t.path().join("evil.txt").exists());
+        let _ = remove_tree(&evil, "/s", &obs);
+        assert!(m.exists("/evil.txt"), "the file outside the folder stays");
+        assert!(
+            m.exists("/s"),
+            "a folder with a skipped name is not removed"
+        );
+    }
+
+    /// A case-sensitive server with `A.txt` and `a.txt`: on a disk that ignores case the second
+    /// is reported and skipped (not written over the first), so the folder counts as incomplete.
+    #[test]
+    fn names_differing_only_in_case_are_not_written_over_each_other() {
+        let probe = tempfile::tempdir().unwrap();
+        fs::write(probe.path().join("X"), b"").unwrap();
+        if !probe.path().join("x").exists() {
+            return; // this disk keeps both
+        }
+        let t = tempfile::tempdir().unwrap();
+        let m = MemFs::new();
+        m.put_file("/s/A.txt", b"upper", 0o644, 0);
+        m.put_file("/s/a.txt", b"lower", 0o644, 0);
+        let obs = Count::default();
+        let mut p = ProgressState::new(10, 2);
+        let out = Downloader::new(&m, "", &obs, &mut p).run(&["/s".to_string()], t.path());
+        assert_eq!(fs::read(t.path().join("s/A.txt")).unwrap(), b"upper");
+        assert_eq!((out.summary.done, out.summary.skipped), (1, 1));
+        assert!(
+            !out.complete.iter().all(|c| *c),
+            "the folder is not complete"
+        );
     }
 
     #[test]

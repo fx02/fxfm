@@ -1,5 +1,6 @@
 // Configuration → Keyboard and Configuration → Options dialogs.
 
+import { el, cycleFocus, frame } from "./dom.js";
 import {
   captureRefusal,
   comboFromEvent,
@@ -16,9 +17,10 @@ import {
   ICON_STYLES,
   iconStyle,
   CONTEXT_ITEMS,
+  FOLDER_ICONS,
 } from "./lib.mjs";
 import { colorsSection } from "./colors.js";
-import { dialog, popModal, pushModal } from "./dialogs.js";
+import { dialog, message, popModal, pushModal } from "./dialogs.js";
 import { moveStorage } from "./servers.js";
 
 /**
@@ -31,13 +33,6 @@ export function initConfig(c) {
   ctx = c;
 }
 
-function el(tag, cls, text) {
-  const e = document.createElement(tag);
-  if (cls) e.className = cls;
-  if (text !== undefined) e.textContent = text;
-  return e;
-}
-
 function button(label, fn) {
   const b = el("button", null, label);
   b.addEventListener("click", fn);
@@ -48,30 +43,6 @@ const YES_NO = [
   { label: "Yes", value: "yes", default: true },
   { label: "No", value: null },
 ];
-
-function message(title, text) {
-  return dialog({ title, text, buttons: [{ label: "OK", value: "ok", default: true }] });
-}
-
-/** Keeps Tab / Shift+Tab inside `root`. */
-function cycleFocus(root, e) {
-  const items = [...root.querySelectorAll("button:not(:disabled), input:not(:disabled), select:not(:disabled)")];
-  if (!items.length) return;
-  let i = items.indexOf(document.activeElement);
-  i = e.shiftKey ? (i <= 0 ? items.length - 1 : i - 1) : (i + 1) % items.length;
-  items[i].focus();
-}
-
-/** Backdrop + dialog box with a title; returns {modal, box, body, row}. */
-function frame(title, cls) {
-  const backdrop = el("div", "backdrop");
-  const box = el("div", `dialog ${cls}`);
-  const body = el("div", "body");
-  const row = el("div", "buttons");
-  box.append(el("div", "title", title), body, row);
-  backdrop.append(box);
-  return { modal: { el: backdrop }, box, body, row };
-}
 
 function openKeyboardSettings() {
   ctx.invoke("open_keyboard_settings").catch((e) => ctx.status(String(e)));
@@ -464,6 +435,25 @@ export function configureOptions() {
   font.value = String(work.fontSize);
   const fontLabel = el("label", "opt");
   fontLabel.append("Font size (12–24): ", font);
+  // Font of the panels: the Mac's fixed-pitch families (read when the dialog opens).
+  const family = el("select");
+  const addFamily = (value, label) => {
+    const o = el("option", null, label);
+    o.value = value;
+    family.append(o);
+  };
+  addFamily("", "System (proportional)");
+  if (work.fontFamily) addFamily(work.fontFamily, work.fontFamily);
+  family.value = work.fontFamily ?? "";
+  ctx
+    .invoke("fixed_fonts")
+    .then((list) => {
+      for (const f of list) if (f !== work.fontFamily) addFamily(f, f);
+      family.value = work.fontFamily ?? "";
+    })
+    .catch((e) => console.error("fxfm: fixed_fonts", e));
+  const familyLabel = el("label", "opt");
+  familyLabel.append("Font: ", family);
   const cmdBox = el("input");
   cmdBox.type = "checkbox";
   cmdBox.checked = work.showCommandLine;
@@ -490,7 +480,35 @@ export function configureOptions() {
   iconSel.value = iconStyle(work);
   const iconLabel = el("label", "opt");
   iconLabel.append("Icons: ", iconSel);
-  view.append(line(fontLabel), line(iconLabel), line(cmdLabel), line(fkeys.label), line(drive.label), line(head.label), line(foot.label));
+  // Finder icons: macOS's own folder icons for ordinary folders, with a preview.
+  const folderSel = el("select");
+  for (const [id, name] of FOLDER_ICONS) {
+    const o = el("option", null, name);
+    o.value = id === "GenericFolderIcon" ? "" : id;
+    folderSel.append(o);
+  }
+  folderSel.value = FOLDER_ICONS.some(([id]) => id === work.folderIcon) && work.folderIcon !== "GenericFolderIcon" ? work.folderIcon : "";
+  const preview = el("img", "folderpreview");
+  preview.alt = "";
+  const showPreview = () => {
+    const key = folderSel.value ? `sys:${folderSel.value}` : "dir";
+    ctx
+      .invoke("file_icons", { keys: [key] })
+      .then((m) => {
+        if (m[key]) preview.src = m[key];
+      })
+      .catch(() => {});
+  };
+  folderSel.addEventListener("change", showPreview);
+  showPreview();
+  const folderLabel = el("label", "opt");
+  folderLabel.append("Folder icon (Finder icons): ", folderSel, preview);
+  const syncFolder = () => {
+    folderSel.disabled = iconSel.value !== "finder";
+  };
+  iconSel.addEventListener("change", syncFolder);
+  syncFolder();
+  view.append(line(familyLabel), line(fontLabel), line(iconLabel), line(folderLabel), line(cmdLabel), line(fkeys.label), line(drive.label), line(head.label), line(foot.label));
 
   // Right-click menu: every item can be switched off.
   const menu = section("Right-click menu");
@@ -769,6 +787,8 @@ export function configureOptions() {
     work.showCommandLine = cmdBox.checked;
     work.showDriveBar = drive.box.checked;
     work.icons = iconSel.value;
+    work.fontFamily = family.value;
+    work.folderIcon = folderSel.value;
     work.showPanelHeader = head.box.checked;
     work.showPanelFooter = foot.box.checked;
     work.showFkeyBar = fkeys.box.checked;

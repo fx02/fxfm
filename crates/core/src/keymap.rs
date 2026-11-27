@@ -317,6 +317,13 @@ pub static COMMANDS: &[CommandDef] = &[
         available: true,
     },
     CommandDef {
+        id: "cm_copy_share_links",
+        menu: "Mark",
+        title: "Copy network path (Windows / Mac)…",
+        defaults: &[],
+        available: true,
+    },
+    CommandDef {
         id: "cm_switch_panel",
         menu: "Commands",
         title: "Switch panel",
@@ -408,6 +415,13 @@ pub static COMMANDS: &[CommandDef] = &[
         available: true,
     },
     CommandDef {
+        id: "cm_branch_view",
+        menu: "Commands",
+        title: "Branch view",
+        defaults: &["Ctrl+B"],
+        available: true,
+    },
+    CommandDef {
         id: "cm_multi_rename",
         menu: "Files",
         title: "Multi-rename…",
@@ -425,21 +439,28 @@ pub static COMMANDS: &[CommandDef] = &[
         id: "cm_cut_to_clipboard",
         menu: "Files",
         title: "Cut to clipboard",
-        defaults: &[],
+        defaults: &["Ctrl+X"],
         available: true,
     },
     CommandDef {
         id: "cm_copy_to_clipboard",
         menu: "Files",
         title: "Copy to clipboard",
-        defaults: &[],
+        defaults: &["Ctrl+C"],
         available: true,
     },
     CommandDef {
         id: "cm_paste_from_clipboard",
         menu: "Files",
         title: "Paste from clipboard",
-        defaults: &[],
+        defaults: &["Ctrl+V"],
+        available: true,
+    },
+    CommandDef {
+        id: "cm_undo",
+        menu: "Files",
+        title: "Undo",
+        defaults: &["Ctrl+Z"],
         available: true,
     },
     CommandDef {
@@ -803,9 +824,9 @@ mod tests {
         assert!(!c("Ctrl+F5").uses_fn(&fn_alt));
     }
 
-    /// The README key table is generated from COMMANDS; this keeps it current.
+    /// The key table in docs/MANUAL.md is generated from COMMANDS; this keeps it current.
     #[test]
-    fn readme_key_table_matches_commands() {
+    fn manual_key_table_matches_commands() {
         let mut table = String::from("| Menu | Command | Keys |\n|---|---|---|\n");
         for c in COMMANDS {
             let title = if c.available {
@@ -825,17 +846,17 @@ mod tests {
             table.push_str(&format!("| {} | {title} | {keys} |\n", c.menu));
         }
         let readme =
-            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md"))
-                .expect("README.md at the repository root");
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/MANUAL.md"))
+                .expect("docs/MANUAL.md");
         let start = "<!-- keys:start -->\n";
         let current = readme
             .split_once(start)
             .and_then(|(_, rest)| rest.split_once("<!-- keys:end -->"))
             .map(|(t, _)| t)
-            .expect("README key table markers");
+            .expect("MANUAL key table markers");
         assert_eq!(
             current, table,
-            "README key table is stale; replace it with:\n{table}"
+            "docs/MANUAL.md key table is stale; replace it with:\n{table}"
         );
     }
 

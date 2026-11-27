@@ -71,7 +71,8 @@ function begin(p) {
   // A results list drags its items from their own folders (`path`): local files, or entries
   // that are all inside archives (file promises).
   const results = isSearchLocation(location);
-  const picked = names.map((n) => p.panel.entries.find((e) => !e.up && e.name === n));
+  const byName = new Map(p.panel.entries.filter((e) => !e.up).map((e) => [e.name, e]));
+  const picked = names.map((n) => byName.get(n));
   const entries = results ? picked.filter(Boolean) : null;
   if (results) {
     const why = resultOpRefusal(entries, "drag");

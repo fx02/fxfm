@@ -1369,3 +1369,75 @@ mod netbios_tests {
         assert_eq!(names, ["Studio", "My NAS", "PC-ANA"]);
     }
 }
+
+/// One item on a mounted SMB share: its `smb://` link and its Windows path.
+#[derive(serde::Serialize, Debug, PartialEq)]
+pub struct ShareLink {
+    pub smb: String,
+    pub windows: String,
+}
+
+/// The `smb://` link and Windows path of each local path (null when it is not on an SMB
+/// share), for sharing with Windows users. The mount whose point is the longest prefix wins.
+#[tauri::command]
+pub async fn share_links(paths: Vec<String>) -> Vec<Option<ShareLink>> {
+    tauri::async_runtime::spawn_blocking(move || links_for(&smb_mounts(), &paths))
+        .await
+        .unwrap_or_default()
+}
+
+fn links_for(mounts: &[SmbMount], paths: &[String]) -> Vec<Option<ShareLink>> {
+    paths
+        .iter()
+        .map(|p| {
+            mounts
+                .iter()
+                .filter_map(|m| {
+                    fxfm_core::servers::share_links(&m.from, &m.on, p).map(|l| (m.on.len(), l))
+                })
+                .max_by_key(|(n, _)| *n)
+                .map(|(_, (smb, windows))| ShareLink { smb, windows })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod share_link_tests {
+    use super::*;
+
+    #[test]
+    fn the_deepest_mount_wins_and_other_paths_get_none() {
+        let m = |from: &str, on: &str| SmbMount {
+            from: from.into(),
+            on: on.into(),
+            total: 0,
+            free: 0,
+        };
+        let mounts = [
+            m("//nas/data", "/Volumes/data"),
+            m("//other/pub", "/Volumes/data/x"),
+        ];
+        let out = links_for(
+            &mounts,
+            &[
+                "/Volumes/data/a b".into(),
+                "/Volumes/data/x/f".into(),
+                "/Users/me".into(),
+            ],
+        );
+        assert_eq!(
+            out,
+            vec![
+                Some(ShareLink {
+                    smb: "smb://nas/data/a%20b".into(),
+                    windows: r"\\nas\data\a b".into()
+                }),
+                Some(ShareLink {
+                    smb: "smb://other/pub/f".into(),
+                    windows: r"\\other\pub\f".into()
+                }),
+                None
+            ]
+        );
+    }
+}

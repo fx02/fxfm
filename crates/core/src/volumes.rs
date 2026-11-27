@@ -50,6 +50,22 @@ fn volume(name: String, path: &Path, kind: VolumeKind) -> Volume {
     }
 }
 
+/// Whether the item `path` lies on a network volume (SMB, AFP, NFS, WebDAV), which has no
+/// Trash. Its folder is asked, so a local symlink to a share is still a local item.
+pub fn on_network_volume(path: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        path.parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .is_some_and(is_network_fs)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        false
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn is_network_fs(path: &Path) -> bool {
     let Ok(c) = CString::new(path.as_os_str().as_bytes()) else {
@@ -139,6 +155,27 @@ pub fn list_volumes(home: &Path) -> Vec<Volume> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Local items (and odd paths) are never on a network volume; nothing is mounted for this.
+    #[test]
+    fn local_items_are_not_on_a_network_volume() {
+        let t = tempfile::tempdir().unwrap();
+        let f = t.path().join("a.txt");
+        std::fs::write(&f, b"x").unwrap();
+        assert!(!on_network_volume(&f));
+        assert!(!on_network_volume(t.path()));
+        assert!(!on_network_volume(Path::new("/")));
+        assert!(!on_network_volume(Path::new("relative")));
+        assert!(!on_network_volume(&t.path().join("missing/x")));
+    }
+
+    /// Read-only check on a real share: `FXFM_NET_ITEM=/Volumes/<share>/<item>`.
+    #[test]
+    #[ignore = "needs a mounted network share (FXFM_NET_ITEM)"]
+    fn an_item_on_a_mounted_share_is_on_a_network_volume() {
+        let item = std::env::var("FXFM_NET_ITEM").expect("FXFM_NET_ITEM");
+        assert!(on_network_volume(Path::new(&item)));
+    }
 
     #[test]
     fn volumes_start_with_root_and_home() {

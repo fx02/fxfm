@@ -227,6 +227,9 @@ pub struct Settings {
     /// The F-key bar at the bottom of the window.
     pub show_fkey_bar: bool,
     pub font_size: u32,
+    /// Font of the panel lists and status lines: a font family ("" = the system font). A
+    /// fixed-pitch one (default Menlo) keeps names, sizes and dates in straight columns.
+    pub font_family: String,
     pub fda_hint_shown: bool,
     /// The first-run warning about keys macOS takes for itself was shown.
     pub conflict_hint_shown: bool,
@@ -247,9 +250,12 @@ pub struct Settings {
     /// "controlCommand", "option", "letters" or "off". The UI treats unknown values as
     /// "command".
     pub quick_search: String,
-    /// Row icons: "finder" (macOS icons, default) or "emoji"; the UI treats unknown values as
+    /// Row icons: "finder" (macOS icons, default), "classic", "outline" or "emoji"; the UI treats unknown values as
     /// "finder".
     pub icons: String,
+    /// Finder icons: the macOS system icon for ordinary folders (a `CoreTypes.bundle` name from
+    /// the UI's list, e.g. "SmartFolderIcon"); "" = the normal folder icon.
+    pub folder_icon: String,
     /// Right-click menu items switched off in Options (item ids, e.g. "quick_look"); empty: all on.
     pub context_menu_off: Vec<String>,
 }
@@ -316,6 +322,7 @@ impl Default for Settings {
             show_panel_footer: true,
             show_fkey_bar: true,
             font_size: 17,
+            font_family: "Menlo".into(),
             fda_hint_shown: false,
             conflict_hint_shown: false,
             audio_output: None,
@@ -326,6 +333,7 @@ impl Default for Settings {
             search: SearchSettings::default(),
             quick_search: "command".into(),
             icons: "finder".into(),
+            folder_icon: String::new(),
             context_menu_off: Vec::new(),
         }
     }

@@ -84,6 +84,10 @@ pub struct OpSummary {
     pub done: u64,
     pub skipped: u64,
     pub cancelled: bool,
+    /// Local moves and Trash deletes: `(where the item is now, where it was)`, for Undo. Items
+    /// moved over an existing one are not listed (what they replaced is gone).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub undo: Vec<(String, String)>,
 }
 
 /// Errors that refuse an operation before it starts. Errors on individual
@@ -184,6 +188,8 @@ fn move_impl(
     Ok(ctx.summary)
 }
 
+/// Deletes `paths`: to the Trash when `to_trash`, except items on a network volume (no Trash
+/// there), which are deleted permanently like everything when not `to_trash`.
 pub fn delete(
     paths: &[PathBuf],
     to_trash: bool,
@@ -192,7 +198,8 @@ pub fn delete(
     let mut ctx = Ctx::new(obs, paths)?;
     ctx.emit();
     for p in paths {
-        let r = if to_trash {
+        // A network share has no Trash: its items are always deleted permanently.
+        let r = if to_trash && !crate::volumes::on_network_volume(p) {
             ctx.trash_item(p)
         } else {
             ctx.delete_tree(p).map(|_| ())
@@ -203,6 +210,60 @@ pub fn delete(
         }
     }
     Ok(ctx.summary)
+}
+
+/// Flushes every file under `p` to disk (F_FULLFSYNC on macOS). A move out of an archive or a
+/// server calls it on the staged copies before their originals are deleted, so a power loss
+/// right after cannot leave neither.
+pub fn sync_tree(p: &Path) -> io::Result<()> {
+    let md = fs::symlink_metadata(p)?;
+    if md.is_dir() {
+        for name in read_dir_sorted(p)? {
+            sync_tree(&p.join(name))?;
+        }
+        Ok(())
+    } else if md.is_file() {
+        sync_file(&File::open(p)?)
+    } else {
+        Ok(())
+    }
+}
+
+/// Deletes the source `src` of a cross-device move whose copy is `copy`, but only what was
+/// copied: a file that appeared in a source folder during the copy (an active download, another
+/// user on a share) or changed after it was copied stays, and so does its folder.
+fn remove_moved(src: &Path, copy: &Path) -> io::Result<()> {
+    let md = match fs::symlink_metadata(src) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    if md.is_dir() {
+        for name in read_dir_sorted(src)? {
+            let c = copy.join(&name);
+            if fs::symlink_metadata(&c).is_ok() {
+                remove_moved(&src.join(&name), &c)?;
+            }
+        }
+        return match fs::remove_dir(src) {
+            // Something new is left inside: the folder stays with it.
+            Err(e) if e.raw_os_error() == Some(libc::ENOTEMPTY) => {
+                log::warn!("{} kept: it has items that were not moved", src.display());
+                Ok(())
+            }
+            r => r,
+        };
+    }
+    if md.is_file() {
+        // The copy got the source's size and mtime when it was written.
+        let unchanged = fs::symlink_metadata(copy)
+            .is_ok_and(|c| c.len() == md.len() && mtime_of(&c) == mtime_of(&md));
+        if !unchanged {
+            log::warn!("{} kept: it changed after it was copied", src.display());
+            return Ok(());
+        }
+    }
+    fs::remove_file(src)
 }
 
 /// Trash backend. On macOS NSFileManager instead of the default Finder
@@ -219,9 +280,24 @@ fn trash_context() -> trash::TrashContext {
     ctx
 }
 
-/// Moves `p` to the Trash, as F8 does.
-pub fn trash(p: &Path) -> Result<(), trash::Error> {
-    trash_context().delete(p)
+/// Moves `p` to the Trash, as F8 does. Returns where it went (None when that is not known).
+pub fn trash(p: &Path) -> Result<Option<PathBuf>, String> {
+    #[cfg(target_os = "macos")]
+    if let Some(s) = p.to_str() {
+        use objc2_foundation::{NSFileManager, NSString, NSURL};
+        let url = NSURL::fileURLWithPath(&NSString::from_str(s));
+        let mut out = None;
+        NSFileManager::defaultManager()
+            .trashItemAtURL_resultingItemURL_error(&url, Some(&mut out))
+            .map_err(|e| e.localizedDescription().to_string())?;
+        return Ok(out
+            .and_then(|u| u.path())
+            .map(|p| PathBuf::from(p.to_string())));
+    }
+    trash_context()
+        .delete(p)
+        .map(|()| None)
+        .map_err(|e| e.to_string())
 }
 
 /// Creates `parent/name`; `name` may contain `/` to create a chain.
@@ -644,8 +720,8 @@ struct Ctx<'a> {
     skip_all_errors: bool,
     moving: bool,
     force_copy: bool,
-    /// Sources copied completely during a cross-device move, to delete at the end.
-    copied: Vec<PathBuf>,
+    /// `(source, copy)` copied completely during a cross-device move, to delete at the end.
+    copied: Vec<(PathBuf, PathBuf)>,
     /// (dev, ino) of target directories of this operation; never used as a
     /// source, so a missed into-itself case cannot recurse forever.
     target_dirs: HashSet<(u64, u64)>,
@@ -910,7 +986,7 @@ impl<'a> Ctx<'a> {
         }
         if complete && self.moving {
             self.copied.truncate(start);
-            self.copied.push(src.to_path_buf());
+            self.copied.push((src.to_path_buf(), dst.to_path_buf()));
         }
         Ok(complete)
     }
@@ -945,7 +1021,7 @@ impl<'a> Ctx<'a> {
                     self.progress.done_bytes = base + size;
                     self.file_done(true, 0);
                     if self.moving {
-                        self.copied.push(src.to_path_buf());
+                        self.copied.push((src.to_path_buf(), target.clone()));
                     }
                     return Ok(true);
                 }
@@ -1107,6 +1183,7 @@ impl<'a> Ctx<'a> {
                     let (files, bytes) = count_tree(src);
                     return match self.attempt(src, || fs::rename(src, &dst))? {
                         Some(()) => {
+                            self.record_undo(&dst, src);
                             self.renamed(files, bytes);
                             Ok(true)
                         }
@@ -1147,6 +1224,9 @@ impl<'a> Ctx<'a> {
             };
             match r {
                 Ok(()) => {
+                    if !overwrite {
+                        self.record_undo(&dst, src);
+                    }
                     let (files, bytes) = if smd.is_dir() {
                         count_tree(&dst)
                     } else {
@@ -1156,11 +1236,16 @@ impl<'a> Ctx<'a> {
                     return Ok(true);
                 }
                 Err(e) if is_exdev(&e) => {
-                    return if smd.is_dir() {
-                        self.copy_dir(src, &smd, &dst)
+                    let done = if smd.is_dir() {
+                        self.copy_dir(src, &smd, &dst)?
                     } else {
-                        self.copy_leaf(src, &smd, dst, Some(overwrite))
+                        self.copy_leaf(src, &smd, dst.clone(), Some(overwrite))?
                     };
+                    // The source is deleted at the end of the move (when everything was copied).
+                    if done && !overwrite {
+                        self.record_undo(&dst, src);
+                    }
+                    return Ok(done);
                 }
                 // Target appeared meanwhile: resolve the conflict again.
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists && races < 3 => {
@@ -1176,6 +1261,14 @@ impl<'a> Ctx<'a> {
                 }
             }
         }
+    }
+
+    /// Undo can bring the item at `now` back to `was`.
+    fn record_undo(&mut self, now: &Path, was: &Path) {
+        self.summary.undo.push((
+            now.to_string_lossy().into_owned(),
+            was.to_string_lossy().into_owned(),
+        ));
     }
 
     fn renamed(&mut self, files: u64, bytes: u64) {
@@ -1198,21 +1291,16 @@ impl<'a> Ctx<'a> {
         if complete {
             // Whatever is left in `src` was copied completely.
             self.copied.truncate(start);
-            self.copied.push(src.to_path_buf());
+            self.copied.push((src.to_path_buf(), dst.to_path_buf()));
         }
         Ok(complete)
     }
 
     fn delete_copied_sources(&mut self) -> Result<(), Stop> {
-        for p in std::mem::take(&mut self.copied) {
+        for (p, copy) in std::mem::take(&mut self.copied) {
             self.check_cancel()?;
             self.set_current(&p);
-            self.attempt(&p, || match fs::symlink_metadata(&p) {
-                Ok(m) if m.is_dir() => fs::remove_dir_all(&p),
-                Ok(_) => fs::remove_file(&p),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-                Err(e) => Err(e),
-            })?;
+            self.attempt(&p, || remove_moved(&p, &copy))?;
         }
         Ok(())
     }
@@ -1223,7 +1311,10 @@ impl<'a> Ctx<'a> {
         let (files, bytes) = count_tree(p);
         loop {
             match trash(p) {
-                Ok(()) => {
+                Ok(went) => {
+                    if let Some(went) = went {
+                        self.record_undo(&went, p);
+                    }
                     self.renamed(files, bytes);
                     return Ok(());
                 }
@@ -1388,7 +1479,8 @@ mod tests {
             OpSummary {
                 done: 2,
                 skipped: 0,
-                cancelled: false
+                cancelled: false,
+                ..OpSummary::default()
             }
         );
 
@@ -2233,7 +2325,8 @@ mod tests {
             OpSummary {
                 done: 4,
                 skipped: 0,
-                cancelled: false
+                cancelled: false,
+                ..OpSummary::default()
             }
         );
         assert!(!exists(&d));
@@ -2241,6 +2334,60 @@ mod tests {
         assert_eq!(read(&outside.join("keep")), "keep");
         let last = obs.progress.lock().unwrap().last().cloned().unwrap();
         assert_eq!((last.done_files, last.total_files), (4, 4));
+    }
+
+    /// A cross-device move deletes only what it copied: a file that appears in the source
+    /// folder during the copy, or one changed after it was copied, stays (with its folder).
+    #[test]
+    fn cross_device_move_keeps_what_changed_or_appeared_meanwhile() {
+        struct Meddle {
+            dir: PathBuf,
+            done: AtomicUsize,
+        }
+        impl OpObserver for Meddle {
+            fn progress(&self, p: &Progress) {
+                // Right after the first file was copied: edit it and drop a new one in.
+                if p.done_files == 1 && self.done.fetch_add(1, Ordering::SeqCst) == 0 {
+                    fs::write(self.dir.join("a.txt"), "edited later").unwrap();
+                    fs::write(self.dir.join("new.txt"), "new").unwrap();
+                }
+            }
+            fn conflict(&self, _c: &ConflictInfo) -> ConflictAnswer {
+                ConflictAnswer::Skip
+            }
+            fn error(&self, _p: &str, _m: &str) -> ErrorAnswer {
+                ErrorAnswer::Skip
+            }
+            fn is_cancelled(&self) -> bool {
+                false
+            }
+        }
+        let t = tempfile::tempdir().unwrap();
+        let (d, dst) = (t.path().join("d"), t.path().join("dst"));
+        fs::create_dir_all(&dst).unwrap();
+        fs::create_dir_all(&d).unwrap();
+        write(&d.join("a.txt"), "a");
+        write(&d.join("b.txt"), "b");
+        set_mtime(&d.join("a.txt"), 1_000_000_000);
+        let obs = Meddle {
+            dir: d.clone(),
+            done: AtomicUsize::new(0),
+        };
+        move_impl(
+            std::slice::from_ref(&d),
+            &Dest::IntoDir(dst.clone()),
+            &obs,
+            true,
+        )
+        .unwrap();
+        assert_eq!(read(&dst.join("d/a.txt")), "a");
+        assert_eq!(read(&dst.join("d/b.txt")), "b");
+        assert!(
+            !exists(&d.join("b.txt")),
+            "the unchanged copied file is moved"
+        );
+        assert_eq!(read(&d.join("a.txt")), "edited later");
+        assert_eq!(read(&d.join("new.txt")), "new");
     }
 
     #[test]

@@ -285,13 +285,16 @@ pub struct Modifiers {
 /// Starts a native drag of the panel entries `paths` (`dirs[i]`: a folder) out of the window.
 /// Returns once the drag is queued on the main thread; `drag://ended` reports how it ended.
 #[tauri::command]
-pub fn start_drag(
+pub async fn start_drag(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
     paths: Vec<String>,
     dirs: Vec<bool>,
 ) -> Result<(), String> {
-    let items = validate_paths(&paths, &dirs)?;
+    // The paths are checked off the main thread: a stat on a share that went away blocks.
+    let items = tauri::async_runtime::spawn_blocking(move || validate_paths(&paths, &dirs))
+        .await
+        .map_err(|e| e.to_string())??;
     if let DragItems::Promised(ps) = &items {
         // Refused now rather than when the receiver asks (the connection is not touched).
         for r in ps.iter().filter_map(|p| parse_remote(&p.location)) {

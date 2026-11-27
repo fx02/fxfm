@@ -454,7 +454,7 @@ enum RenameErr {
 static BAK_N: AtomicU64 = AtomicU64::new(0);
 
 /// `.<name>.fxfm-<pid>-<n>.bak` next to `target`.
-fn backup_path(target: &str) -> String {
+pub(super) fn backup_path(target: &str) -> String {
     let n = BAK_N.fetch_add(1, Ordering::Relaxed);
     super::join_path(
         parent_path(target),

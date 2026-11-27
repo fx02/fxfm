@@ -2,6 +2,7 @@
 
 pub mod archive;
 pub mod audio;
+pub mod branch;
 pub mod config;
 pub mod hotlist;
 pub mod keymap;
@@ -15,6 +16,7 @@ pub mod secrets;
 pub mod servers;
 pub mod storage;
 pub mod sync;
+pub mod undo;
 pub mod vfs;
 pub mod viewer;
 pub mod volumes;

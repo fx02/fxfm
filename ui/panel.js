@@ -1,5 +1,6 @@
 // One TC file panel: drive bar, path row, current-path bar, virtual list, status line.
 
+import { el } from "./dom.js";
 import {
   filterMatch,
   pushHistory,
@@ -40,13 +41,6 @@ import {
 export const VOLUME_ICON = { root: "💻", home: "🏠", volume: "💾", network: "🌐", server: "☁️" };
 const UP = Object.freeze({ name: "..", isDir: true, up: true, size: 0, hidden: false });
 
-function el(tag, cls, text) {
-  const e = document.createElement(tag);
-  if (cls) e.className = cls;
-  if (text !== undefined) e.textContent = text;
-  return e;
-}
-
 /** Finder icons by `iconKey`: a data URL, or "" when macOS gave none (emoji then). */
 const iconUrls = new Map();
 const iconAsked = new Set();
@@ -70,6 +64,21 @@ function fetchIcons(keys, api) {
       console.error("fxfm: file_icons", e);
       for (const k of missing) iconUrls.set(k, "");
     });
+}
+
+/** fxfm's own drawn icons (16×16): the shapes; "classic" fills them, "outline" only draws lines. */
+const SHAPES = {
+  up: '<path d="M8 2.5l4.5 4.5H9.8v6.5H6.2V7H3.5z"/>',
+  folder: '<path d="M1.5 3.5h4.2l1.5 1.5h7.3v8.5h-13z"/>',
+  file: '<path d="M3.5 1.5h6l3 3v10h-9z"/><path class="fold" d="M9.5 1.5v3h3"/>',
+  arc: '<path d="M3.5 1.5h6l3 3v10h-9z"/><path class="fold" d="M9.5 1.5v3h3"/><path class="mark" d="M6.5 3v1.2M6.5 5.4v1.2M6.5 7.8v1.2M6.5 10.2v1.2"/>',
+  med: '<path d="M3.5 1.5h6l3 3v10h-9z"/><path class="fold" d="M9.5 1.5v3h3"/><path class="play" d="M6.5 7.5l3.5 2-3.5 2z"/>',
+};
+
+/** The drawn icon of a row (fixed markup, no names in it). */
+function drawnIcon(style, e) {
+  const shape = e.up ? "up" : e.isDir ? "folder" : iconKind(e) || "file";
+  return `<svg class="ic ${style} ${shape}" viewBox="0 0 16 16" aria-hidden="true">${SHAPES[shape]}</svg>`;
 }
 
 function rowIcon(e) {
@@ -234,6 +243,8 @@ export class Panel {
    * A later go() supersedes an earlier one; refresh() never supersedes a user navigation.
    */
   async go(location, cursorName, { refresh = false, history = true } = {}) {
+    // A refresh never replaces a navigation the user started (it is about the old folder).
+    if (refresh && this.pendingTarget !== null) return { ok: false, superseded: true };
     if (!refresh) this.quickSearchEnd();
     const from = this.location ? { location: this.location, cursorName: this.cursorName } : null;
     const token = ++this.navToken;
@@ -242,7 +253,8 @@ export class Panel {
       cursorName,
       nearest: this.api.nearest,
     });
-    if (token !== this.navToken) return r;
+    // A newer go() took over: this one changed nothing (callers must not act on it).
+    if (token !== this.navToken) return { ...r, ok: false, superseded: true };
     this.pendingTarget = null;
     if (!r.ok) {
       this.api.onError(this, r.error, location);
@@ -333,9 +345,12 @@ export class Panel {
   }
 
   /** Options → View → Icons: "finder" or "emoji". */
-  setIconStyle(style) {
-    if (style === this.iconStyle) return;
+  /** `opts`: {home, folderIcon} for Finder icons (special folders, the chosen folder icon). */
+  setIconStyle(style, opts = {}) {
+    const same = style === this.iconStyle && opts.home === this.iconOpts?.home && opts.folderIcon === this.iconOpts?.folderIcon;
+    if (same) return;
     this.iconStyle = style;
+    this.iconOpts = opts;
     this.rowsDirty = true;
     this.renderRows();
   }
@@ -343,15 +358,23 @@ export class Panel {
   /** The row's icon: Finder's (once it has arrived; `wanted` collects keys to ask for) or emoji. */
   iconEl(e, wanted) {
     const i = el("i");
-    const key = this.iconStyle === "finder" ? iconKey(e, this.location) : null;
+    const key = this.iconStyle === "finder" ? iconKey(e, this.location, this.iconOpts) : null;
     const url = key && iconUrls.get(key);
-    if (url) {
+    if (url && key.startsWith("sys:Sidebar")) {
+      // A one-color sidebar glyph, drawn in the row's own color (any panel background).
+      const g = el("span", "glyph");
+      g.style.webkitMaskImage = `url("${url}")`;
+      g.style.maskImage = `url("${url}")`;
+      i.append(g);
+    } else if (url) {
       const img = document.createElement("img");
       img.src = url;
       img.alt = "";
       i.append(img);
     } else if (key && url === undefined) {
       wanted.add(key);
+    } else if (this.iconStyle === "classic" || this.iconStyle === "outline") {
+      i.innerHTML = drawnIcon(this.iconStyle, e);
     } else {
       i.textContent = rowIcon(e);
     }

@@ -1,6 +1,6 @@
 [package]
 name = "fxfm"
-version = "0.1.12"
+version = "0.1.22"
 edition = "2021"
 
 [build-dependencies]
@@ -29,7 +29,7 @@ security-framework = "3"
 block2 = "0.6"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSData", "NSDictionary", "NSGeometry", "NSURL", "NSError", "NSOperation"] }
-objc2-app-kit = { version = "0.3", features = ["NSEvent", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphicsContext", "NSWorkspace", "objc2-core-graphics", "block2", "NSApplication", "NSResponder", "NSView", "NSWindow", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSFilePromiseProvider", "NSPasteboard", "NSBezierPath", "NSColor", "NSFont", "NSStringDrawing", "NSAttributedString"] }
+objc2-app-kit = { version = "0.3", features = ["NSEvent", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphicsContext", "NSWorkspace", "objc2-core-graphics", "block2", "NSApplication", "NSResponder", "NSView", "NSWindow", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSFilePromiseProvider", "NSPasteboard", "NSBezierPath", "NSColor", "NSFont", "NSStringDrawing", "NSAttributedString", "NSFontManager", "objc2-core-foundation"] }
 
 [dev-dependencies]
 flate2 = "1"

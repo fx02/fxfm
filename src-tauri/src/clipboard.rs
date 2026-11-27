@@ -16,8 +16,12 @@ pub struct Board {
 /// folder (not inside an archive, not on a server). Returns the new change count, by which the
 /// UI later tells whether the clipboard still holds what it put there.
 #[tauri::command]
-pub fn clipboard_write(text: String, files: Vec<String>) -> i64 {
-    native::write(&native::general(), &text, &local_files(&files))
+pub async fn clipboard_write(text: String, files: Vec<String>) -> i64 {
+    // The files are checked off the main thread: a stat on a share that went away blocks.
+    let files = tauri::async_runtime::spawn_blocking(move || local_files(&files))
+        .await
+        .unwrap_or_default();
+    native::write(&native::general(), &text, &files)
 }
 
 /// The clipboard's change count and the local files on it (copied in Finder or by fxfm).

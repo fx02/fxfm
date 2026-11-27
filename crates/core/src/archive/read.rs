@@ -335,6 +335,11 @@ fn read_err(e: &io::Error) -> ArchiveError {
 }
 
 /// Writes entries below `dest` and keeps progress, cancellation and error answers.
+/// Item error for an entry whose name differs from an already extracted one only in case or
+/// Unicode form: on this disk both would be one file.
+pub const SAME_FILE_NAME: &str =
+    "another item with this name in different case was already written here (this disk ignores case)";
+
 struct Sink<'a> {
     dest: std::path::PathBuf,
     obs: &'a dyn OpObserver,
@@ -349,6 +354,10 @@ struct Sink<'a> {
     dirs: Vec<(std::path::PathBuf, i64, u32)>,
     /// Created symlinks `(path, rel)`, verified once the whole tree exists.
     links: Vec<(std::path::PathBuf, String)>,
+    /// Files written so far, by their exact entry name. `dest` starts empty, so an existing
+    /// file that is not one of these is another entry under a name that differs only in case
+    /// or Unicode form (the disk ignores both): it must not be overwritten.
+    written: std::collections::HashSet<String>,
 }
 
 impl Sink<'_> {
@@ -512,6 +521,13 @@ impl Sink<'_> {
                 self.dirs.push((path, mtime, mode.unwrap_or(0o755)));
             }
             Kind::File => {
+                // A repeated entry (tar appends) replaces the earlier one; another name that
+                // lands on the same file is an error, so a move never deletes its original.
+                if !self.written.contains(rel)
+                    && std::fs::symlink_metadata(&path).is_ok_and(|m| !m.file_type().is_symlink())
+                {
+                    return self.item_error(rel, SAME_FILE_NAME);
+                }
                 if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
                     let _ = std::fs::remove_file(&path);
                 }
@@ -532,6 +548,7 @@ impl Sink<'_> {
                         return Err(e);
                     }
                 }
+                self.written.insert(rel.to_string());
                 use std::os::unix::fs::PermissionsExt;
                 let perm = std::fs::Permissions::from_mode(mode.unwrap_or(0o644));
                 let _ = std::fs::set_permissions(&path, perm);
@@ -633,6 +650,7 @@ pub fn extract(
         cur: String::new(),
         dirs: Vec::new(),
         links: Vec::new(),
+        written: Default::default(),
     };
     match kind {
         ArchiveKind::Zip => extract_zip(path, &sel, password, &mut sink)?,
@@ -1045,6 +1063,55 @@ mod tests {
                 "unsafe link in archive: l"
             ]
         );
+    }
+
+    /// On a disk that ignores case, `A.txt` and `a.txt` are one file: the second is an item
+    /// error (so a move keeps its original), the first keeps its content. A name repeated in a
+    /// tar still replaces the earlier entry, as tar does.
+    #[test]
+    fn extract_refuses_names_that_differ_only_in_case() {
+        let probe = tempfile::tempdir().unwrap();
+        std::fs::write(probe.path().join("X"), b"").unwrap();
+        let ignores_case = probe.path().join("x").exists();
+        for kind in [ArchiveKind::Tar, ArchiveKind::Zip] {
+            let t = tempfile::tempdir().unwrap();
+            let p = t.path().join("a.bin");
+            build(
+                kind,
+                &p,
+                &[("d/A.txt", Some(b"upper")), ("d/a.txt", Some(b"lower"))],
+            );
+            let dest = t.path().join("stage");
+            std::fs::create_dir(&dest).unwrap();
+            let obs = Obs::default();
+            let n = extract(&p, kind, &items(&[""]), &dest, None, &obs).unwrap();
+            if ignores_case {
+                assert_eq!(n, 1, "{kind:?}");
+                assert_eq!(
+                    std::fs::read(dest.join("d/A.txt")).unwrap(),
+                    b"upper",
+                    "{kind:?}"
+                );
+                let errs = obs.errors.lock().unwrap();
+                assert_eq!(errs.len(), 1, "{kind:?}");
+                assert_eq!(errs[0].1, SAME_FILE_NAME);
+            } else {
+                assert_eq!(n, 2, "{kind:?}");
+            }
+        }
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path().join("dup.tar");
+        build(
+            ArchiveKind::Tar,
+            &p,
+            &[("x.txt", Some(b"old")), ("x.txt", Some(b"new"))],
+        );
+        let dest = t.path().join("stage");
+        std::fs::create_dir(&dest).unwrap();
+        let obs = Obs::default();
+        extract(&p, ArchiveKind::Tar, &items(&[""]), &dest, None, &obs).unwrap();
+        assert_eq!(std::fs::read(dest.join("x.txt")).unwrap(), b"new");
+        assert!(obs.errors.lock().unwrap().is_empty());
     }
 
     #[test]

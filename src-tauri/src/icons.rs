@@ -3,7 +3,9 @@
 //! - `dir`: the plain folder icon;
 //! - `file`: the plain document icon (no extension);
 //! - `ext:<extension>`: the icon of that file type;
-//! - `path:<absolute path>`: the icon of that item itself (applications and other bundles).
+//! - `path:<absolute path>`: the icon of that item itself (applications and other bundles);
+//! - `sys:<name>`: a macOS system icon from `CoreTypes.bundle` (folder icons: Desktop,
+//!   Downloads, Smart folder…), read from this Mac, never shipped with fxfm.
 
 use std::collections::HashMap;
 
@@ -30,6 +32,19 @@ fn data_url(png: &[u8]) -> String {
     )
 }
 
+/// Where macOS keeps its system icons.
+const CORE_TYPES: &str = "/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources";
+
+/// The `.icns` file of a `sys:` key: letters and digits only, and it must exist.
+fn system_icon(key: &str) -> Option<std::path::PathBuf> {
+    let name = key.strip_prefix("sys:")?;
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let p = std::path::Path::new(CORE_TYPES).join(format!("{name}.icns"));
+    p.is_file().then_some(p)
+}
+
 /// The file type NSWorkspace is asked about for a key, or None for `path:` and unknown keys.
 fn file_type(key: &str) -> Option<&str> {
     match key {
@@ -43,14 +58,17 @@ fn file_type(key: &str) -> Option<&str> {
 
 #[cfg(target_os = "macos")]
 mod native {
-    use super::{file_type, SIZE};
+    use super::{file_type, system_icon, SIZE};
     use objc2::AnyThread;
-    use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSWorkspace};
+    use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSImage, NSWorkspace};
     use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize, NSString};
 
     pub fn png(key: &str) -> Option<Vec<u8>> {
         let ws = NSWorkspace::sharedWorkspace();
-        let img = if let Some(path) = key.strip_prefix("path:") {
+        let img = if key.starts_with("sys:") {
+            let file = system_icon(key)?;
+            NSImage::initWithContentsOfFile(NSImage::alloc(), &NSString::from_str(file.to_str()?))?
+        } else if let Some(path) = key.strip_prefix("path:") {
             if !path.starts_with('/') || std::fs::symlink_metadata(path).is_err() {
                 return None;
             }
@@ -104,6 +122,10 @@ mod tests {
             assert_eq!(&png[..4], b"\x89PNG", "{key}");
         }
         assert!(native::png("path:relative").is_none());
+        let sys = native::png("sys:GenericFolderIcon").expect("system folder icon");
+        assert_eq!(&sys[..4], b"\x89PNG");
+        assert!(native::png("sys:../../etc/passwd").is_none());
+        assert!(native::png("sys:NoSuchIcon").is_none());
         assert!(native::png("path:/no/such/file").is_none());
         assert!(data_url(b"x").starts_with("data:image/png;base64,"));
     }

@@ -2,6 +2,7 @@
 // each side in its own half with the direction in the middle, and asks the main window to run
 // the copies and deletes (sync.js). Nothing happens without Synchronize and its confirmation.
 
+import { el } from "./dom.js";
 import {
   SYNC_ACTION,
   SYNC_MODES,
@@ -15,6 +16,8 @@ import {
   syncCounts,
   syncModeAction,
   syncPlan,
+  syncShowFilter,
+  syncShowKind,
   syncSort,
   syncSymbol,
 } from "./lib.mjs";
@@ -81,13 +84,6 @@ function keepGeometry() {
 
 // ------------------------------------------------------------ the window
 
-function el(tag, cls, text) {
-  const e = document.createElement(tag);
-  if (cls) e.className = cls;
-  if (text !== undefined) e.textContent = text;
-  return e;
-}
-
 function checkbox(label, checked) {
   const box = el("input");
   box.type = "checkbox";
@@ -115,13 +111,16 @@ function showWindow(start) {
     subdirs: saved.subdirs !== false,
     byContent: saved.byContent === true,
     ignoreDates: saved.ignoreDates === true,
-    showEqual: saved.showEqual === true,
+    show: syncShowFilter(saved),
     mode: SYNC_MODES.some(([id]) => id === saved.mode) ? saved.mode : "twoWay",
   };
   let rows = [];
   let actions = [];
   let shown = [];
   let sel = 0;
+  /** Rows picked with Shift/Cmd (indexes into `rows`); empty: the keys act on the cursor row. */
+  let picked = new Set();
+  let anchor = 0;
   let busy = false;
 
   // The whole window is the dialog box (its CSS), without a title: macOS draws that.
@@ -130,7 +129,21 @@ function showWindow(start) {
   const subdirs = checkbox("Subfolders", opts.subdirs);
   const byContent = checkbox("By content (local files)", opts.byContent);
   const ignoreDates = checkbox("Ignore dates", opts.ignoreDates);
-  const showEqual = checkbox("Show equal", opts.showEqual);
+  // Show: which rows the list holds, by what happens to them (TC's show buttons).
+  const SHOW = [
+    ["right", "→", "Rows copied (or deleted) on the right"],
+    ["left", "←", "Rows copied (or deleted) on the left"],
+    ["diff", "≠", "Differences that are not copied"],
+    ["equal", "=", "Equal rows"],
+  ];
+  const showBoxes = SHOW.map(([id, label, title]) => {
+    const c = checkbox(label, opts.show[id]);
+    c.label.title = title;
+    return { id, ...c };
+  });
+  const showGroup = el("span", "show");
+  showGroup.append("Show:", ...showBoxes.map((b) => b.label));
+  const showOn = () => Object.fromEntries(showBoxes.map((b) => [b.id, b.box.checked]));
   const mode = el("select");
   for (const [id, label] of SYNC_MODES) {
     const o = el("option", null, label);
@@ -141,7 +154,7 @@ function showWindow(start) {
   const modeLabel = el("label", "mode");
   modeLabel.append("Mode: ", mode);
   const optLine = el("div", "opts");
-  optLine.append(modeLabel, subdirs.label, byContent.label, ignoreDates.label, showEqual.label);
+  optLine.append(modeLabel, subdirs.label, byContent.label, ignoreDates.label, showGroup);
   const sides = el("div", "srow sides");
   const leftPath = el("span", "side left");
   const rightPath = el("span", "side right");
@@ -166,7 +179,7 @@ function showWindow(start) {
   const note = el(
     "p",
     "note",
-    "→ / ← copy the selected row that way, Shift+→ / Shift+← move the item on that side to the Trash, Space skips it; or click the symbol. Mode sets all rows; Synchronize asks before doing anything.",
+    "→ / ← copy that way, Shift+→ / Shift+← move the item on that side to the Trash, Space skips; they act on the picked rows (Shift+↑/↓, Shift-click, ⌘-click) or the cursor row. Click a symbol to change only its row. Synchronize asks before doing anything.",
   );
   const statusLine = el("div", "sstatus");
   body.append(optLine, sides, head, list, note, statusLine);
@@ -210,6 +223,7 @@ function showWindow(start) {
     const a = actions[i];
     line.className = `srow ${row.state} act-${a}`;
     if (k === sel) line.classList.add("sel");
+    if (picked.has(i)) line.classList.add("picked");
     const act = el("span", "act", syncSymbol(a, row.state));
     act.title = ACTION_TITLE[a];
     line.replaceChildren(
@@ -225,8 +239,12 @@ function showWindow(start) {
   };
 
   const render = () => {
-    const visible = rows.map((_, i) => i).filter((i) => showEqual.box.checked || rows[i].state !== "equal");
+    const on = showOn();
+    const visible = rows.map((_, i) => i).filter((i) => on[syncShowKind(rows[i], actions[i])]);
     shown = syncSort(rows, actions, visible, sortCol, sortDesc);
+    // Rows hidden by Show stop being picked: keys never act on rows that cannot be seen.
+    const seen = new Set(shown);
+    picked = new Set([...picked].filter((i) => seen.has(i)));
     paintHeads();
     sel = Math.min(sel, Math.max(0, shown.length - 1));
     const lines = shown.map((i, k) => {
@@ -237,7 +255,7 @@ function showWindow(start) {
     });
     list.replaceChildren(...lines);
     if (!rows.length) list.append(el("div", "empty", busy ? "Comparing…" : "Press Compare."));
-    else if (!shown.length) list.append(el("div", "empty", "No differences."));
+    else if (!shown.length) list.append(el("div", "empty", "Nothing to show (see Show)."));
     syncBtn.disabled = busy || !rows.length;
     if (rows.length && !busy) setStatus(summary());
     list.children[sel]?.scrollIntoView?.({ block: "nearest" });
@@ -252,12 +270,30 @@ function showWindow(start) {
     list.children[sel].scrollIntoView?.({ block: "nearest" });
   };
 
+  const repaint = () => shown.forEach((i, k) => list.children[k] && paintRow(list.children[k], i, k));
+
+  /** `a` for the picked rows (or the cursor row); rows that cannot take it keep theirs. */
   const setAction = (k, a) => {
-    const i = shown[k];
-    if (i === undefined || !syncActionAllowed(rows[i], a)) return;
-    actions[i] = a;
-    paintRow(list.children[k], i, k);
+    const targets = picked.size ? [...picked] : [shown[k]];
+    for (const i of targets) if (i !== undefined && syncActionAllowed(rows[i], a)) actions[i] = a;
+    repaint();
     setStatus(summary());
+  };
+
+  /** Shift: from the anchor to `k`; toggle (Cmd/Ctrl): `k` in or out; else nothing picked. */
+  const pick = (k, { range = false, toggle = false } = {}) => {
+    if (range) {
+      const [a, b] = anchor <= k ? [anchor, k] : [k, anchor];
+      picked = new Set(shown.slice(a, b + 1));
+    } else if (toggle) {
+      const i = shown[k];
+      if (picked.has(i)) picked.delete(i);
+      else picked.add(i);
+      anchor = k;
+    } else {
+      picked = new Set();
+      anchor = k;
+    }
   };
 
   /** A click on the symbol: the next allowed direction (→ ← →✕ ✕← none). */
@@ -269,7 +305,10 @@ function showWindow(start) {
       a = order[(order.indexOf(a) + 1) % order.length];
       if (syncActionAllowed(rows[i], a)) break;
     }
-    setAction(k, a);
+    // The symbol's own row only, even when others are picked.
+    actions[i] = a;
+    paintRow(list.children[k], i, k);
+    setStatus(summary());
   };
 
   const applyMode = () => {
@@ -282,7 +321,7 @@ function showWindow(start) {
       subdirs: subdirs.box.checked,
       byContent: byContent.box.checked,
       ignoreDates: ignoreDates.box.checked,
-      showEqual: showEqual.box.checked,
+      show: showOn(),
       mode: mode.value,
     });
 
@@ -296,6 +335,7 @@ function showWindow(start) {
     compareBtn.textContent = "Stop";
     rows = [];
     actions = [];
+    picked = new Set();
     render();
     setStatus("Comparing…");
     try {
@@ -336,7 +376,7 @@ function showWindow(start) {
     if (c.left) text.push(`Copy ${c.left} item(s) to the left (${groupThousands(c.leftBytes)} bytes).`);
     if (c.delRight) text.push(`Move ${c.delRight} item(s) on the right to the Trash.`);
     if (c.delLeft) text.push(`Move ${c.delLeft} item(s) on the left to the Trash.`);
-    if (c.delRight || c.delLeft) text.push("On a server or inside an archive deleting is permanent.");
+    if (c.delRight || c.delLeft) text.push("On a server, a network share or inside an archive deleting is permanent (there is no Trash).");
     if (c.right || c.left) text.push("Existing files in the chosen direction are overwritten.");
     const r = await dialog({
       title: "Synchronize dirs",
@@ -369,8 +409,14 @@ function showWindow(start) {
     const line = e.target.closest("[data-k]");
     if (!line) return;
     const k = Number(line.dataset.k);
+    if (e.target.classList.contains("act")) {
+      select(k);
+      cycle(k);
+      return;
+    }
+    pick(k, { range: e.shiftKey, toggle: e.metaKey || e.ctrlKey });
     select(k);
-    if (e.target.classList.contains("act")) cycle(k);
+    repaint();
   });
   head.addEventListener("click", (e) => {
     const col = e.target.closest("[data-col]")?.dataset.col;
@@ -386,19 +432,27 @@ function showWindow(start) {
     const k = shown.indexOf(keep);
     if (k >= 0) select(k);
   });
-  showEqual.box.addEventListener("change", () => {
-    remember();
-    render();
-  });
+  for (const b of showBoxes) {
+    b.box.addEventListener("change", () => {
+      remember();
+      render();
+    });
+  }
   mode.addEventListener("change", () => {
     remember();
     applyMode();
   });
   compareBtn.addEventListener("click", compare);
   syncBtn.addEventListener("click", synchronize);
-  defaultsBtn.addEventListener("click", applyMode);
+  defaultsBtn.addEventListener("click", () => {
+    if (!picked.size) return applyMode();
+    for (const i of picked) actions[i] = syncModeAction(mode.value, rows[i]);
+    render();
+  });
+  // Skip all / Reset to mode act on the picked rows when there are any.
   clearBtn.addEventListener("click", () => {
-    actions = rows.map(() => "none");
+    if (picked.size) for (const i of picked) actions[i] = "none";
+    else actions = rows.map(() => "none");
     render();
   });
   closeBtn.addEventListener("click", () => appWin.close());
@@ -412,12 +466,19 @@ function showWindow(start) {
     } else if (inList && ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(k)) {
       e.preventDefault();
       const page = Math.max(1, Math.floor(list.clientHeight / 22) - 1);
-      select({ ArrowUp: sel - 1, ArrowDown: sel + 1, PageUp: sel - page, PageDown: sel + page, Home: 0, End: shown.length - 1 }[k]);
+      const to = { ArrowUp: sel - 1, ArrowDown: sel + 1, PageUp: sel - page, PageDown: sel + page, Home: 0, End: shown.length - 1 }[k];
+      // Shift extends the picked rows from the anchor; plain keys only move the cursor.
+      if (e.shiftKey) {
+        if (!picked.size) anchor = sel;
+        pick(Math.max(0, Math.min(shown.length - 1, to)), { range: true });
+      }
+      select(to);
+      if (e.shiftKey) repaint();
     } else if (inList && (k === "ArrowRight" || k === "ArrowLeft")) {
       e.preventDefault();
       const right = k === "ArrowRight";
       setAction(sel, e.shiftKey ? (right ? "delRight" : "delLeft") : right ? "right" : "left");
-    } else if (inList && (k === " " || k === "Delete" || k === "Backspace")) {
+    } else if (inList && k === " ") {
       e.preventDefault();
       setAction(sel, "none");
     } else if (k === "Enter" && !e.isComposing && document.activeElement?.tagName !== "BUTTON" && document.activeElement?.tagName !== "SELECT") {

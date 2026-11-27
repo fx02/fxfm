@@ -594,7 +594,7 @@ test("cmdlineKeyGoesToPanel: F-keys, Ctrl/Alt and Up/Down go to the panel; editi
   for (const k of ["F3", "F5", "Shift+F6", "F12", "Ctrl+D", "Ctrl+R", "Alt+F1", "Up", "Down", "PageDown", "Tab"]) {
     assert.equal(lib.cmdlineKeyGoesToPanel(k), true, k);
   }
-  for (const k of ["A", "Shift+A", "1", "Space", "Backspace", "Delete", "Left", "Right", "Home", "End", "Enter", "Ctrl+Enter", "Escape", null]) {
+  for (const k of ["A", "Shift+A", "1", "Space", "Backspace", "Delete", "Left", "Right", "Home", "End", "Enter", "Ctrl+Enter", "Escape", "Alt+Left", "Alt+Shift+Right", null]) {
     assert.equal(lib.cmdlineKeyGoesToPanel(k), false, String(k));
   }
 });
@@ -1194,6 +1194,23 @@ test("deleteConfirmText: server text, else the existing texts", () => {
   );
   assert.equal(lib.deleteConfirmText("/a", 2, { toTrash: true }), "Do you really want to move 2 file(s)/dir(s) to the Trash?");
   assert.equal(lib.deleteConfirmText("/a", 1, { toTrash: false }), "Do you really want to delete 1 file(s)/dir(s) permanently?");
+});
+
+test("deleteConfirmText: F8 on a network share says the delete is permanent", () => {
+  assert.equal(
+    lib.deleteConfirmText("/Volumes/data", 1, { toTrash: true, name: "b.txt", onNetwork: 1 }),
+    'Do you really want to delete "b.txt" permanently? It is on a network share, which has no Trash. This cannot be undone.',
+  );
+  assert.equal(
+    lib.deleteConfirmText("/Volumes/data", 3, { toTrash: true, onNetwork: 3 }),
+    "Do you really want to delete 3 file(s)/dir(s) permanently? They are on a network share, which has no Trash. This cannot be undone.",
+  );
+  assert.equal(
+    lib.deleteConfirmText("search:x", 3, { toTrash: true, onNetwork: 1 }),
+    "Do you really want to move 3 file(s)/dir(s) to the Trash? 1 of them is on a network share, which has no Trash: deleted permanently.",
+  );
+  // Shift+F8 is permanent anyway.
+  assert.equal(lib.deleteConfirmText("/Volumes/data", 2, { onNetwork: 2 }), "Do you really want to delete 2 file(s)/dir(s) permanently?");
 });
 
 test("deleteConfirmText: a single item is named", () => {
@@ -2268,6 +2285,9 @@ test("contextMenuItems: all items in order; empty space and .. only Paste", () =
   assert.equal(lib.contextMenuItems({ name: "a" }, 3)[7][1], "Copy paths");
   assert.deepEqual(lib.contextMenuItems(null, 0), [["cm_paste_from_clipboard", "Paste"]]);
   assert.deepEqual(lib.contextMenuItems({ name: "..", up: true }, 0), [["cm_paste_from_clipboard", "Paste"]]);
+  assert.deepEqual(ids(lib.contextMenuItems({ name: "a" }, 1, [], true, true)).slice(6, 10), [
+    "cm_copy_names_to_clip", "cm_copy_full_names_to_clip", "cm_copy_share_links", "-",
+  ]);
   assert.deepEqual(lib.contextMenuItems(null, 0, ["cm_paste_from_clipboard"]), []);
 });
 
@@ -2434,4 +2454,86 @@ test("syncSort: by direction → ← = ≠, by size/date/name, missing side last
   rows[0].right.size = 5;
   assert.deepEqual(rels(lib.syncSort(rows, actions, all, "rightSize")), ["e", "d", "l", "r1", "x", "r2"]);
   assert.deepEqual(rels(lib.syncSort(rows, actions, [2, 0], null)), ["l", "e"]);
+});
+
+test("branchEntries / branchStatus / a results title", () => {
+  const e = lib.branchEntries([{ path: "/d/sub/a.txt", rel: "sub/a.txt", size: 3, mtime: 9, inArchive: false }]);
+  assert.deepEqual(e[0], { name: "sub/a.txt", path: "/d/sub/a.txt", isDir: false, size: 3, mtime: 9, hidden: false, inArchive: false, mounted: true, mode: 0, isSymlink: false });
+  assert.equal(lib.branchStatus({ items: [1, 2], truncated: false, unreadable: 0 }), "Branch view: 2 file(s)");
+  assert.equal(lib.branchStatus({ items: [1], truncated: true, unreadable: 2 }), "Branch view: 1 file(s) · only the first 1 · 2 folder(s) could not be read");
+  assert.equal(lib.displayLocation(lib.SEARCH_LOCATION, null, { title: "Branch view: /d" }), "Branch view: /d");
+  assert.equal(lib.displayLocation(lib.SEARCH_LOCATION, null, { query: "x" }), "Search results: x");
+});
+
+test("syncShowKind / syncShowFilter: rows by direction for the Show buttons", () => {
+  assert.equal(lib.syncShowKind(srow("a", "leftNewer"), "right"), "right");
+  assert.equal(lib.syncShowKind(srow("a", "rightOnly", null, "a"), "delRight"), "right");
+  assert.equal(lib.syncShowKind(srow("a", "rightNewer"), "left"), "left");
+  assert.equal(lib.syncShowKind(srow("a", "leftOnly", "a", null), "delLeft"), "left");
+  assert.equal(lib.syncShowKind(srow("a", "equal"), "none"), "equal");
+  assert.equal(lib.syncShowKind(srow("a", "differs"), "none"), "diff");
+  assert.equal(lib.syncShowKind(srow("a", "leftNewer"), "none"), "diff");
+  assert.deepEqual(lib.syncShowFilter(null), { right: true, left: true, diff: true, equal: false });
+  assert.deepEqual(lib.syncShowFilter({ showEqual: true }), { right: true, left: true, diff: true, equal: true });
+  assert.deepEqual(lib.syncShowFilter({ show: { right: false, equal: true } }), { right: false, left: true, diff: true, equal: true });
+});
+
+test("iconStyle: the four styles, anything else is Finder", () => {
+  for (const id of ["finder", "classic", "outline", "emoji"]) assert.equal(lib.iconStyle({ icons: id }), id);
+  assert.equal(lib.iconStyle({ icons: "nope" }), "finder");
+  assert.equal(lib.iconStyle(null), "finder");
+});
+
+test("iconKey: special folders and the chosen folder icon", () => {
+  const o = { home: "/Users/u", folderIcon: "" };
+  assert.equal(lib.iconKey({ name: "Desktop", isDir: true }, "/Users/u", o), "sys:DesktopFolderIcon");
+  assert.equal(lib.iconKey({ name: "u", isDir: true }, "/Users", o), "sys:HomeFolderIcon");
+  assert.equal(lib.iconKey({ name: "Applications", isDir: true }, "/", o), "sys:ApplicationsFolderIcon");
+  assert.equal(lib.iconKey({ name: "Desktop", isDir: true }, "/tmp", o), "dir");
+  assert.equal(lib.iconKey({ name: "Docs", isDir: true }, "/x", { ...o, folderIcon: "SmartFolderIcon" }), "sys:SmartFolderIcon");
+  assert.equal(lib.iconKey({ name: "Docs", isDir: true }, "/x", { ...o, folderIcon: "GenericFolderIcon" }), "dir");
+  assert.equal(lib.iconKey({ name: "Docs", isDir: true }, "/x", { ...o, folderIcon: "../../evil" }), "dir");
+  const side = { ...o, folderIcon: "SidebarGenericFolder" };
+  assert.equal(lib.iconKey({ name: "Downloads", isDir: true }, "/Users/u", side), "sys:SidebarDownloadsFolder");
+  assert.equal(lib.iconKey({ name: "Desktop", isDir: true }, "sftp://s/Users/u", o), "dir");
+});
+
+test("server groups: levels, too deep only when a change makes it deeper", () => {
+  const srv = (name) => ({ kind: "server", name });
+  const grp = (name, children = []) => ({ kind: "folder", name, children });
+  assert.equal(lib.groupLevels([srv("a")]), 0);
+  const three = [grp("A", [grp("B", [grp("C", [srv("x")])])]), srv("y")];
+  assert.equal(lib.groupLevels(three), 3);
+  assert.equal(lib.groupsTooDeep([], three), false);
+  const four = [grp("A", [grp("B", [grp("C", [grp("D")])])])];
+  assert.equal(lib.groupsTooDeep(three, four), true);
+  // An old list that is already deeper can still be edited without getting deeper.
+  assert.equal(lib.groupsTooDeep(four, [...structuredClone(four), srv("z")]), false);
+});
+
+test("server groups: Alt+Left leaves the group, Alt+Right enters the group above", () => {
+  const srv = (name) => ({ kind: "server", name });
+  const grp = (name, children = []) => ({ kind: "folder", name, children });
+  const nodes = [grp("A", [srv("a1"), grp("B", [srv("b1")])]), srv("x")];
+  assert.equal(lib.outdentNode(nodes, [1]), null);
+  assert.deepEqual(lib.outdentNode(nodes, [0, 1, 0]), [0, 2]);
+  assert.deepEqual(nodes[0].children.map((n) => n.name), ["a1", "B", "b1"]);
+  assert.deepEqual(nodes[0].children[1].children, []);
+  assert.deepEqual(lib.outdentNode(nodes, [0, 0]), [1]);
+  assert.deepEqual(nodes.map((n) => n.name), ["A", "a1", "x"]);
+  // x has a server above it: nothing; a1 has group A above it: it goes to A's end.
+  assert.equal(lib.indentNode(nodes, [2]), null);
+  assert.deepEqual(lib.indentNode(nodes, [1]), [0, 2]);
+  assert.deepEqual(nodes[0].children.map((n) => n.name), ["B", "b1", "a1"]);
+  assert.equal(lib.indentNode(nodes, [0]), null);
+});
+
+test("fitWindow: inside the window, not below the minimum", () => {
+  const min = { w: 400, h: 300 };
+  assert.deepEqual(lib.fitWindow({ x: 10, y: 20, w: 600, h: 400 }, 1200, 800, min), { x: 10, y: 20, w: 600, h: 400 });
+  assert.deepEqual(lib.fitWindow({ x: 900, y: 700, w: 600, h: 400 }, 1200, 800, min), { x: 600, y: 400, w: 600, h: 400 });
+  assert.deepEqual(lib.fitWindow({ x: -50, y: -5, w: 100, h: 100 }, 1200, 800, min), { x: 0, y: 0, w: 400, h: 300 });
+  assert.deepEqual(lib.fitWindow({ x: 0, y: 0, w: 5000, h: 5000 }, 1200, 800, min), { x: 0, y: 0, w: 1200, h: 800 });
+  // A window smaller than the minimum: the dialog fills it.
+  assert.deepEqual(lib.fitWindow({ x: 30, y: 30, w: 600, h: 400 }, 350, 250, min), { x: 0, y: 0, w: 350, h: 250 });
 });

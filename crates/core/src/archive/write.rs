@@ -17,7 +17,7 @@
 //! meanwhile). Temp files and staging folders left next to the archive by a process that is
 //! gone (crash, kill, power loss) are removed at the start of the next rewrite.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Seek, Write};
@@ -92,7 +92,7 @@ pub fn rewrite(
         }
         ArchiveKind::Tar | ArchiveKind::TarGz | ArchiveKind::TarBz2 | ArchiveKind::TarXz => {
             let (items, hard_links) = tar_items(open_tar(&file, &real, kind)?)?;
-            let plan = Plan { items, hard_links }.apply_all(edits)?;
+            let plan = Plan::with_links(items, hard_links).apply_all(edits)?;
             let mut prog = Prog::new(obs, &plan.items, 0);
             commit(&real, &orig, obs, |out| {
                 write_tar(
@@ -189,20 +189,86 @@ struct Plan {
     items: Vec<Item>,
     /// Tar hard links: original entry number -> normalized target.
     hard_links: HashMap<usize, String>,
+    /// The paths of the non-fixed items, built on demand and dropped when items change in a
+    /// way it does not follow: an edit then costs a lookup instead of a scan of every item
+    /// (copying 50k files into a big archive was minutes of scanning).
+    index: Option<PathIndex>,
+}
+
+#[derive(Default)]
+struct PathIndex {
+    /// Every non-fixed item path.
+    paths: BTreeSet<String>,
+    /// The non-fixed paths that are not folders.
+    files: HashSet<String>,
+}
+
+impl PathIndex {
+    fn insert(&mut self, it: &Item) {
+        if !it.fixed {
+            self.paths.insert(it.path.clone());
+            if !it.is_dir {
+                self.files.insert(it.path.clone());
+            }
+        }
+    }
+
+    /// `p` is an item or a prefix folder of one.
+    fn holds(&self, p: &str) -> bool {
+        if self.paths.contains(p) {
+            return true;
+        }
+        let below = format!("{p}/");
+        self.paths
+            .range(below.clone()..)
+            .next()
+            .is_some_and(|q| q.starts_with(&below))
+    }
+}
+
+/// `p` itself or one of its parent folders is in `set`.
+fn self_or_parent_in(p: &str, set: &HashSet<String>) -> bool {
+    set.contains(p) || p.match_indices('/').any(|(i, _)| set.contains(&p[..i]))
 }
 
 impl Plan {
     fn new(items: Vec<Item>) -> Plan {
+        Plan::with_links(items, HashMap::new())
+    }
+
+    fn with_links(items: Vec<Item>, hard_links: HashMap<usize, String>) -> Plan {
         Plan {
             items,
-            hard_links: HashMap::new(),
+            hard_links,
+            index: None,
         }
+    }
+
+    fn index(&mut self) -> &PathIndex {
+        if self.index.is_none() {
+            let mut ix = PathIndex::default();
+            for it in &self.items {
+                ix.insert(it);
+            }
+            self.index = Some(ix);
+        }
+        self.index.as_ref().expect("built above")
+    }
+
+    fn push(&mut self, it: Item) {
+        if let Some(ix) = self.index.as_mut() {
+            ix.insert(&it);
+        }
+        self.items.push(it);
     }
 
     /// Hard links would lose their data if their target went away or moved, so removing or
     /// renaming `touched` is refused while a surviving link points into it. With `removing`,
     /// links inside `touched` go too and do not count.
     fn check_hard_links(&self, touched: &str, removing: bool) -> Result<(), ArchiveError> {
+        if self.hard_links.is_empty() {
+            return Ok(());
+        }
         for it in &self.items {
             let Src::Orig { ord, .. } = it.src else {
                 continue;
@@ -223,26 +289,66 @@ impl Plan {
     }
 
     fn apply_all(mut self, edits: &[Edit]) -> Result<Plan, ArchiveError> {
-        for e in edits {
-            self.apply(e)?;
+        let mut i = 0;
+        while i < edits.len() {
+            // A run of deletes (F8 on many items) is one pass over the items. With tar hard
+            // links every edit goes alone: their checks depend on what earlier edits removed.
+            let run = edits[i..]
+                .iter()
+                .take_while(|e| matches!(e, Edit::Delete { .. }))
+                .count();
+            if run > 1 && self.hard_links.is_empty() {
+                self.delete_all(&edits[i..i + run])?;
+                i += run;
+            } else {
+                self.apply(&edits[i])?;
+                i += 1;
+            }
         }
         Ok(self)
     }
 
+    /// The deletes of `edits` (all `Edit::Delete`), with the same results and errors as
+    /// applying them one after the other.
+    fn delete_all(&mut self, edits: &[Edit]) -> Result<(), ArchiveError> {
+        let mut gone: Vec<String> = Vec::with_capacity(edits.len());
+        let mut set: HashSet<String> = HashSet::with_capacity(edits.len());
+        for e in edits {
+            let Edit::Delete { inner } = e else {
+                unreachable!("only deletes")
+            };
+            let n = norm(inner)?;
+            // Gone already when it, or a folder holding it, was deleted earlier in the run.
+            if !self.exists(&n) || self_or_parent_in(&n, &set) {
+                return Err(ArchiveError::NotFound(n));
+            }
+            set.insert(n.clone());
+            gone.push(n);
+        }
+        self.items
+            .retain(|i| i.fixed || !self_or_parent_in(&i.path, &set));
+        self.index = None;
+        for p in &gone {
+            if let Some(pos) = p.rfind('/') {
+                if !self_or_parent_in(&p[..pos], &set) {
+                    self.keep_parent(p);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// True if `p` is an entry or an implicit folder (a prefix of one).
-    fn exists(&self, p: &str) -> bool {
-        self.items.iter().any(|i| !i.fixed && under(&i.path, p))
+    fn exists(&mut self, p: &str) -> bool {
+        self.index().holds(p)
     }
 
     /// A file cannot be the parent of anything.
-    fn check_parents(&self, p: &str) -> Result<(), ArchiveError> {
+    fn check_parents(&mut self, p: &str) -> Result<(), ArchiveError> {
+        let files = &self.index().files;
         for (i, _) in p.match_indices('/') {
             let anc = &p[..i];
-            if self
-                .items
-                .iter()
-                .any(|it| !it.fixed && !it.is_dir && it.path == anc)
-            {
+            if files.contains(anc) {
                 return Err(ArchiveError::Exists(anc.to_string()));
             }
         }
@@ -250,7 +356,11 @@ impl Plan {
     }
 
     fn remove(&mut self, p: &str) {
+        if !self.exists(p) {
+            return;
+        }
         self.items.retain(|i| i.fixed || !under(&i.path, p));
+        self.index = None;
     }
 
     /// After `p` went away, keep its parent folder when nothing else holds it up.
@@ -258,7 +368,7 @@ impl Plan {
         let Some(pos) = p.rfind('/') else { return };
         let parent = &p[..pos];
         if !self.exists(parent) {
-            self.items.push(new_dir(parent.to_string()));
+            self.push(new_dir(parent.to_string()));
         }
     }
 
@@ -274,7 +384,9 @@ impl Plan {
                     self.check_hard_links(&n, true)?;
                 }
                 self.remove(&n);
-                self.items.extend(added);
+                for it in added {
+                    self.push(it);
+                }
             }
             Edit::Delete { inner } => {
                 let n = norm(inner)?;
@@ -304,6 +416,7 @@ impl Plan {
                         it.path = format!("{t}{}", &it.path[f.len()..]);
                     }
                 }
+                self.index = None;
                 self.keep_parent(&f);
             }
             Edit::Mkdir { inner } => {
@@ -312,7 +425,7 @@ impl Plan {
                     return Err(ArchiveError::Exists(n));
                 }
                 self.check_parents(&n)?;
-                self.items.push(new_dir(n));
+                self.push(new_dir(n));
             }
         }
         Ok(())
@@ -1272,6 +1385,100 @@ mod tests {
     use super::super::testutil::Item;
     use super::super::testutil::*;
     use super::*;
+
+    fn plan_of(paths: &[(&str, bool)]) -> Plan {
+        let items = paths
+            .iter()
+            .enumerate()
+            .map(|(ord, (p, is_dir))| super::Item {
+                path: p.to_string(),
+                fixed: false,
+                src: Src::Orig {
+                    ord,
+                    name: p.to_string(),
+                },
+                is_dir: *is_dir,
+                is_symlink: false,
+                size: 0,
+                mode: 0,
+                mtime: 0,
+            })
+            .collect();
+        Plan::new(items)
+    }
+
+    fn paths(p: &Plan) -> Vec<String> {
+        let mut v: Vec<String> = p.items.iter().map(|i| i.path.clone()).collect();
+        v.sort();
+        v
+    }
+
+    fn del(p: &str) -> Edit {
+        Edit::Delete { inner: p.into() }
+    }
+
+    /// A run of deletes gives the same items and the same errors as deleting one by one.
+    #[test]
+    fn batched_deletes_match_one_by_one() {
+        let tree = [
+            ("d", true),
+            ("d/x", false),
+            ("d/y", false),
+            ("e/z", false),
+            ("f", false),
+        ];
+        let cases: Vec<Vec<Edit>> = vec![
+            vec![del("d/x"), del("d/y")],
+            vec![del("d/x"), del("d")],
+            vec![del("e/z"), del("f")],
+            vec![del("d"), del("d/x")],
+            vec![del("f"), del("nope")],
+        ];
+        for edits in cases {
+            let batched = plan_of(&tree).apply_all(&edits);
+            let mut single = Ok(plan_of(&tree));
+            for e in &edits {
+                single = single.and_then(|mut p| p.apply(e).map(|()| p));
+            }
+            match (batched, single) {
+                (Ok(b), Ok(s)) => assert_eq!(paths(&b), paths(&s)),
+                (Err(b), Err(s)) => assert_eq!(b.to_string(), s.to_string()),
+                (b, s) => panic!("{:?} vs {:?}", b.map(|p| paths(&p)), s.map(|p| paths(&p))),
+            }
+        }
+        // The emptied folder stays as a folder; e (held only by e/z) comes back as one.
+        let p = plan_of(&tree)
+            .apply_all(&[del("d/x"), del("d/y"), del("e/z")])
+            .unwrap();
+        assert_eq!(paths(&p), ["d", "e", "f"]);
+    }
+
+    /// Adding many new files does not rescan: 20k adds into a 20k-item plan stays fast.
+    #[test]
+    fn many_edits_on_a_big_plan_are_fast() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("f");
+        fs::write(&src, b"x").unwrap();
+        let tree: Vec<(String, bool)> = (0..20_000).map(|i| (format!("old/{i}"), false)).collect();
+        let refs: Vec<(&str, bool)> = tree.iter().map(|(p, d)| (p.as_str(), *d)).collect();
+        let adds: Vec<Edit> = (0..20_000)
+            .map(|i| Edit::Add {
+                src: src.clone(),
+                inner: format!("new/{i}"),
+            })
+            .collect();
+        let started = std::time::Instant::now();
+        let p = plan_of(&refs).apply_all(&adds).unwrap();
+        assert_eq!(p.items.len(), 40_000);
+        let dels: Vec<Edit> = (0..20_000).map(|i| del(&format!("old/{i}"))).collect();
+        let p = p.apply_all(&dels).unwrap();
+        assert_eq!(p.items.len(), 20_001); // the new files and the emptied "old" folder
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "{:?}",
+            started.elapsed()
+        );
+    }
     use crate::ops::{ConflictAnswer, ConflictInfo, ErrorAnswer, Progress};
     use std::collections::BTreeMap;
     use std::os::unix::fs::PermissionsExt;

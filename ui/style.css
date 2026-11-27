@@ -140,6 +140,10 @@ html, body {
 
 .cur.active { background: var(--active); color: #fff; }
 
+.list, .status, .cur {
+  font-family: var(--list-font, inherit);
+}
+
 .list {
   flex: 1;
   min-height: 0;
@@ -176,6 +180,18 @@ html, body {
   width: 1.3em;
 }
 .r i img { width: 1.1em; height: 1.1em; vertical-align: -0.2em; }
+.r i .glyph { display: inline-block; width: 1.1em; height: 1.1em; vertical-align: -0.2em; background: currentColor; -webkit-mask: center / contain no-repeat; mask: center / contain no-repeat; }
+/* Drawn icons (Options → View → Icons: Classic / Outline). */
+.r i svg.ic { width: 1.1em; height: 1.1em; vertical-align: -0.2em; stroke-width: 1; stroke-linejoin: round; }
+.r i svg.ic.outline { fill: none; stroke: currentColor; }
+.r i svg.ic.outline .play { fill: currentColor; stroke: none; }
+.r i svg.ic.classic { stroke: #6b5a2e; }
+.r i svg.ic.classic.folder { fill: #f2c14e; stroke: #a87d1e; }
+.r i svg.ic.classic.file, .r i svg.ic.classic.med { fill: #f7f7f2; stroke: #8a8a8a; }
+.r i svg.ic.classic.arc { fill: #e6d3a3; stroke: #8a6d3b; }
+.r i svg.ic.classic.up { fill: #9ab7e6; stroke: #4a6aa0; }
+.r i svg.ic.classic .fold, .r i svg.ic.classic .mark { fill: none; }
+.r i svg.ic.classic .play { fill: #2f6fd0; stroke: none; }
 
 /* Row text, background and cursor bar / frame colors are inline styles from `rowStyle` (lib.mjs):
    the active panel's cursor is a bar or a frame (Configuration → Colors), the inactive one's
@@ -217,9 +233,17 @@ body.dragging, body.dragging * { cursor: copy !important; }
 
 .status .n {
   flex: 1;
+  /* A narrow panel still shows the start of the name; the columns give way instead. */
+  min-width: 8ch;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Size, date and mode keep their place whatever the row shows (<DIR>, a long size); only a
+   panel too narrow for all of them makes them narrower (clipped, still in fixed places). */
+.status .s, .status .d, .status .m { flex: 0 1 auto; min-width: 0; overflow: hidden; font-variant-numeric: tabular-nums; }
+.status .s { width: 14ch; text-align: right; }
+.status .d { width: 16ch; }
+.status .m { width: 10ch; }
 
 .cmd {
   display: flex;
@@ -567,7 +591,23 @@ table.keys td button { min-width: 0; padding: 0 8px; }
 .dialog.pack .pw[hidden] { display: none; }
 .dialog.pack .pw .note { margin: 4px 0 0; font-size: 0.9em; }
 .srvlist { height: 300px; }
-.srow .twisty { display: inline-block; width: 1.2em; text-align: center; }
+/* Connect to server as a window inside the main window: moved by its title, resized by the
+   right/bottom edge and corner, maximized; the server list takes the room. */
+.dialog.win { position: fixed; display: flex; flex-direction: column; max-width: none; min-width: 0; box-sizing: border-box; }
+.dialog.win > .title { display: flex; align-items: center; cursor: default; user-select: none; -webkit-user-select: none; }
+.dialog.win > .title .winmax { margin-left: auto; padding: 0 6px; border: 1px solid var(--border); background: var(--chrome); line-height: 1.2; cursor: pointer; }
+.dialog.win > .title .winmax:hover { background: var(--soft); }
+.dialog.win .hotmain { flex: 1 1 auto; min-height: 0; }
+.dialog.win .hotleft { display: flex; flex-direction: column; min-height: 0; }
+.dialog.win .srvlist { flex: 1 1 auto; height: auto; min-height: 60px; }
+.dialog.win .hotbtns { overflow-y: auto; }
+.dialog.win .rz { position: absolute; }
+.dialog.win .rz-e { top: 0; right: -3px; width: 6px; height: 100%; cursor: ew-resize; }
+.dialog.win .rz-s { left: 0; bottom: -3px; height: 6px; width: 100%; cursor: ns-resize; }
+.dialog.win .rz-se { right: -4px; bottom: -4px; width: 12px; height: 12px; cursor: nwse-resize; }
+.dialog.win.max { border: none; box-shadow: none; }
+.dialog.win.max .rz { display: none; }
+.srvrow .twisty { display: inline-block; width: 1.2em; text-align: center; }
 .dialog.srvask { width: 380px; }
 .dialog.srvedit { width: 520px; }
 .srvfield { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
@@ -774,7 +814,11 @@ body.syncwin { overflow: hidden; }
 .srow.act-delRight .act, .srow.act-delLeft .act { color: var(--error); }
 .srow.equal { color: var(--muted); }
 .srow.typeMismatch .act, .srow.nameClash .act, .srow.differs.act-none .act { color: var(--error); }
+.srow.picked, .srow.picked > span { background: var(--soft); }
 .srow.sel, .srow.sel > span, .srow.sel .act { background: var(--active); color: #fff; }
+.dialog.syncdlg .opts .show { display: inline-flex; gap: 10px; align-items: center; }
 .dialog.syncdlg .empty { padding: 8px; color: var(--muted); }
 .dialog.syncdlg .sstatus { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dialog.syncdlg .sstatus.msg { color: var(--error); }
+
+.dialog .folderpreview { width: 20px; height: 20px; vertical-align: middle; margin-left: 8px; }

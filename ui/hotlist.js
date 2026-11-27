@@ -1,5 +1,6 @@
 // Ctrl+D directory hotlist: the popup menu and the TC "Change directory menu" dialog.
 
+import { el } from "./dom.js";
 import {
   addCurrent,
   comboLabel,
@@ -31,13 +32,6 @@ let ctx = null;
 
 export function initHotlist(c) {
   ctx = c;
-}
-
-function el(tag, cls, text) {
-  const e = document.createElement(tag);
-  if (cls) e.className = cls;
-  if (text !== undefined) e.textContent = text;
-  return e;
 }
 
 async function save(hotlist) {

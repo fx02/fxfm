@@ -1,5 +1,6 @@
 // Multi-rename (TC Ctrl+M): masks, search and replace, case and counter, with a live preview.
 
+import { el, cycleFocus } from "./dom.js";
 import {
   isLocalFolder,
   isSearchLocation,
@@ -28,13 +29,6 @@ export function initMultiRename(c) {
   ctx = c;
 }
 
-function el(tag, cls, text) {
-  const e = document.createElement(tag);
-  if (cls) e.className = cls;
-  if (text !== undefined) e.textContent = text;
-  return e;
-}
-
 function input(value, cls) {
   const i = el("input", cls);
   i.type = "text";
@@ -51,17 +45,6 @@ function checkbox(label, checked) {
   const l = el("label", "opt");
   l.append(box, ` ${label}`);
   return { box, l };
-}
-
-/** Keeps Tab / Shift+Tab inside `root`. */
-function cycleFocus(root, e) {
-  const items = [...root.querySelectorAll("button:not(:disabled), input:not(:disabled), select:not(:disabled)")].filter(
-    (x) => !x.closest("[hidden]"),
-  );
-  if (!items.length) return;
-  let i = items.indexOf(document.activeElement);
-  i = e.shiftKey ? (i <= 0 ? items.length - 1 : i - 1) : (i + 1) % items.length;
-  items[i].focus();
 }
 
 /** The items to rename: marked entries (or the cursor one) as {name, isDir, mtime, folder, path}. */

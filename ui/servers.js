@@ -4,6 +4,7 @@
 // flow that sends them; they are never logged, never put into other DOM, and the inputs are
 // emptied when their dialog closes.
 
+import { el, cycleIn } from "./dom.js";
 import {
   CHMOD_NOT_IN_ARCHIVE,
   chmodStart,
@@ -13,8 +14,12 @@ import {
   dragStarted,
   duplicateName,
   fieldsFor,
+  fitWindow,
   flattenNodes,
   folderKey,
+  GROUP_LEVELS,
+  groupsTooDeep,
+  indentNode,
   hostKeyText,
   lostToShow,
   masterPartial,
@@ -25,6 +30,7 @@ import {
   onRoot,
   operationPaths,
   operationSources,
+  outdentNode,
   parentList,
   parseModeOctal,
   parseRemote,
@@ -43,7 +49,7 @@ import {
   validateServer,
   withModeBit,
 } from "./lib.mjs";
-import { dialog, popModal, pushModal } from "./dialogs.js";
+import { dialog, message, popModal, pushModal } from "./dialogs.js";
 
 /** {invoke, home, active(), other(), panels(), status(text), mods(), refreshVolumes()} from app.js. */
 let ctx = null;
@@ -52,23 +58,12 @@ export function initServers(c) {
   ctx = c;
 }
 
-function el(tag, cls, text) {
-  const e = document.createElement(tag);
-  if (cls) e.className = cls;
-  if (text !== undefined) e.textContent = text;
-  return e;
-}
-
 const errText = (e) => String(e?.message ?? e);
 const OK = [{ label: "OK", value: "ok", default: true }];
 const OK_CANCEL = [
   { label: "OK", value: "ok", default: true },
   { label: "Cancel", value: null },
 ];
-
-function message(title, text) {
-  return dialog({ title, text: String(text).split("\n"), buttons: OK });
-}
 
 function passwordInput() {
   const i = el("input");
@@ -87,19 +82,14 @@ function checkbox(label) {
 }
 
 /** Focusable, visible controls of `root` in Tab order. */
+/** Tab order of the server dialogs (also the hotlist tree; only what is shown). */
 function focusables(root) {
   return [...root.querySelectorAll("button:not(:disabled), input:not(:disabled), select:not(:disabled), .hotlist")].filter(
     (x) => x.offsetParent !== null,
   );
 }
 
-function cycleFocus(root, e) {
-  const items = focusables(root);
-  if (!items.length) return;
-  let i = items.indexOf(document.activeElement);
-  i = e.shiftKey ? (i <= 0 ? items.length - 1 : i - 1) : (i + 1) % items.length;
-  items[i].focus();
-}
+const cycleFocus = (root, e) => cycleIn(focusables(root), e);
 
 /**
  * Modal form. `build(body)` fills the body and returns the control to focus first.
@@ -1160,11 +1150,101 @@ async function editServer(initial, { otherNames, save }) {
 /** The dialog's help text; the reorder keys are shown as the Mac keys in use (`mods`). */
 const help = (mods) => [
   "Enter or double click: connect to the selected server. Esc: close.",
-  `↑/↓: move the selection. ←/→: close or open a folder. ${comboLabel("Ctrl+Up", mods)}/${comboLabel("Ctrl+Down", mods)} or dragging with the mouse: change the order. Delete: delete the entry.`,
+  `↑/↓: move the selection. ←/→: close or open a group. ${comboLabel("Ctrl+Up", mods)}/${comboLabel("Ctrl+Down", mods)} or dragging with the mouse: change the order (dropped on a group, an entry goes into it). ${comboLabel("Alt+Left", mods)}: take the entry out of its group. ${comboLabel("Alt+Right", mods)}: put it into the group right above it. Delete: delete the entry.`,
+  `Groups (New group…) keep many servers in order, up to ${GROUP_LEVELS} levels: a new group or connection goes into the selected group. Edit… renames a group.`,
   "New URL…: connect once without saving it, e.g. sftp://user@host:2222/var/www (also scp://, ftp:// and ftps://). Without a user name FTP logs in as anonymous.",
   "SMB (network share): macOS mounts the share into /Volumes and fxfm opens it like a disk; every saved share is also in the drive list (Alt+F1/Alt+F2) and the drive bar. Disconnect unmounts it.",
   "Saved passwords are kept in the macOS Keychain (system mode) or, in portable mode, encrypted with a master password (Encrypt…).",
 ];
+
+/** Size and maximized state of the Connect dialog, kept for the next Ctrl+F (this Mac only). */
+const CONNECT_LAYOUT_KEY = "fxfm.connectDialog";
+const CONNECT_MIN = { w: 480, h: 300 };
+
+/**
+ * Makes `box` (a dialog shown on its backdrop) a window inside the main window: dragged by
+ * `title`, made larger (never smaller than its natural size) by its right and bottom edges and corner, maximized (and back) by a double
+ * click on `title` or by `maxBtn`. Call after the box is in the page (its natural size is the
+ * first size). The size and the maximized state are kept under `key`.
+ */
+function windowed(box, title, maxBtn, key, min) {
+  let saved = {};
+  try {
+    saved = JSON.parse(localStorage.getItem(key) ?? "{}") ?? {};
+  } catch {
+    // No stored layout (private storage, bad JSON): the natural size.
+  }
+  const natural = box.getBoundingClientRect();
+  // Never smaller than its natural size: below it the buttons no longer fit.
+  min = { w: Math.max(min.w, natural.width), h: Math.max(min.h, natural.height) };
+  const w = Number(saved.w) || natural.width;
+  const h = Number(saved.h) || natural.height;
+  let r = { x: (innerWidth - w) / 2, y: (innerHeight - h) / 2, w, h };
+  let max = saved.max === true;
+  const apply = () => {
+    r = fitWindow(r, innerWidth, innerHeight, min);
+    const g = max ? { x: 0, y: 0, w: innerWidth, h: innerHeight } : r;
+    Object.assign(box.style, { left: `${g.x}px`, top: `${g.y}px`, width: `${g.w}px`, height: `${g.h}px` });
+    box.classList.toggle("max", max);
+    maxBtn.textContent = max ? "❐" : "□";
+    maxBtn.title = max ? "Restore" : "Maximize";
+  };
+  const save = () => {
+    try {
+      localStorage.setItem(key, JSON.stringify({ w: r.w, h: r.h, max }));
+    } catch {
+      // Kept for this time only.
+    }
+  };
+  const toggleMax = () => {
+    max = !max;
+    apply();
+    save();
+  };
+  /** Mouse drag from `e`: `step(dx, dy)` changes `r` from where it was at the start. */
+  const track = (e, step) => {
+    if (e.button !== 0 || max) return;
+    e.preventDefault();
+    const start = { ...r };
+    const move = (m) => {
+      r = { ...start };
+      step(m.clientX - e.clientX, m.clientY - e.clientY);
+      apply();
+    };
+    const up = () => {
+      document.removeEventListener("mousemove", move);
+      document.removeEventListener("mouseup", up);
+      save();
+    };
+    document.addEventListener("mousemove", move);
+    document.addEventListener("mouseup", up);
+  };
+  title.addEventListener("mousedown", (e) => {
+    if (e.target === maxBtn) return;
+    track(e, (dx, dy) => {
+      r.x += dx;
+      r.y += dy;
+    });
+  });
+  title.addEventListener("dblclick", (e) => {
+    if (e.target !== maxBtn) toggleMax();
+  });
+  maxBtn.addEventListener("click", toggleMax);
+  for (const [cls, fx, fy] of [["rz-e", 1, 0], ["rz-s", 0, 1], ["rz-se", 1, 1]]) {
+    const grip = el("div", `rz ${cls}`);
+    grip.addEventListener("mousedown", (e) =>
+      track(e, (dx, dy) => {
+        r.w += dx * fx;
+        r.h += dy * fy;
+      }),
+    );
+    box.append(grip);
+  }
+  const onResize = () => (box.isConnected ? apply() : removeEventListener("resize", onResize));
+  addEventListener("resize", onResize);
+  box.classList.add("win");
+  apply();
+}
 
 /** Folders the user closed in the tree (folder names from the root), for this run. */
 const closedFolders = new Set();
@@ -1214,6 +1294,10 @@ export async function showConnect() {
   const commit = async (change) => {
     const next = structuredClone(work);
     const newSel = change(next);
+    if (groupsTooDeep(work.nodes, next.nodes)) {
+      await message("Connect to server", `Groups can be at most ${GROUP_LEVELS} levels deep.`);
+      return false;
+    }
     try {
       await ctx.invoke("servers_save", { list: next });
     } catch (e) {
@@ -1264,7 +1348,7 @@ export async function showConnect() {
     list.replaceChildren();
     rowEls = [];
     for (const r of rows) {
-      const row = el("div", "hrow srow");
+      const row = el("div", "hrow srvrow");
       row.style.paddingLeft = `${4 + r.depth * 16}px`;
       if (r.node.kind === "folder") {
         const open = isOpen(r.node, r.path);
@@ -1420,12 +1504,12 @@ export async function showConnect() {
   };
 
   const askFolderName = async (title, initial) => {
-    const r = await dialog({ title, text: "Folder name:", input: initial, buttons: OK_CANCEL });
+    const r = await dialog({ title, text: "Group name:", input: initial, buttons: OK_CANCEL });
     return r?.text.trim() || null;
   };
 
   const newFolder = async () => {
-    const name = await askFolderName("New folder", "");
+    const name = await askFolderName("New group", "");
     if (name) await commit((next) => insertAt(next.nodes, { kind: "folder", name, children: [] }));
   };
 
@@ -1433,7 +1517,7 @@ export async function showConnect() {
     const n = nodeAt(sel);
     if (!n) return;
     if (n.kind === "folder") {
-      const name = await askFolderName("Rename folder", n.name);
+      const name = await askFolderName("Rename group", n.name);
       if (name && name !== n.name) {
         const at = sel;
         const wasClosed = closedFolders.delete(folderKey(work.nodes, at));
@@ -1461,8 +1545,8 @@ export async function showConnect() {
     else {
       const count = serverNames(n.children).length;
       text = count
-        ? `Delete folder '${n.name}' and the ${count} server(s) in it, with their saved passwords?`
-        : `Delete folder '${n.name}'?`;
+        ? `Delete group '${n.name}' and the ${count} server(s) in it, with their saved passwords?`
+        : `Delete group '${n.name}'?`;
     }
     const ok = await dialog({
       title: "Delete",
@@ -1521,7 +1605,7 @@ export async function showConnect() {
   // Reordering by mouse, not HTML5 drag & drop: the webview's native drag-drop handler
   // takes the drag events, so HTML5 `drop` never fires (same as the hotlist dialog).
   const rowAt = (x, y) => {
-    const hit = document.elementFromPoint(x, y)?.closest(".srow");
+    const hit = document.elementFromPoint(x, y)?.closest(".srvrow");
     return rowEls.find((r) => r.row === hit) ?? null;
   };
   const paintDropRow = (target) => {
@@ -1563,7 +1647,7 @@ export async function showConnect() {
     mkBtn(null, "New connection…", guarded(newConnection)),
     mkBtn(null, "New URL…", newUrl),
     mkBtn("duplicate", "Duplicate entry…", guarded(duplicate)),
-    mkBtn(null, "New folder…", guarded(newFolder)),
+    mkBtn(null, "New group…", guarded(newFolder)),
     mkBtn("edit", "Edit…", guarded(edit)),
     mkBtn("del", "Delete", guarded(del)),
     mkBtn(null, "Encrypt…", guarded(encryptDialog)),
@@ -1575,7 +1659,11 @@ export async function showConnect() {
   left.append(el("div", "hothead", "Servers:"), list);
   const main = el("div", "hotmain");
   main.append(left, side);
-  box.append(el("div", "title", "Connect to server"), main);
+  const titleBar = el("div", "title", "Connect to server");
+  // A span, not a button: it stays out of the Tab order and of Enter.
+  const maxBtn = el("span", "winmax");
+  titleBar.append(maxBtn);
+  box.append(titleBar, main);
   backdrop.append(box);
 
   modal.onKey = (e) => {
@@ -1593,6 +1681,12 @@ export async function showConnect() {
     } else if (tcModifiers(e, ctx.mods()).ctrl && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
       e.preventDefault();
       guarded(() => move(e.key === "ArrowUp" ? -1 : 1))();
+    } else if (tcModifiers(e, ctx.mods()).alt && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+      // Alt, not Ctrl: macOS takes Control+←/→ for switching Spaces.
+      e.preventDefault();
+      const shift = e.key === "ArrowLeft" ? outdentNode : indentNode;
+      // Nothing to save when the entry cannot go that way (top level, no group above).
+      if (sel && shift(structuredClone(work.nodes), sel)) guarded(() => commit((next) => shift(next.nodes, sel)))();
     } else if (onList && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
       e.preventDefault();
       moveSel(e.key === "ArrowUp" ? -1 : 1);
@@ -1618,5 +1712,6 @@ export async function showConnect() {
   await readMounts();
   render();
   pushModal(modal);
+  windowed(box, titleBar, maxBtn, CONNECT_LAYOUT_KEY, CONNECT_MIN);
   list.focus();
 }

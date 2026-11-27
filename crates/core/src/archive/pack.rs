@@ -913,7 +913,8 @@ mod tests {
             OpSummary {
                 done: 5,
                 skipped: 0,
-                cancelled: false
+                cancelled: false,
+                ..OpSummary::default()
             }
         );
         assert_eq!(

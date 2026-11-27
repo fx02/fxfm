@@ -3,8 +3,7 @@
 ## Next
 From the UI critique (docs/critique/UI_CRITIQUE_REPORT.md), not started:
 - Folder tabs per panel.
-- Undo of the last file operation.
-- Content search in Find files; operation queue; branch view; thumbnails.
+- Content search in Find files; operation queue; thumbnails.
 - Screen-reader labels (VoiceOver).
 
 ## Right-click menu
@@ -12,7 +11,6 @@ From the UI critique (docs/critique/UI_CRITIQUE_REPORT.md), not started:
 
 ## Synchronize dirs
 - No saved comparisons; by content only for local files.
-- Several rows cannot be selected at once (only Defaults / Clear for all).
 
 ## Search
 - A full rebuild briefly holds two indexes in memory (about 2x RAM) while the new one replaces the old. By design: dropping the old index first would leave searches without results for the whole scan.
@@ -37,6 +35,12 @@ From the UI critique (docs/critique/UI_CRITIQUE_REPORT.md), not started:
 - Writing promised items has no progress or Cancel in fxfm (only what the receiver shows itself).
 
 ## Done
+- **Connect to server window and groups** (2026-11-27): Ctrl+F can be moved, resized and maximized inside the main window (size kept); servers in groups up to three levels (New group…, drag into a group, Alt+←/→ out of / into a group). The server rows no longer take the Synchronize dirs grid layout (a class name clash since 0.1.10).
+- **Permanent delete on network shares** (2026-11-27): F8 on an SMB/AFP/NFS/WebDAV share deletes permanently instead of trying the missing Trash; the question says so first. **Copy network path** (2026-11-27): Windows `\\server\share\…` and `smb://` forms of items on an SMB share.
+- **Font and icon styles** (2026-11-26): Options → View → Font picks the panels' font from the Mac's fixed-pitch families (default Menlo) or the system font; Icons adds Classic (drawn yellow folders) and Outline (line icons); Finder icons show the special folders' own icons and offer macOS's folder icons (CoreTypes, incl. one-color sidebar glyphs) for ordinary folders; the status line keeps size, date and mode in fixed columns.
+- **Undo** (2026-11-26): Ctrl+Z undoes the last local move, Trash delete (items come back from the Trash), F2 rename or F7 new folder, after a confirmation and without overwriting anything. Copies, server and archive operations and permanent deletes are not undoable.
+- **Critique fixes** (2026-11-26): Ctrl+C/X/V copy, cut and paste files (TC keys); Synchronize dirs gets Show →/←/≠/= filters and several picked rows at once, Delete no longer means "skip" there; Alt+Left/Right in the command line move by word; Esc stops a branch view scan; the right-click "Properties…" is called "Change attributes…".
+- **Branch view** (2026-11-26): Ctrl+B lists every file below the panel's folder (local, archive, server) as a results list named by relative path; Ctrl+B again returns. Copy name on a results list copies the bare name.
 - **Synchronize dirs** (2026-11-25): Commands → Synchronize dirs… opens its own window and compares the two panels' folders (name, size, date, optionally content; subfolders; case- and NFC/NFD-insensitive names); modes Two-way, Mirror, Update and Delete-missing propose a direction per row, every row can be changed, and Synchronize runs the copies and Trash deletes as normal jobs after one confirmation.
 - **Quick filter, folder history, more right-click items** (2026-11-25): Ctrl+S filters the panel by text or mask; Alt+Left/Right go back/forward per panel, Alt+Down lists earlier folders; the right-click menu adds View, Open with…, Quick Look, Show in Finder, Pack files and Properties, and every item can be switched off in Options.
 - **Small fixes** (2026-11-25): Help → Keyboard shortcuts lists every command with its keys (the empty Start menu is gone); Paste into the folder the items came from makes Finder's `name copy`; F8 names a single item; a file promise dropped onto an existing name is kept beside it as `name 2.ext`; dialogs, menus and bars follow the system dark mode (panel colors stay as set in Options → Colors).

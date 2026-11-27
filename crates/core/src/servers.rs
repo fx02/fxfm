@@ -402,6 +402,48 @@ pub fn parse_mntfrom(s: &str) -> Option<(String, String)> {
     Some((host.to_string(), percent_decode(share)))
 }
 
+/// The same item on a mounted SMB share as an `smb://` link (Finder, other Macs) and as a
+/// Windows UNC path (`\\host\share\…`): `path` is a local path at or below `mount_point`,
+/// the share mounted from `mntfrom` (`//[user@]host/share`). None for anything else. The user
+/// name is never part of either.
+pub fn share_links(mntfrom: &str, mount_point: &str, path: &str) -> Option<(String, String)> {
+    let (host, share) = parse_mntfrom(mntfrom)?;
+    let mount = mount_point.trim_end_matches('/');
+    let rest = if path == mount {
+        ""
+    } else {
+        path.strip_prefix(mount)?
+            .strip_prefix('/')
+            .map(|_| &path[mount.len()..])?
+    };
+    // A share from Finder's sidebar is mounted as `name._smb._tcp.local`.
+    let host = host.strip_suffix("._smb._tcp.local").unwrap_or(&host);
+    let url_host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    let enc = |seg: &str| -> String {
+        seg.bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                    (b as char).to_string()
+                }
+                _ => format!("%{b:02X}"),
+            })
+            .collect()
+    };
+    let mut smb = format!("smb://{url_host}/{}", enc(&share));
+    let mut unc = format!("\\\\{host}\\{share}");
+    for seg in rest.split('/').filter(|s| !s.is_empty()) {
+        smb.push('/');
+        smb.push_str(&enc(seg));
+        unc.push('\\');
+        unc.push_str(seg);
+    }
+    Some((smb, unc))
+}
+
 /// A host name for comparing: lower case, without a trailing dot and without the Bonjour
 /// (`._smb._tcp.local`) or `.local` suffix, so a share mounted from Finder's sidebar
 /// (`nas._smb._tcp.local`) matches an entry for `nas.local` or `nas`.
@@ -809,6 +851,33 @@ mod tests {
         let url = smb_url(&smb("nas", "zb:secret", "data", 445));
         assert_eq!(url, "smb://zb%3Asecret@nas/data");
         assert!(!url.contains(":secret"));
+    }
+
+    #[test]
+    fn share_links_smb_and_windows() {
+        let l = share_links(
+            "//zb@nas.example.com/Team%20Docs",
+            "/Volumes/Team Docs",
+            "/Volumes/Team Docs/Plans/Q4 plan.docx",
+        )
+        .unwrap();
+        assert_eq!(
+            l.0,
+            "smb://nas.example.com/Team%20Docs/Plans/Q4%20plan.docx"
+        );
+        assert_eq!(l.1, r"\\nas.example.com\Team Docs\Plans\Q4 plan.docx");
+        let root = share_links(
+            "//nas._smb._tcp.local/data",
+            "/Volumes/data",
+            "/Volumes/data",
+        )
+        .unwrap();
+        assert_eq!(root, ("smb://nas/data".into(), r"\\nas\data".into()));
+        assert!(share_links("//nas/data", "/Volumes/data", "/Volumes/data-2/x").is_none());
+        assert!(share_links("//nas/data", "/Volumes/data", "/Users/x").is_none());
+        assert!(share_links("/dev/disk3s1", "/Volumes/usb", "/Volumes/usb/x").is_none());
+        let v6 = share_links("//[fe80::1]/d", "/Volumes/d", "/Volumes/d/č.txt").unwrap();
+        assert_eq!(v6.0, "smb://[fe80::1]/d/%C4%8D.txt");
     }
 
     #[test]

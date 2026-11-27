@@ -1,15 +1,9 @@
 // Configuration → Options → Colors (TC Configuration → Color) and the TC "Define colors by
 // file type" dialog. Nothing here saves: the Options dialog's OK does.
 
+import { el, cycleFocus, frame } from "./dom.js";
 import { comboLabel, compileTypeRules, dragStarted, moveNode, relocateNode, rowStyle, tcModifiers } from "./lib.mjs";
 import { dialog, popModal, pushModal } from "./dialogs.js";
-
-function el(tag, cls, text) {
-  const e = document.createElement(tag);
-  if (cls) e.className = cls;
-  if (text !== undefined) e.textContent = text;
-  return e;
-}
 
 function button(label, fn) {
   const b = el("button", null, label);
@@ -31,27 +25,6 @@ function colorWell(value) {
   p.type = "color";
   p.value = value;
   return p;
-}
-
-/** Keeps Tab / Shift+Tab inside `root` (`extra`: more focusable selectors). */
-function cycleFocus(root, e, extra = "") {
-  const sel = `button:not(:disabled), input:not(:disabled), select:not(:disabled)${extra}`;
-  const items = [...root.querySelectorAll(sel)];
-  if (!items.length) return;
-  let i = items.indexOf(document.activeElement);
-  i = e.shiftKey ? (i <= 0 ? items.length - 1 : i - 1) : (i + 1) % items.length;
-  items[i].focus();
-}
-
-/** Backdrop + dialog box with a title; returns {modal, box, body, row}. */
-function frame(title, cls) {
-  const backdrop = el("div", "backdrop");
-  const box = el("div", `dialog ${cls}`);
-  const body = el("div", "body");
-  const row = el("div", "buttons");
-  box.append(el("div", "title", title), body, row);
-  backdrop.append(box);
-  return { modal: { el: backdrop }, box, body, row };
 }
 
 /** Color wells of the Colors section: [settings key, label]. */

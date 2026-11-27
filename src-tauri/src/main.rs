@@ -2,12 +2,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod audio;
+mod branchview;
 mod clipboard;
 mod commands;
 mod dirsync;
 mod dragdrop;
 mod editwatch;
 mod fnkey;
+mod fonts;
 #[cfg(target_os = "macos")]
 mod fsevents;
 mod icons;
@@ -70,14 +72,17 @@ fn main() {
             commands::multi_rename,
             smb::smb_browse,
             smb::smb_list_shares,
+            smb::share_links,
             commands::view_content,
             commands::view_text_as,
             commands::quick_look,
             commands::set_archive_password,
             commands::location_in_archive,
+            commands::count_on_network,
             commands::open_viewer,
             commands::open_find_files,
             commands::open_sync_dirs,
+            commands::undo_last,
             commands::edit_file,
             commands::open_remote_archive,
             commands::cancel_download,
@@ -114,6 +119,7 @@ fn main() {
             audio::audio_volume,
             audio::audio_outputs,
             icons::file_icons,
+            fonts::fixed_fonts,
             clipboard::clipboard_write,
             clipboard::clipboard_files,
             openwith::open_with_apps,
@@ -121,6 +127,8 @@ fn main() {
             openwith::show_in_finder,
             dirsync::sync_compare,
             dirsync::sync_cancel,
+            branchview::branch_list,
+            branchview::branch_cancel,
             search::commands::search_status,
             search::commands::search_build,
             search::commands::search_start,

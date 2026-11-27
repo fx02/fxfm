@@ -54,6 +54,21 @@ fn image_mime(ext: &str) -> Option<&'static str> {
     })
 }
 
+/// True when the file at `path` begins with `magic`.
+fn starts_with(path: &Path, magic: &[u8]) -> io::Result<bool> {
+    use std::io::Read;
+    let mut head = vec![0u8; magic.len()];
+    let mut f = std::fs::File::open(path)?;
+    let mut n = 0;
+    while n < head.len() {
+        match f.read(&mut head[n..])? {
+            0 => break,
+            k => n += k,
+        }
+    }
+    Ok(n == magic.len() && head == magic)
+}
+
 /// Decide how to present `path` and read what is needed for it.
 pub fn read_for_view(path: &Path) -> io::Result<ViewContent> {
     let ext = path
@@ -66,7 +81,9 @@ pub fn read_for_view(path: &Path) -> io::Result<ViewContent> {
             mime: mime.to_string(),
         });
     }
-    if ext == "pdf" {
+    // Only a real PDF goes to the PDF view (a page in the viewer): a file merely named .pdf
+    // (HTML, say) is shown as text or hex like any other file, never rendered.
+    if ext == "pdf" && starts_with(path, b"%PDF-")? {
         return Ok(ViewContent::Pdf);
     }
 
@@ -311,8 +328,24 @@ mod tests {
                 mime: "image/svg+xml".into()
             }
         );
-        let p = Path::new("/nonexistent/doc.Pdf");
-        assert_eq!(read_for_view(p).unwrap(), ViewContent::Pdf);
+    }
+
+    /// Only a file that is a PDF is rendered as one: HTML named `.pdf` would run in the viewer.
+    #[test]
+    fn pdf_needs_the_pdf_header() {
+        let d = tempfile::tempdir().unwrap();
+        let real = d.path().join("doc.Pdf");
+        fs::write(&real, b"%PDF-1.7\n...").unwrap();
+        assert_eq!(read_for_view(&real).unwrap(), ViewContent::Pdf);
+        let fake = d.path().join("invoice.pdf");
+        fs::write(&fake, b"<html><script>alert(1)</script></html>").unwrap();
+        assert!(matches!(
+            read_for_view(&fake).unwrap(),
+            ViewContent::Text { .. }
+        ));
+        let empty = d.path().join("empty.pdf");
+        fs::write(&empty, b"").unwrap();
+        assert_ne!(read_for_view(&empty).unwrap(), ViewContent::Pdf);
     }
 
     #[test]

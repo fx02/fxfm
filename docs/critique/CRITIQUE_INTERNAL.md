@@ -20,3 +20,21 @@ does, and whether the difference is intended.
 Checked and consistent: F8 inside archives and on servers says "This cannot be undone" and is
 permanent (`deleteConfirmText`); Shift+F8 is labelled "Delete permanently"; menu titles carry the
 keys of the current Alt/Ctrl mapping; Find files is now a native window with its own close button.
+
+# Internal walk (2026-11-26)
+
+| # | Surface | Claim | Actual | Verdict |
+|---|---|---|---|---|
+| J1 | Synchronize dirs list, Delete key | In the panels Delete = F8 (delete) | In the sync list Delete and Backspace set the row to *skip* (`ui/syncwin.js:420`); deleting is Shift+→/← | Contradiction: the same key means "delete" in one place and "don't touch" in the other |
+| J2 | Right-click *Properties…* | Properties (size, dates, kind, permissions — the Windows/Finder meaning) | Opens Change attributes (octal/rwx only) | Label overclaims; the dialog has no size, dates or kind |
+| J3 | Clipboard commands | TC: Ctrl+C / Ctrl+X / Ctrl+V copy, cut, paste files in the panels | `cm_copy_to_clipboard`, `cm_cut_to_clipboard`, `cm_paste_from_clipboard` have no default keys (`keymap.rs`); only the menu, right click and Configuration → Keyboard | Gap against the TC model the app follows; Ctrl (Control) +C/X/V are free |
+| J4 | Alt+Left/Right in the command line | macOS text fields: Option+Left/Right move by word | `cmdlineKeyGoesToPanel` sends every Alt+ combo to the panel (`ui/lib.mjs:179`), so with Alt = Option they run Back/Forward while typing | Likely contradiction with macOS editing (static walk — not exercised live) |
+| J5 | Branch view stop | Find files and other long work stop with Esc | Ctrl+B again stops the walk; Esc does not (`ui/app.js` branchView) | Minor inconsistency; Double Commander stops flat view with Esc |
+| J6 | Synchronize dirs filtering | — | Only *Show equal*; no way to show only → rows, only ← rows, only not-copied differences | Gap (see benchmark) |
+| J7 | Synchronize dirs per-row editing | — | One row at a time (keys or click); *Reset to mode* / *Skip all* for every row | Gap: no selection of several rows |
+| J8 | Help menu | Help | Only *Keyboard shortcuts*; the README's feature explanations (sync modes, quick filter rules) are not reachable in the app | Partial (the sync window has its own one-line hint) |
+
+Checked and consistent: Ctrl+S filter box shows "n of m" and Esc clears it; F8 names a single
+item; the right-click menu hides Open with / Quick Look / Show in Finder outside local folders;
+Synchronize confirms with counts and says that server/archive deletes are permanent; dark mode
+covers dialogs, menus and bars.

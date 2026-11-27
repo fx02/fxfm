@@ -178,6 +178,8 @@ export function comboLabel(combo, map = DEFAULT_MODIFIERS) {
  */
 export function cmdlineKeyGoesToPanel(combo) {
   if (!combo) return false;
+  // Alt+Left/Right (Option+arrows on a Mac) move the caret by word in the field.
+  if (/^Alt\+(Shift\+)?(Left|Right)$/.test(combo)) return false;
   if (/^(Ctrl|Alt)\+/.test(combo)) return combo !== "Ctrl+Enter";
   const key = combo.replace(/^Shift\+/, "");
   if (/^F([1-9]|1[0-2])$/.test(key)) return true;
@@ -1249,6 +1251,63 @@ export function relocateNode(nodes, from, to) {
   return pathOf(nodes, node);
 }
 
+/**
+ * A dialog moved or resized inside the main window: `r` {x, y, w, h} kept inside a `vw` x `vh`
+ * window and no smaller than `min` {w, h} (unless the window itself is smaller).
+ */
+export function fitWindow(r, vw, vh, min) {
+  const w = Math.round(Math.min(vw, Math.max(min.w, r.w)));
+  const h = Math.round(Math.min(vh, Math.max(min.h, r.h)));
+  return {
+    x: Math.round(Math.min(Math.max(0, r.x), vw - w)),
+    y: Math.round(Math.min(Math.max(0, r.y), vh - h)),
+    w,
+    h,
+  };
+}
+
+/** Connect to server: groups hold servers and groups, at most this many levels deep. */
+export const GROUP_LEVELS = 3;
+
+/** How many levels of groups `nodes` has (0: no group). */
+export function groupLevels(nodes) {
+  let max = 0;
+  for (const n of nodes) if (isContainer(n)) max = Math.max(max, 1 + groupLevels(n.children));
+  return max;
+}
+
+/**
+ * A change from `before` to `after` that makes the groups deeper than GROUP_LEVELS (a list that
+ * was already deeper may still be edited, as long as it does not get deeper).
+ */
+export function groupsTooDeep(before, after) {
+  const n = groupLevels(after);
+  return n > GROUP_LEVELS && n > groupLevels(before);
+}
+
+/** Alt+Left (Connect to server): the node at `path` leaves its group and follows it. New path, or null at the top. */
+export function outdentNode(nodes, path) {
+  if (path.length < 2) return null;
+  const list = parentList(nodes, path);
+  const [node] = list.splice(path[path.length - 1], 1);
+  const groupPath = path.slice(0, -1);
+  const outer = parentList(nodes, groupPath);
+  const at = groupPath[groupPath.length - 1] + 1;
+  outer.splice(at, 0, node);
+  return [...groupPath.slice(0, -1), at];
+}
+
+/** Alt+Right (Connect to server): the node at `path` goes to the end of the group right above it. New path, or null. */
+export function indentNode(nodes, path) {
+  const i = path[path.length - 1];
+  const list = parentList(nodes, path);
+  const group = list[i - 1];
+  if (!isContainer(group)) return null;
+  const [node] = list.splice(i, 1);
+  group.children.push(node);
+  return [...path.slice(0, -1), i - 1, group.children.length - 1];
+}
+
 /** Path of the node object `node` in the tree, or null. */
 export function pathOf(nodes, node) {
   for (let i = 0; i < nodes.length; i++) {
@@ -1376,7 +1435,9 @@ export function archiveLeave(location, remoteArchives) {
  */
 export function displayLocation(location, remoteArchives, results) {
   if (isSearchLocation(location)) {
-    const query = (results ?? remoteArchives)?.query ?? "";
+    const r = results ?? remoteArchives;
+    if (r?.title) return r.title;
+    const query = r?.query ?? "";
     return query ? `Search results: ${query}` : "Search results";
   }
   const r = remoteArchiveOf(location, remoteArchives);
@@ -1865,13 +1926,23 @@ export function chmodSummary(results) {
   return [`Changed ${results.length - failed.length} of ${results.length}`, ...failed.map((r) => `${r.name}: ${r.error}`)];
 }
 
-/** F8 / Shift+F8 question: on a server always permanent, else the archive / Trash / permanent text. */
-export function deleteConfirmText(location, n, { inArchive = false, toTrash = false, name = null } = {}) {
+/**
+ * F8 / Shift+F8 question: on a server always permanent, else the archive / Trash / permanent
+ * text. `onNetwork`: how many of the items are on a network share, which has no Trash (F8
+ * deletes those permanently).
+ */
+export function deleteConfirmText(location, n, { inArchive = false, toTrash = false, name = null, onNetwork = 0 } = {}) {
   // One item is named (as in TC); several are counted.
   const one = n === 1 && name ? `"${name}"` : null;
   if (parseRemote(location)) return `Delete ${one ?? `${n} file(s)`} from the server? This cannot be undone.`;
   if (inArchive) return `Delete ${one ?? `${n} file(s)`} from archive? This cannot be undone.`;
   const what = one ?? `${n} file(s)/dir(s)`;
+  if (toTrash && onNetwork >= n) {
+    return `Do you really want to delete ${what} permanently? ${n === 1 ? "It is" : "They are"} on a network share, which has no Trash. This cannot be undone.`;
+  }
+  if (toTrash && onNetwork > 0) {
+    return `Do you really want to move ${what} to the Trash? ${onNetwork} of them ${onNetwork === 1 ? "is" : "are"} on a network share, which has no Trash: deleted permanently.`;
+  }
   return toTrash ? `Do you really want to move ${what} to the Trash?` : `Do you really want to delete ${what} permanently?`;
 }
 
@@ -2049,15 +2120,67 @@ export function isLocalFolder(location) {
   return !parseRemote(location) && !archiveOf(location) && !isSearchLocation(location);
 }
 
+/**
+ * Folder icons of macOS (`CoreTypes.bundle`, read from the Mac at run time) offered in
+ * Options → View → Folder icon: [icon name, label]. The Sidebar ones are one-color glyphs drawn
+ * in the panel's font color.
+ */
+export const FOLDER_ICONS = [
+  ["GenericFolderIcon", "Folder (Finder)"],
+  ["OpenFolderIcon", "Open folder"],
+  ["SmartFolderIcon", "Smart folder"],
+  ["BurnableFolderIcon", "Burn folder"],
+  ["GroupFolder", "Group folder"],
+  ["SystemFolderIcon", "System folder"],
+  ["LibraryFolderIcon", "Library folder"],
+  ["DeveloperFolderIcon", "Developer folder"],
+  ["UsersFolderIcon", "Users folder"],
+  ["PublicFolderIcon", "Public folder"],
+  ["UtilitiesFolder", "Utilities folder"],
+  ["SidebarGenericFolder", "Sidebar folder (one color)"],
+  ["SidebarSmartFolder", "Sidebar smart folder (one color)"],
+];
+
+/** Finder's own icons of the special folders: [path below home (or absolute), full icon, sidebar glyph]. */
+const SPECIAL_FOLDERS = [
+  ["Desktop", "DesktopFolderIcon", "SidebarDesktopFolder"],
+  ["Documents", "DocumentsFolderIcon", "SidebarDocumentsFolder"],
+  ["Downloads", "DownloadsFolder", "SidebarDownloadsFolder"],
+  ["Movies", "MovieFolderIcon", "SidebarMoviesFolder"],
+  ["Music", "MusicFolderIcon", "SidebarMusicFolder"],
+  ["Pictures", "PicturesFolderIcon", "SidebarPicturesFolder"],
+  ["Public", "PublicFolderIcon", "SidebarGenericFolder"],
+  ["Library", "LibraryFolderIcon", "SidebarGenericFolder"],
+  ["Applications", "ApplicationsFolderIcon", "SidebarApplicationsFolder"],
+  ["Sites", "SitesFolderIcon", "SidebarGenericFolder"],
+  ["/Applications", "ApplicationsFolderIcon", "SidebarApplicationsFolder"],
+  ["/Applications/Utilities", "UtilitiesFolder", "SidebarUtilitiesFolder"],
+  ["/Library", "LibraryFolderIcon", "SidebarGenericFolder"],
+  ["/System", "SystemFolderIcon", "SidebarGenericFolder"],
+  ["/Users", "UsersFolderIcon", "SidebarGenericFolder"],
+];
+
+/** The system icon of special folder `path` (home's Desktop, /Applications, the home itself…), or null. */
+export function specialFolderIcon(path, home, sidebar = false) {
+  if (home && path === home) return sidebar ? "SidebarHomeFolder" : "HomeFolderIcon";
+  for (const [p, full, glyph] of SPECIAL_FOLDERS) {
+    const at = p.startsWith("/") ? p : home ? `${home}/${p}` : null;
+    if (at === path) return sidebar ? glyph : full;
+  }
+  return null;
+}
+
 /** Row icon styles for Options → View: macOS's own icons (default) or emoji. */
 export const ICON_STYLES = [
   ["finder", "Finder (macOS icons)"],
+  ["classic", "Classic (yellow folders)"],
+  ["outline", "Outline (line icons)"],
   ["emoji", "Emoji"],
 ];
 
 /** The icon style of `settings`; unknown values give "finder". */
 export function iconStyle(settings) {
-  return settings?.icons === "emoji" ? "emoji" : "finder";
+  return ICON_STYLES.some(([id]) => id === settings?.icons) ? settings.icons : "finder";
 }
 
 /**
@@ -2065,11 +2188,15 @@ export function iconStyle(settings) {
  * (or other bundle) in a local folder uses its own icon, other folders the folder icon, files
  * the icon of their extension.
  */
-export function iconKey(entry, location) {
+export function iconKey(entry, location, { home = "", folderIcon = "" } = {}) {
   if (entry.up) return null;
   if (entry.isDir) {
     const bundle = /\.(app|prefPane|bundle|framework)$/i.test(entry.name) && isLocalFolder(location);
-    return bundle ? `path:${joinLocation(location, entry.name)}` : "dir";
+    if (bundle) return `path:${joinLocation(location, entry.name)}`;
+    const sidebar = folderIcon.startsWith("Sidebar");
+    const special = isLocalFolder(location) && specialFolderIcon(joinLocation(location, entry.name), home, sidebar);
+    if (special) return `sys:${special}`;
+    return FOLDER_ICONS.some(([id]) => id === folderIcon) && folderIcon !== "GenericFolderIcon" ? `sys:${folderIcon}` : "dir";
   }
   const dot = entry.name.lastIndexOf(".");
   return dot > 0 && dot < entry.name.length - 1 ? `ext:${entry.name.slice(dot + 1).toLowerCase()}` : "file";
@@ -2483,13 +2610,19 @@ export function multiRenamePlan(entries, opts, others = () => null) {
     } else seen.set(k, r);
   }
   const leaving = new Set(rows.filter((r) => r.from !== r.to).map((r) => `${r.entry.folder}\0${nameKey(r.from)}`));
+  // Each folder's other names once as a Set of keys (a big folder would otherwise be scanned
+  // per row on every keystroke).
+  const keyCache = new Map();
+  const otherKeys = (folder) => {
+    if (!keyCache.has(folder)) keyCache.set(folder, new Set((others(folder) ?? []).map(nameKey)));
+    return keyCache.get(folder);
+  };
   for (const r of rows) {
     if (r.error || r.from === r.to) continue;
     const k = nameKey(r.to);
     // A case-only change of the item itself is fine.
     if (k === nameKey(r.from)) continue;
-    const names = others(r.entry.folder);
-    if (names?.some((n) => nameKey(n) === k) && !leaving.has(`${r.entry.folder}\0${k}`)) r.error = "Already exists";
+    if (otherKeys(r.entry.folder).has(k) && !leaving.has(`${r.entry.folder}\0${k}`)) r.error = "Already exists";
   }
   const changed = rows.some((r) => r.from !== r.to);
   return { rows, ok: changed && rows.every((r) => !r.error), error: null };
@@ -2523,6 +2656,7 @@ export const CONTEXT_ITEMS = [
   "-",
   ["cm_copy_names_to_clip", "Copy name"],
   ["cm_copy_full_names_to_clip", "Copy path"],
+  ["cm_copy_share_links", "Copy network path…"],
   "-",
   ["cm_cut_to_clipboard", "Cut"],
   ["cm_copy_to_clipboard", "Copy"],
@@ -2532,19 +2666,21 @@ export const CONTEXT_ITEMS = [
   ["cm_delete", "Delete"],
   ["cm_rename", "Rename"],
   "-",
-  ["cm_chmod", "Properties…"],
+  ["cm_chmod", "Change attributes…"],
 ];
 
 /** Items that need a local file (macOS opens it itself). */
 const LOCAL_ONLY = new Set(["open_with", "quick_look", "show_in_finder"]);
+/** Items only for files on a network volume. */
+const NETWORK_ONLY = new Set(["cm_copy_share_links"]);
 
 /**
  * Right-click menu of a panel as [id, label] pairs and "-" separators. `entry`: the row under
  * the pointer (null or `..`: only Paste); `n`: how many items the commands act on; `off`: ids
- * switched off in Options; `local`: the items are local files (not in an archive or on a server).
- * Separators never lead, trail or repeat.
+ * switched off in Options; `local`: the items are local files (not in an archive or on a server);
+ * `network`: they are on a network volume. Separators never lead, trail or repeat.
  */
-export function contextMenuItems(entry, n, off = [], local = true) {
+export function contextMenuItems(entry, n, off = [], local = true, network = false) {
   const skip = new Set(off);
   const want = !entry || entry.up ? ["cm_paste_from_clipboard"] : null;
   const s = n > 1 ? "s" : "";
@@ -2555,7 +2691,7 @@ export function contextMenuItems(entry, n, off = [], local = true) {
       continue;
     }
     const [id, label] = it;
-    if (skip.has(id) || (want && !want.includes(id)) || (!local && LOCAL_ONLY.has(id))) continue;
+    if (skip.has(id) || (want && !want.includes(id)) || (!local && LOCAL_ONLY.has(id)) || (!network && NETWORK_ONLY.has(id))) continue;
     out.push([id, id === "cm_copy_names_to_clip" || id === "cm_copy_full_names_to_clip" ? label + s : label]);
   }
   while (out[out.length - 1] === "-") out.pop();
@@ -2669,8 +2805,8 @@ const syncJoin = (dir, name) => `${dir.replace(/\/+$/, "")}/${name}`;
  * Jobs for the rows with an action (`actions[i]` for `rows[i]`), copies first, then deletes:
  * sources from one folder into the same folder on the other side are one copy job (dest ends
  * with "/": into that folder); a file spelled differently on the target (NFC/NFD) is copied
- * onto that exact path instead, so no second file appears. Deletes go to the Trash (servers and
- * archives: permanently, the delete job asks).
+ * onto that exact path instead, so no second file appears. Deletes go to the Trash (servers,
+ * network shares and archives: permanently, the delete job asks).
  */
 export function syncPlan(rows, actions) {
   const groups = new Map();
@@ -2759,4 +2895,47 @@ export function syncSort(rows, actions, indexes, column, desc = false) {
     if (desc) c = -c;
     return c || byPath(a, b);
   });
+}
+
+// ---------------------------------------------------------------- branch view (Ctrl+B)
+
+/** Results-list entries of a `branch_list` answer: named by their path below the folder. */
+export function branchEntries(items) {
+  return items.map((it) => ({
+    name: it.rel,
+    path: it.path,
+    isDir: false,
+    size: it.size,
+    mtime: it.mtime,
+    hidden: false,
+    inArchive: Boolean(it.inArchive),
+    mounted: true,
+    mode: 0,
+    isSymlink: false,
+  }));
+}
+
+/** Status line after Ctrl+B: how many files, and what was left out. */
+export function branchStatus({ items, truncated, unreadable }) {
+  const parts = [`Branch view: ${groupThousands(items.length)} file(s)`];
+  if (truncated) parts.push(`only the first ${groupThousands(items.length)}`);
+  if (unreadable) parts.push(`${unreadable} folder(s) could not be read`);
+  return parts.join(" · ");
+}
+
+/**
+ * The Show filter group of a Synchronize dirs row: "right" (copied or deleted on the right),
+ * "left" (copied or deleted on the left), "equal", or "diff" (a difference that is not copied).
+ */
+export function syncShowKind(row, action) {
+  if (action === "right" || action === "delRight") return "right";
+  if (action === "left" || action === "delLeft") return "left";
+  return row.state === "equal" ? "equal" : "diff";
+}
+
+/** The Show filter (`{right, left, diff, equal}` booleans) from a kept layout; older layouts had `showEqual` only. */
+export function syncShowFilter(saved) {
+  const s = saved?.show ?? {};
+  const on = (k, dflt) => (typeof s[k] === "boolean" ? s[k] : dflt);
+  return { right: on("right", true), left: on("left", true), diff: on("diff", true), equal: on("equal", saved?.showEqual === true) };
 }

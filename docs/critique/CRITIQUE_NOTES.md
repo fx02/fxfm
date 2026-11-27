@@ -15,3 +15,17 @@
   jobs, server connections.
 - Excluded: functional correctness (that is prove), visual polish details beyond what affects use
   (unslop).
+
+# Orientation notes (2026-11-26)
+
+- Target: fxfm 0.1.14 (`2406bb8`). Focus: surfaces added since 2026-11-21 — right-click menu and
+  clipboard, quick filter (Ctrl+S), folder history (Alt+Left/Right/Down), branch view (Ctrl+B),
+  Synchronize dirs window, Help → Keyboard shortcuts, dark mode — plus a recheck of the open
+  findings of the 2026-11-21 report.
+- Audience and category unchanged (one TC power user on macOS; orthodox file managers).
+- Benchmarks for the new surfaces: Total Commander (the model), Double Commander (TC clone with
+  current docs), FreeFileSync (sync specialist), ForkLift 4 (macOS). See CRITIQUE_BENCHMARK.md.
+- Live evidence: screenshots of an isolated instance taken during this session's work (context
+  menu, filter box, Help table, F8 text, sync window in both layouts, branch view, F3 viewer).
+  The owner was working on the machine, so no keystrokes were sent for this pass: keyboard paths
+  (filter keys, history keys, sync list keys) are from source reading only.

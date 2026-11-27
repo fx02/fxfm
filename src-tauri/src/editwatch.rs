@@ -2,7 +2,7 @@
 //! upload it back when its content changes. Tauri-free: changes are announced
 //! through the `emit` closure.
 //!
-//! Per edited copy: a `notify` watcher on its folder (editors often save by
+//! One `notify` watcher for all copies, on each copy's folder (editors often save by
 //! writing a new file and renaming it over the old one), a 500 ms debounce,
 //! then a SHA-256 of the content compared with the last confirmed (= what the
 //! archive holds). One question at a time: while a change is reported and not
@@ -146,7 +146,6 @@ struct Entry {
     asking: bool,
     /// When to check the content (debounce).
     due: Option<Instant>,
-    _watcher: Option<RecommendedWatcher>,
 }
 
 impl Entry {
@@ -184,6 +183,9 @@ pub struct EditWatch {
     temp_root: PathBuf,
     /// Serializes manifest writes (each writes the latest state).
     manifest: Mutex<()>,
+    /// One watcher for every copy's folder (one FSEvents stream, one thread), made on the
+    /// first F4. Never called while `inner` is locked: its callback takes that lock.
+    watcher: Mutex<Option<RecommendedWatcher>>,
 }
 
 impl EditWatch {
@@ -205,6 +207,58 @@ impl EditWatch {
             next: AtomicU64::new(0),
             temp_root,
             manifest: Mutex::new(()),
+            watcher: Mutex::new(None),
+        }
+    }
+
+    /// Watches `dir` (a copy's folder) with the shared watcher.
+    fn watch_dir(&self, dir: &Path) -> Result<(), String> {
+        let mut w = self.watcher.lock().unwrap_or_else(|e| e.into_inner());
+        if w.is_none() {
+            let weak = Arc::downgrade(&self.inner);
+            let made = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                let ev = match res {
+                    Ok(ev) => ev,
+                    Err(e) => {
+                        eprintln!("fxfm: watching edited copies: {e}");
+                        return;
+                    }
+                };
+                let Some(inner) = weak.upgrade() else { return };
+                // The copies the event is about: same folder, same file name.
+                let ids: Vec<u64> = inner
+                    .lock()
+                    .iter()
+                    .filter(|(_, e)| {
+                        ev.paths.iter().any(|p| {
+                            p.file_name() == Some(e.name.as_os_str())
+                                && p.parent() == e.local.parent()
+                        })
+                    })
+                    .map(|(id, _)| *id)
+                    .collect();
+                for id in ids {
+                    inner.schedule(id, Instant::now() + DEBOUNCE);
+                }
+            })
+            .map_err(|e| e.to_string())?;
+            *w = Some(made);
+        }
+        w.as_mut()
+            .expect("made above")
+            .watch(dir, RecursiveMode::NonRecursive)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Stops watching `dir` (its copy is gone).
+    fn unwatch_dir(&self, dir: &Path) {
+        if let Some(w) = self
+            .watcher
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            let _ = w.unwatch(dir);
         }
     }
 
@@ -231,31 +285,7 @@ impl EditWatch {
             .ok_or_else(|| format!("not a file: {}", local.display()))?
             .to_path_buf();
         let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
-        let weak = Arc::downgrade(&self.inner);
-        let watched = name.clone();
-        let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            let ev = match res {
-                Ok(ev) => ev,
-                Err(e) => {
-                    eprintln!("fxfm: watching edited copy: {e}");
-                    return;
-                }
-            };
-            if !ev
-                .paths
-                .iter()
-                .any(|p| p.file_name() == Some(watched.as_os_str()))
-            {
-                return;
-            }
-            if let Some(inner) = weak.upgrade() {
-                inner.schedule(id, Instant::now() + DEBOUNCE);
-            }
-        })
-        .map_err(|e| e.to_string())?;
-        watcher
-            .watch(&dir, RecursiveMode::NonRecursive)
-            .map_err(|e| e.to_string())?;
+        self.watch_dir(&dir)?;
         // The archive as it is now, so an upload never goes into another file of that path.
         let archive = if parse_remote(&location).is_some() {
             None
@@ -274,7 +304,6 @@ impl EditWatch {
                 uploading: None,
                 asking: false,
                 due: None,
-                _watcher: Some(watcher),
             },
         );
         self.save_manifest();
@@ -310,8 +339,13 @@ impl EditWatch {
             // Clean but stale: the archive entry changed since extraction. The old
             // copy stays registered (an editor may still have it open).
         }
+        // The stamp is read before and after the copy: a file that changed meanwhile (a log
+        // being written) may have been copied half old, half new, so its copy gets no stamp
+        // and the upload asks instead of silently replacing the newer file.
+        let before = vfs::entry_stamp(ctx, location)?;
         let local = vfs::materialize_with(ctx, location, "edit", progress)?;
-        let registered = vfs::entry_stamp(ctx, location).and_then(|stamp| {
+        let registered = vfs::entry_stamp(ctx, location).and_then(|after| {
+            let stamp = if after == before { after } else { None };
             make_owner_writable(&local).map_err(|e| e.to_string())?;
             self.register(location.to_string(), local.clone(), stamp)
         });
@@ -419,8 +453,15 @@ impl EditWatch {
             .filter(|(_, e)| of(&e.location))
             .map(|(id, e)| (*id, e.local.clone(), e.confirmed))
             .collect();
+        // (size, mtime) of a copy: a save while it is hashed or removed changes it.
+        let look = |p: &Path| {
+            std::fs::metadata(p)
+                .ok()
+                .map(|m| (m.len(), m.modified().ok()))
+        };
         let mut removed = Vec::new();
         for (id, local, confirmed) in candidates {
+            let before = look(&local);
             // Hashing happens outside the lock; a missing copy has nothing to keep.
             let clean = match hash_file(&local) {
                 Ok(h) => h == confirmed,
@@ -432,19 +473,27 @@ impl EditWatch {
             let mut g = self.inner.lock();
             let still = g
                 .get(&id)
-                .is_some_and(|e| e.confirmed == confirmed && e.uploading.is_none());
+                .is_some_and(|e| e.confirmed == confirmed && e.uploading.is_none())
+                && look(&local) == before;
             if still {
-                let entry = g.remove(&id);
-                // The watcher is dropped outside the lock (its callback takes it).
+                g.remove(&id);
+                // The watcher is called outside the lock (its callback takes it).
                 drop(g);
-                drop(entry);
-                removed.push(local);
+                if let Some(dir) = local.parent() {
+                    self.unwatch_dir(dir);
+                }
+                removed.push((local, before));
             }
         }
         if removed.is_empty() {
             return;
         }
-        for local in &removed {
+        for (local, before) in &removed {
+            // Saved since it was found clean: the folder (and the edit) stays.
+            if look(local) != *before {
+                eprintln!("fxfm: {} changed during cleanup; kept", local.display());
+                continue;
+            }
             if let Some(dir) = local.parent().filter(|d| d.starts_with(&self.temp_root)) {
                 ctx.cleanup_dir(dir);
             }

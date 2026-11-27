@@ -3,6 +3,7 @@
 // run here; going to a file, Feed to listbox, mounting a share and F3 on audio run in the main
 // window over the `findfiles://` bridge (see FIND_FILES_ACTION in lib.mjs).
 
+import { el, cycleFocus } from "./dom.js";
 import {
   FIND_FILES_ACTION,
   FIND_FILES_COMMAND,
@@ -91,22 +92,6 @@ function ask(action, args = {}) {
 let win = null;
 /** Which Mac keys act as TC's Alt and Ctrl (from the main window, then `keys://modifiers`). */
 let mods = modifierMap({});
-
-function el(tag, cls, text) {
-  const e = document.createElement(tag);
-  if (cls) e.className = cls;
-  if (text !== undefined) e.textContent = text;
-  return e;
-}
-
-/** Keeps Tab / Shift+Tab inside `root`. */
-function cycleFocus(root, e) {
-  const items = [...root.querySelectorAll("button:not(:disabled), input:not(:disabled)")].filter((x) => !x.closest("[hidden]"));
-  if (!items.length) return;
-  let i = items.indexOf(document.activeElement);
-  i = e.shiftKey ? (i <= 0 ? items.length - 1 : i - 1) : (i + 1) % items.length;
-  items[i].focus();
-}
 
 /** The window's Build index button. Returns false on failure (said with `report`). */
 async function buildIndex(report) {

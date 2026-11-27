@@ -843,6 +843,26 @@ impl RemoteFs for SftpFs {
                 ))),
             };
         }
+        // Without posix-rename: move the target aside first, so a failing rename can put it
+        // back (removing it first would lose it if the rename then fails).
+        if self.lstat(to)?.is_some() {
+            let bak = super::ftp::backup_path(to);
+            if self.plain_rename(to, &bak).is_ok() {
+                if let Err(e) = self.plain_rename(from, to) {
+                    return match self.plain_rename(&bak, to) {
+                        Ok(()) => Err(e),
+                        Err(_) => Err(RemoteError::Other(format!(
+                            "{to}: the replace failed and the original is kept as {bak}"
+                        ))),
+                    };
+                }
+                if self.req(self.inner.sftp.remove(&bak)).is_err() {
+                    log::warn!("cannot delete the replace backup {bak}");
+                }
+                return Ok(());
+            }
+        }
+        // The target cannot be moved aside (or is gone): the old way.
         match self.req(self.inner.sftp.remove(to)) {
             Ok(_) => {}
             Err(e) if is_not_found(&e) => {}
@@ -1252,6 +1272,23 @@ mod tests {
         sftp.replace(&p("i.txt"), &p("h.txt")).unwrap();
         assert_eq!(fs::read(c.srv.root.join("h.txt")).unwrap(), b"i");
         assert!(!c.srv.root.join("i.txt").exists());
+        // The target is moved aside first: a rename that fails puts it back, and no backup
+        // is left behind either way.
+        assert!(sftp.replace(&p("missing.txt"), &p("h.txt")).is_err());
+        assert_eq!(fs::read(c.srv.root.join("h.txt")).unwrap(), b"i");
+        let leftovers = |root: &std::path::Path| {
+            fs::read_dir(root)
+                .unwrap()
+                .filter(|e| {
+                    e.as_ref()
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .ends_with(".bak")
+                })
+                .count()
+        };
+        assert_eq!(leftovers(&c.srv.root), 0);
         sftp.replace(&p("h.txt"), &p("j.txt")).unwrap();
         sftp.replace(&p("j.txt"), &p("h.txt")).unwrap();
 

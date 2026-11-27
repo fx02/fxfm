@@ -1900,7 +1900,7 @@ dependencies = [
 
 [[package]]
 name = "fxfm"
-version = "0.1.12"
+version = "0.1.22"
 dependencies = [
  "base64 0.22.1",
  "block2",
@@ -1928,7 +1928,7 @@ dependencies = [
 
 [[package]]
 name = "fxfm-core"
-version = "0.1.12"
+version = "0.1.22"
 dependencies = [
  "argon2 0.5.3",
  "async-trait",
@@ -1943,6 +1943,7 @@ dependencies = [
  "libunftp",
  "log",
  "lzma-rust2",
+ "objc2-foundation",
  "pkcs5",
  "rand 0.8.8",
  "rcgen",

@@ -1,5 +1,6 @@
 // Modal dialogs and the TC file operations behind them (F5/F6/F7/F8, Alt+F5, rename, masks).
 
+import { el, cycleFocus, frame } from "./dom.js";
 import {
   remoteArchives,
   realLocation,
@@ -122,33 +123,6 @@ export function handleModalKey(e) {
   return true;
 }
 
-/** Keeps Tab / Shift+Tab inside `root`. */
-function cycleFocus(root, e) {
-  const items = [...root.querySelectorAll("button:not(:disabled), input:not(:disabled), select:not(:disabled)")];
-  if (!items.length) return;
-  let i = items.indexOf(document.activeElement);
-  i = e.shiftKey ? (i <= 0 ? items.length - 1 : i - 1) : (i + 1) % items.length;
-  items[i].focus();
-}
-
-function el(tag, cls, text) {
-  const e = document.createElement(tag);
-  if (cls) e.className = cls;
-  if (text !== undefined) e.textContent = text;
-  return e;
-}
-
-/** Backdrop + grey dialog box with a title; returns {backdrop, box, body, row}. */
-function frame(title) {
-  const backdrop = el("div", "backdrop");
-  const box = el("div", "dialog");
-  const body = el("div", "body");
-  const row = el("div", "buttons");
-  box.append(el("div", "title", title), body, row);
-  backdrop.append(box);
-  return { backdrop, box, body, row };
-}
-
 /**
  * Modal dialog. buttons: [{label, value, default?}]; resolves with the clicked
  * value (Enter = focused or default button, Escape = null). With `input`
@@ -268,8 +242,10 @@ export async function withPassword(fn) {
   }
 }
 
-function message(title, text) {
-  return dialog({ title, text, buttons: [{ label: "OK", value: "ok", default: true }] });
+/** A message with OK; a text with line breaks shows as one paragraph per line. */
+export function message(title, text) {
+  const lines = typeof text === "string" ? text.split("\n") : text;
+  return dialog({ title, text: lines, buttons: [{ label: "OK", value: "ok", default: true }] });
 }
 
 /** A read-only table (`head`: column titles, `rows`: arrays of cell texts) with OK; Enter/Escape close it. */
@@ -579,6 +555,13 @@ async function runJob(req, source, { recheck = true, shared = null } = {}) {
   const job = new Job(req);
   job.shared = shared;
   const done = await job.run();
+  // Local moves and Trash deletes can be undone; jobs of one operation (shared answers) add up.
+  const pairs = done?.summary?.undo ?? [];
+  if (pairs.length) {
+    const what = req.kind === "delete" ? "move to the Trash" : "move";
+    if (shared && lastUndo?.shared === shared) lastUndo.plan.moves.push(...pairs);
+    else recordUndo(what, { moves: pairs.slice() }, shared);
+  }
   if (jobSucceeded(done)) source?.clearMarks();
   // Moved or deleted items vanish from the search results lists (also after a partial job).
   if (recheck && (req.kind === "move" || req.kind === "delete")) ctx.recheckResults?.();
@@ -757,9 +740,10 @@ async function transfer(jobKind, { paths, cwd, target, source }) {
   // one archive (or none), so each group gets its own job, one after the other.
   const groups = groupSources(paths, cwd);
   if (groups.length <= 1) {
-    await runJob({ kind: jobKind, sources: paths, dest: target, cwd }, source);
-    return;
+    const done = await runJob({ kind: jobKind, sources: paths, dest: target, cwd }, source);
+    return Boolean(done && jobSucceeded(done));
   }
+  let ok = true;
   // One answer "for all" holds for every group's job.
   const shared = {};
   try {
@@ -772,7 +756,10 @@ async function transfer(jobKind, { paths, cwd, target, source }) {
         shared,
       });
       // A cancelled, failed or never started job stops the rest.
-      if (!done || !jobSucceeded(done)) break;
+      if (!done || !jobSucceeded(done)) {
+        ok = false;
+        break;
+      }
     }
   } finally {
     if (jobKind === "move") {
@@ -780,6 +767,7 @@ async function transfer(jobKind, { paths, cwd, target, source }) {
       await Promise.all(ctx.panels().map((p) => p.refresh()));
     }
   }
+  return ok;
 }
 
 // ---------------------------------------------------------------- synchronize dirs
@@ -804,6 +792,46 @@ export async function runSyncJobs(jobs) {
   return ok;
 }
 
+// ---------------------------------------------------------------- undo (Ctrl+Z)
+
+/** The last undoable local operation: {what, plan: {moves, removeDirs}, shared}. */
+let lastUndo = null;
+
+function recordUndo(what, plan, shared = null) {
+  lastUndo = { what, plan: { moves: plan.moves ?? [], removeDirs: plan.removeDirs ?? [] }, shared };
+}
+
+/**
+ * Ctrl+Z: after a confirmation, the last local move, Trash delete, rename (F2) or new folder
+ * (F7) is undone; an item whose old place is taken again stays where it is.
+ */
+export async function undoLast() {
+  if (!lastUndo) {
+    ctx.active().setMessage("Nothing to undo");
+    return;
+  }
+  const u = lastUndo;
+  const n = u.plan.moves.length + u.plan.removeDirs.length;
+  const r = await dialog({
+    title: "Undo",
+    text: [`Undo the last ${u.what}?`, `${n} item(s) go back where they were. Nothing is overwritten.`],
+    buttons: YES_NO,
+  });
+  if (r !== "yes") return;
+  lastUndo = null;
+  let res;
+  try {
+    res = await ctx.invoke("undo_last", { plan: u.plan });
+  } catch (e) {
+    await message("Undo", String(e));
+    return;
+  }
+  ctx.recheckResults?.();
+  await Promise.all(ctx.panels().map((p) => p.refresh()));
+  if (res.failed.length) await message("Undo", [`${res.done} of ${n} put back.`, ...res.failed.slice(0, 10)].join("\n"));
+  else ctx.active().setMessage(`Undone: ${u.what}`);
+}
+
 // ---------------------------------------------------------------- clipboard
 
 /** fxfm's own last Copy/Cut to the clipboard: {kind, paths, cwd, change} (see `pasteSource`). */
@@ -815,9 +843,28 @@ export async function copyNames(full) {
   const sources = sourcesOf(src);
   if (!sources.length) return;
   const { paths } = operationPaths(src.location, sources);
-  const lines = full ? paths.map((p) => displayLocation(p, remoteArchives)) : sources.map((e) => e.name);
+  // A results entry is named by a (shortened) path: its own name is the path's last part.
+  const lines = full ? paths.map((p) => displayLocation(p, remoteArchives)) : sources.map((e) => (e.path ? lastComponent(e.path) : e.name));
   await ctx.invoke("clipboard_write", { text: lines.join("\n"), files: [] });
   src.setMessage(`Copied ${full ? "path" : "name"}${lines.length > 1 ? "s" : ""} to the clipboard`);
+}
+
+/**
+ * The `smb://` link and Windows path of each item the command acts on (Copy network path), or
+ * null with a message when one of them is not on a mounted SMB share.
+ */
+export async function shareLinks() {
+  const src = ctx.active();
+  const sources = sourcesOf(src);
+  if (!sources.length) return null;
+  const { paths } = operationPaths(src.location, sources);
+  const local = paths.every((p) => p.startsWith("/") && !archiveOf(p));
+  const links = local ? await ctx.invoke("share_links", { paths }) : [];
+  if (!links.length || links.some((l) => !l)) {
+    src.setMessage(paths.length > 1 ? "Not all of them are on an SMB share" : "Not on an SMB share");
+    return null;
+  }
+  return links;
 }
 
 /** Copy / Cut to clipboard: Paste in a panel copies / moves them; local files also paste in Finder. */
@@ -857,12 +904,15 @@ export async function pasteFiles() {
   if (p.kind === "move") clip = null;
   // Copied into their own folder: each gets Finder's "name copy" (a target without "/" is the new name).
   if (p.kind === "copy" && same.length) {
-    const taken = new Set(dst.entries.map((e) => e.name));
+    // Every name in the folder counts, also hidden and filtered-out ones (`raw`), so a copy
+    // never lands on an existing "x copy".
+    const taken = new Set(dst.raw.map((e) => e.name));
     for (const x of same) {
       const old = lastComponent(x);
-      const name = copyName(old, taken, dst.entries.find((e) => e.name === old)?.isDir);
+      const name = copyName(old, taken, dst.raw.find((e) => e.name === old)?.isDir);
       taken.add(name);
-      await transfer("copy", { paths: [x], cwd: here, target: joinLocation(here, name), source: null });
+      // Cancel (or a failure) stops the rest.
+      if (!(await transfer("copy", { paths: [x], cwd: here, target: joinLocation(here, name), source: null }))) break;
     }
   }
 }
@@ -1041,9 +1091,14 @@ export async function deleteItems(toTrash) {
       // Wording falls back to the normal text; the backend still deletes correctly.
     }
   }
+  // A network share has no Trash: the backend deletes its items permanently, the question says so.
+  let onNetwork = 0;
+  if (toTrash && !inArchive && !parseRemote(src.location)) {
+    onNetwork = await ctx.invoke("count_on_network", { paths }).catch(() => 0);
+  }
   const r = await dialog({
     title: "Delete",
-    text: deleteConfirmText(src.location, sources.length, { inArchive, toTrash, name: sources[0].name }),
+    text: deleteConfirmText(src.location, sources.length, { inArchive, toTrash, name: sources[0].name, onNetwork }),
     buttons: YES_NO,
   });
   if (r !== "yes") return;
@@ -1069,8 +1124,16 @@ async function createNew(title, nested, command, what) {
     await message("Error", `Cannot create ${what}: ${invalid}`);
     return;
   }
+  // F7: Undo removes the new folders while they are empty — only the ones that did not exist
+  // (a chain "a/b/c" counts only when "a" was not there).
+  const created = command === "mkdir" && isLocalFolder(dir) && !panel.raw.some((e) => e.name === firstComponent(name));
   try {
     await ctx.invoke(command, nested ? { parent: dir, name } : { dir, name });
+    if (created) {
+      const parts = name.split("/").filter(Boolean);
+      const chain = parts.map((_, i) => joinLocation(dir, parts.slice(0, i + 1).join("/"))).reverse();
+      recordUndo(`new folder "${name}"`, { removeDirs: chain });
+    }
   } catch (e) {
     // Not possible inside archives: the backend's reason goes to the status line.
     if (archiveOf(dir) && command === "edit_new") panel.setMessage(String(e));
@@ -1126,6 +1189,7 @@ export function renameInline() {
       panel.setMessage(`Cannot rename: ${e}`);
       return;
     }
+    if (isLocalFolder(dir)) recordUndo(`rename of "${entry.name}"`, { moves: [[joinLocation(dir, d.name), joinLocation(dir, entry.name)]] });
     if (panel.location === dir) {
       if (panel.marked.delete(entry.name)) panel.marked.add(d.name);
       await panel.go(dir, d.name, { refresh: true });

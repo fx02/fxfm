@@ -545,11 +545,21 @@ fn archive_to_local(
     // not transferred (skipped, failed, cancelled) is still in the staging folder afterwards.
     // An observer cannot tell that, because "Skip all" and "Overwrite all older" skip
     // without asking.
+    // A move deletes the originals afterwards: the staged data is on disk first.
+    if moving {
+        for p in &present {
+            if let Err(e) = ops::sync_tree(p) {
+                return Err(OpError::Io(format!("{}: {e}", p.display())));
+            }
+        }
+    }
     let mut summary = if present.is_empty() {
         OpSummary::default()
     } else {
         ops::move_(&present, &target, &sobs)?
     };
+    // The items came out of a staging folder: there is nothing to move back to.
+    summary.undo.clear();
     summary.skipped += missing;
     if moving {
         let gone = transferred(&src.items, &staged, &present, &target);
@@ -863,6 +873,7 @@ fn cancelled_download(out: Outcome) -> OpSummary {
         done: 0,
         skipped: out.summary.skipped,
         cancelled: true,
+        ..OpSummary::default()
     }
 }
 
@@ -993,11 +1004,21 @@ fn server_to_local(
         shown: srv.shown_parent(&src.paths[0]),
     };
     // As from an archive: what was not transferred is still in the staging folder.
+    // A move deletes the originals afterwards: the staged data is on disk first.
+    if moving {
+        for p in &present {
+            if let Err(e) = ops::sync_tree(p) {
+                return Err(OpError::Io(format!("{}: {e}", p.display())));
+            }
+        }
+    }
     let mut summary = if present.is_empty() {
         OpSummary::default()
     } else {
         ops::move_(&present, &target, &sobs)?
     };
+    // The items came out of a staging folder: there is nothing to move back to.
+    summary.undo.clear();
     summary.skipped += out.summary.skipped;
     if moving && !summary.cancelled {
         let gone = transferred(&src.paths, &staged, &present, &target);
@@ -1349,7 +1370,7 @@ struct Packer<'a> {
     dest: &'a ArchiveDest,
     edits: Vec<Edit>,
     /// Targets of this operation, so two items never land on the same name.
-    planned: Vec<String>,
+    planned: Planned,
     done: u64,
     bytes: u64,
     skipped: u64,
@@ -1360,7 +1381,7 @@ impl Packer<'_> {
         let (b, f) = local_size(src);
         self.bytes += b;
         self.done += f;
-        self.planned.push(inner.clone());
+        self.planned.0.insert(inner.clone());
         self.edits.push(Edit::Add {
             src: src.to_path_buf(),
             inner,
@@ -1388,11 +1409,7 @@ impl Packer<'_> {
             if md.is_dir() && existing.is_some_and(|e| e.is_dir) {
                 return self.merge(src, shown, &target);
             }
-            if self
-                .planned
-                .iter()
-                .any(|p| under(p, &target) || under(&target, p))
-            {
+            if self.planned.clashes(&target) {
                 let msg = format!("'{}' is already written by this operation", target);
                 self.res.error(&self.dest.shown(&target), &msg)?;
                 self.skip(src);
@@ -1481,7 +1498,7 @@ fn pack(
         index,
         dest,
         edits: Vec::new(),
-        planned: Vec::new(),
+        planned: Planned::default(),
         done: 0,
         bytes: 0,
         skipped: 0,
@@ -1506,6 +1523,7 @@ fn pack(
                     done: 0,
                     skipped: p.skipped,
                     cancelled: true,
+                    ..OpSummary::default()
                 };
                 return Ok((summary, vec![false; items.len()]));
             }
@@ -1520,6 +1538,7 @@ fn pack(
         done: p.done,
         skipped: p.skipped,
         cancelled: false,
+        ..OpSummary::default()
     };
     Ok((summary, complete))
 }
@@ -1643,7 +1662,7 @@ struct Mover<'a> {
     /// The archive as the user sees it.
     archive: &'a Path,
     edits: Vec<Edit>,
-    planned: Vec<String>,
+    planned: Planned,
     done: u64,
     bytes: u64,
     skipped: u64,
@@ -1662,7 +1681,7 @@ impl Mover<'_> {
         let (b, f) = self.size(from);
         self.bytes += b;
         self.done += f;
-        self.planned.push(to.clone());
+        self.planned.0.insert(to.clone());
         self.edits.push(Edit::Rename {
             from: from.to_string(),
             to,
@@ -1703,11 +1722,7 @@ impl Mover<'_> {
                 });
                 return Ok(true);
             }
-            if self
-                .planned
-                .iter()
-                .any(|p| under(p, &target) || under(&target, p))
-            {
+            if self.planned.clashes(&target) {
                 let msg = format!("'{target}' is already written by this operation");
                 self.res.error(&self.shown(&target), &msg)?;
                 self.skip(from);
@@ -1749,11 +1764,13 @@ impl Mover<'_> {
     /// nothing is left behind, so `from` itself can go.
     fn merge(&mut self, from: &str, to: &str) -> Result<bool, Cancel> {
         let prefix = format!("{from}/");
-        let children: Vec<String> = self
-            .index
-            .entries
+        // The index is sorted by path: the subtree of `from` is one range.
+        let entries = &self.index.entries;
+        let lo = entries.partition_point(|e| e.path.as_str() < prefix.as_str());
+        let children: Vec<String> = entries[lo..]
             .iter()
-            .filter(|e| e.path.starts_with(&prefix) && !e.path[prefix.len()..].contains('/'))
+            .take_while(|e| e.path.starts_with(&prefix))
+            .filter(|e| !e.path[prefix.len()..].contains('/'))
             .map(|e| e.path.clone())
             .collect();
         let mut complete = true;
@@ -1761,6 +1778,25 @@ impl Mover<'_> {
             complete &= self.item(&c, join_rel(to, base_name(&c)))?;
         }
         Ok(complete)
+    }
+}
+
+/// Targets planned by one archive operation, so two items never land on the same name or
+/// inside each other. Sorted: a check is a few lookups, not a scan of everything planned.
+#[derive(Default)]
+struct Planned(std::collections::BTreeSet<String>);
+
+impl Planned {
+    /// `t` is planned, below a planned path, or above one.
+    fn clashes(&self, t: &str) -> bool {
+        if self.0.contains(t) || t.match_indices('/').any(|(i, _)| self.0.contains(&t[..i])) {
+            return true;
+        }
+        let below = format!("{t}/");
+        self.0
+            .range(below.clone()..)
+            .next()
+            .is_some_and(|p| p.starts_with(&below))
     }
 }
 
@@ -1777,7 +1813,7 @@ fn move_in_archive(
         index,
         archive: &src.shown_archive,
         edits: Vec::new(),
-        planned: Vec::new(),
+        planned: Planned::default(),
         done: 0,
         bytes: 0,
         skipped: 0,
@@ -1793,6 +1829,7 @@ fn move_in_archive(
                 done: 0,
                 skipped: m.skipped,
                 cancelled: true,
+                ..OpSummary::default()
             });
         }
     }
@@ -1805,12 +1842,25 @@ fn move_in_archive(
         done: m.done,
         skipped: m.skipped,
         cancelled: false,
+        ..OpSummary::default()
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn planned_clashes_on_same_inside_and_above() {
+        let mut p = Planned::default();
+        p.0.insert("a/b".into());
+        assert!(p.clashes("a/b"));
+        assert!(p.clashes("a/b/c"), "inside a planned folder");
+        assert!(p.clashes("a"), "above a planned path");
+        assert!(!p.clashes("a/bc"));
+        assert!(!p.clashes("a/a"));
+        assert!(!p.clashes("b"));
+    }
     use crate::archive::read::extract;
     use crate::archive::testutil::*;
     use crate::archive::ArchiveKind;

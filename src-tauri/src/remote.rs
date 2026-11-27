@@ -792,8 +792,27 @@ impl Connector {
         Ok(mp.to_string_lossy().into_owned())
     }
 
-    /// The whole connection flow (blocking; the network part has its own timeouts).
+    /// The whole connection flow (blocking; the network part has its own timeouts). The
+    /// attempt counts as running from the start, so a Cancel during the preparation (a dead
+    /// cached session, a Keychain read) is not lost.
     pub fn connect(
+        &self,
+        data: &DataLocation,
+        ctx: &Ctx,
+        req: &ConnectRequest,
+    ) -> Result<ConnectReply, String> {
+        if let Some(id) = &req.attempt {
+            lock(&self.mounting).insert(id.clone());
+        }
+        let r = self.connect_flow(data, ctx, req);
+        if let Some(id) = &req.attempt {
+            lock(&self.mounting).remove(id);
+            lock(&self.abandoned).remove(id);
+        }
+        r
+    }
+
+    fn connect_flow(
         &self,
         data: &DataLocation,
         ctx: &Ctx,
@@ -1235,6 +1254,8 @@ mod tests {
     #[derive(Default, Clone)]
     struct FakeFs {
         files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+        /// Each read is followed by a write to the same file (a log growing during a copy).
+        grows: Arc<AtomicBool>,
         dead: Arc<AtomicBool>,
         hung: Arc<AtomicBool>,
         closed: Arc<AtomicBool>,
@@ -1308,6 +1329,11 @@ mod tests {
                 .get(path)
                 .cloned()
                 .ok_or_else(|| RemoteError::NotFound(path.into()))?;
+            if self.grows.load(Ordering::SeqCst) {
+                if let Some(f) = self.files.lock().unwrap().get_mut(path) {
+                    f.extend_from_slice(b" +appended");
+                }
+            }
             out.write_all(&d)
                 .map_err(|e| RemoteError::Other(e.to_string()))
         }
@@ -1887,6 +1913,28 @@ mod tests {
         assert_eq!(pending, vec!["sftp://m/b.txt".to_string()]);
         // Not connected any more: still Ok, nothing else to clean.
         assert!(!c.disconnect(&ctx, &edits, "m"));
+    }
+
+    /// A file that changes while F4 copies it: the copy may hold the old content, so uploading
+    /// it asks (conflict) instead of replacing the newer file on the server.
+    #[test]
+    fn a_file_changed_during_the_copy_is_a_conflict_on_upload() {
+        let t = tempfile::tempdir().unwrap();
+        let temp_root = t.path().join("tmp-root");
+        let ctx = Ctx::new(temp_root.clone());
+        let fs = FakeFs::with(&[("/log.txt", b"line 1")]);
+        fs.grows.store(true, Ordering::SeqCst);
+        ctx.sessions.insert("m", fs.clone());
+        let edits = EditWatch::new(Arc::new(|_, _: &str, _: &str| {}), temp_root);
+        let (id, local) = edits.open_for_edit(&ctx, "sftp://m/log.txt").unwrap();
+        assert_eq!(std::fs::read(&local).unwrap(), b"line 1");
+        std::fs::write(&local, b"line 1 edited").unwrap();
+        let e = edits
+            .prepare_upload(&ctx, id, false)
+            .err()
+            .unwrap_or_default();
+        assert!(e.starts_with("conflict:"), "{e}");
+        assert_eq!(fs.files.lock().unwrap()["/log.txt"], b"line 1 +appended");
     }
 
     #[test]

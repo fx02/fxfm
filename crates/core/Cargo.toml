@@ -1,6 +1,6 @@
 [package]
 name = "fxfm-core"
-version = "0.1.12"
+version = "0.1.22"
 edition = "2021"
 
 [dependencies]
@@ -38,6 +38,10 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # Audio decoding for F3 audition (pure Rust; GSM 6.10 is our own, in audio/gsm.rs).
 symphonia = { version = "0.6.1", default-features = false, features = ["wav", "aiff", "pcm", "adpcm", "mpa", "flac", "ogg", "vorbis", "isomp4", "aac"] }
 symphonia-opus = "0.1.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Trash with the place the item went to (for Undo); the `trash` crate drops it.
+objc2-foundation = { version = "0.3", features = ["NSFileManager", "NSURL", "NSString", "NSError"] }
 
 [dev-dependencies]
 tempfile = "3"

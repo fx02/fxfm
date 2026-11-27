@@ -48,13 +48,17 @@ import {
   archiveOf,
   parseRemote,
   keyTableRows,
+  branchEntries,
+  branchStatus,
 } from "./lib.mjs";
 import {
   clipFiles,
   copyMove,
   copyMoveTo,
   copyNames,
+  shareLinks,
   pasteFiles,
+  undoLast,
   deleteItems,
   dialog,
   editChanged,
@@ -180,7 +184,8 @@ async function driveRows() {
 
 async function driveMenu(panel) {
   const rows = await driveRows();
-  if (!rows.length) return;
+  // A dialog opened while the list was read: the menu would land on top of it.
+  if (!rows.length || topModal()) return;
   const backdrop = document.createElement("div");
   backdrop.className = "backdrop clear";
   const menu = document.createElement("div");
@@ -261,28 +266,57 @@ function contextMenu(panel, index, at = null) {
   // Open with / Quick Look / Show in Finder need a plain local file (not a server, not inside an
   // archive: an archive entry's path does not exist on disk).
   const local = Boolean(path) && !parseRemote(path) && !entry.inArchive && !archiveOf(panel.location);
+  const network = local && volumeFor(app.volumes, path)?.kind === "network";
   const own = {
     open: () => panel.enter(),
     open_with: () => openWithMenu(path, at),
     quick_look: () => invoke("quick_look", { path }).catch((e) => status(`Quick Look: ${e}`)),
     show_in_finder: () => invoke("show_in_finder", { path }).catch((e) => status(`Show in Finder: ${e}`)),
+    cm_copy_share_links: () => shareLinksMenu(panel, at),
   };
-  const items = contextMenuItems(entry, n, app.settings.contextMenuOff ?? [], local).map((i) =>
+  const items = contextMenuItems(entry, n, app.settings.contextMenuOff ?? [], local, network).map((i) =>
     i === "-" ? null : { label: i[1], run: () => (own[i[0]] ? own[i[0]]() : dispatch(i[0])) },
   );
   if (!items.length) return;
-  if (!at) {
-    panel.ensureVisible();
-    const row = panel.rowsEl.querySelector(`[data-i="${index}"]`)?.getBoundingClientRect();
-    const box = row ?? panel.listEl.getBoundingClientRect();
-    at = { x: box.left + 24, y: row ? row.bottom : box.top };
-  }
+  at ??= cursorPoint(panel, index);
   popupMenu(at, items);
+}
+
+/** Where a menu opened from the keyboard goes: under the row `index`, else the list's top. */
+function cursorPoint(panel, index) {
+  panel.ensureVisible();
+  const row = panel.rowsEl.querySelector(`[data-i="${index}"]`)?.getBoundingClientRect();
+  const box = row ?? panel.listEl.getBoundingClientRect();
+  return { x: box.left + 24, y: row ? row.bottom : box.top };
+}
+
+/**
+ * Copy network path: the items on an SMB share as Windows paths (`\\server\share\…`), as
+ * `smb://` links (Mac), or both, to send to someone who opens them on their own computer.
+ */
+async function shareLinksMenu(panel, at) {
+  const links = await shareLinks();
+  if (!links || topModal()) return;
+  const one = links.length === 1;
+  const short = (s) => (s.length > 72 ? `${s.slice(0, 34)}…${s.slice(-37)}` : s);
+  const copy = (text, what) => async () => {
+    await invoke("clipboard_write", { text, files: [] });
+    panel.setMessage(`Copied ${what}${one ? "" : "s"} to the clipboard`);
+  };
+  const win = links.map((l) => l.windows);
+  const mac = links.map((l) => l.smb);
+  const both = links.map((l) => `Windows: ${l.windows}\nMac: ${l.smb}`).join("\n\n");
+  popupMenu(at ?? cursorPoint(panel, panel.cursorIndex), [
+    { label: one ? `Windows: ${short(win[0])}` : `Windows paths (${links.length})`, run: copy(win.join("\n"), "Windows path") },
+    { label: one ? `Mac: ${short(mac[0])}` : `Mac links (${links.length})`, run: copy(mac.join("\n"), "Mac link") },
+    { label: "Both (Windows and Mac)", run: copy(both, "network path") },
+  ]);
 }
 
 /** Open with…: the apps macOS offers for `path` (default first) as a second menu at `at`. */
 async function openWithMenu(path, at) {
   const apps = await invoke("open_with_apps", { path }).catch(() => []);
+  if (topModal()) return;
   if (!apps.length) {
     status("No application to open it with");
     return;
@@ -457,10 +491,13 @@ export const handlers = {
   cm_cut_to_clipboard: () => clipFiles("move"),
   cm_copy_to_clipboard: () => clipFiles("copy"),
   cm_paste_from_clipboard: () => pasteFiles(),
+  cm_undo: () => undoLast(),
   cm_copy_names_to_clip: () => copyNames(false),
   cm_copy_full_names_to_clip: () => copyNames(true),
+  cm_copy_share_links: () => shareLinksMenu(activePanel()),
   cm_multi_rename: () => multiRename(),
   cm_sync_dirs: () => syncDirs(),
+  cm_branch_view: () => branchView(),
   cm_exit: () => win.close(),
   cm_cmdline_focus: () => {
     if (app.settings.showCommandLine) cmdInput().focus();
@@ -563,6 +600,46 @@ function renamedInResults(side, moved) {
 function recheckResults(side) {
   const r = app.results[side];
   if (r && isSearchLocation(app.panels[side].location)) r.recheck = true;
+}
+
+/** A Ctrl+B walk is running (Ctrl+B again stops it). */
+let branchBusy = false;
+
+/**
+ * Ctrl+B (TC branch view): every file below the active panel's folder as one list (named by
+ * the path below it); Ctrl+B on that list goes back to the folder.
+ */
+async function branchView() {
+  const p = activePanel();
+  const r = app.results[p.side];
+  if (isSearchLocation(p.location)) {
+    if (r?.branch) return p.go(r.back.location, r.back.cursorName ?? undefined);
+    status("Branch view needs a folder");
+    return;
+  }
+  if (branchBusy) {
+    invoke("branch_cancel").catch(() => {});
+    return;
+  }
+  const location = p.location;
+  const back = { location, cursorName: p.cursorName };
+  branchBusy = true;
+  status("Branch view: reading… (Esc stops)");
+  try {
+    const found = await invoke("branch_list", { location });
+    // The user went elsewhere meanwhile: that panel is theirs now.
+    if (p.location !== location) return;
+    const entries = branchEntries(found.items);
+    app.results[p.side] = { entries, query: "", title: `Branch view: ${displayLocation(location, remoteArchives)}`, back, recheck: false, branch: true };
+    p.clearMarks();
+    await p.go(SEARCH_LOCATION, entries[0]?.name);
+    status(branchStatus(found));
+  } catch (e) {
+    const msg = String(e?.message ?? e);
+    status(msg === "cancelled" ? "Branch view stopped" : `Branch view: ${msg}`);
+  } finally {
+    branchBusy = false;
+  }
 }
 
 /**
@@ -834,6 +911,12 @@ function onKeyDown(e) {
     return;
   }
   if (!combo) return;
+  // Esc stops a running branch view walk (Ctrl+B again does too).
+  if (combo === "Escape" && branchBusy) {
+    e.preventDefault();
+    invoke("branch_cancel").catch(() => {});
+    return;
+  }
   if (combo === "Escape" && escapeStopsAudio({ player, escapeBound: !!app.keymap[combo], commandText: cmdInput().value })) {
     e.preventDefault();
     invoke("audio_stop").catch((err) => console.error("fxfm: audio_stop", err));
@@ -1092,10 +1175,12 @@ function applySettings(s) {
   const matcher = compileTypeRules(s.colors.typeRules);
   for (const p of Object.values(app.panels)) p.setColors(s.colors, matcher);
   st.setProperty("--font-size", `${s.fontSize}px`);
+  // The panels' font: a chosen family with a monospace fallback, or the system font ("").
+  st.setProperty("--list-font", s.fontFamily ? `"${s.fontFamily.replace(/"/g, "")}", ui-monospace, Menlo, monospace` : "inherit");
   const rowH = Math.round(s.fontSize * 1.47);
   st.setProperty("--row-h", `${rowH}px`);
   for (const p of Object.values(app.panels)) p.setRowHeight(rowH);
-  for (const p of Object.values(app.panels)) p.setIconStyle(iconStyle(s));
+  for (const p of Object.values(app.panels)) p.setIconStyle(iconStyle(s), { home: app.boot?.home ?? "", folderIcon: s.folderIcon ?? "" });
   document.getElementById("cmdline").classList.toggle("off", !s.showCommandLine);
   document.body.classList.toggle("nodrives", s.showDriveBar !== true);
   document.body.classList.toggle("nohead", s.showPanelHeader === false);
@@ -1154,7 +1239,7 @@ function makePanel(side) {
 
 async function openPanel(panel, saved, home) {
   const r = await panel.go(saved?.location ?? home, saved?.cursorName ?? undefined);
-  if (!r.ok && panel.location === "") await panel.go(home);
+  if (!r.ok && !r.superseded && panel.location === "") await panel.go(home);
 }
 
 /**

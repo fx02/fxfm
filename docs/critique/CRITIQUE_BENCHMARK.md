@@ -164,3 +164,27 @@ yes = stated by a source above; partial = stated with a caveat; no = source says
 - Marta: remote access, multi-rename, tabs docs not found; several statements come from the homepage (marketing). Homepage and docs differ on Quick Search vs Quick Select.
 - Nimble Commander: conflicting maintenance status (README fetch says "no longer actively maintained", search found none); version dates differ between sources (1.9.0 on 2026-11-01 vs App Store 1.8.0).
 - Nothing installed, run, or tested; no screenshots or flow verification. No VoiceOver testing; claims are only what sources say.
+
+# Benchmark for the new surfaces (2026-11-26)
+
+Sources were read by a fetch agent; claims are limited to what the pages say. TC wiki pages are
+old (Synchronize_directories last edited 2009, Quick_search 2012).
+
+| Topic | Tool | Observed | URL |
+|---|---|---|---|
+| Sync criteria | TC | Asymmetric, Subdirs, by content, ignore date | https://www.ghisler.ch/wiki/index.php?title=Synchronize_directories |
+| Sync criteria | Double Commander | name, size, date; asymmetric, subdirs, by content, ignore date | https://doublecmd.github.io/doc/en/syncdirs.html |
+| Sync criteria | FreeFileSync | time and size, content, size | https://freefilesync.org/manual.php?topic=comparison-settings |
+| Sync modes | FreeFileSync | Two way, Mirror, Update, Custom | https://freefilesync.org/manual.php?topic=synchronization-settings |
+| Sync modes | ForkLift 4 | left→right, right→left, both; add / update / "Delete orphaned items" | https://binarynights.com/manual#sync |
+| Row filters | TC | Show buttons →, =, ≠, ←, duplicates, singles | TC wiki (above) |
+| Row filters | Double Commander | Show buttons >, =, ≠, ?, <, duplicates, singles | DC syncdirs (above) |
+| Per-row edit | Double Commander | right-click on selected rows: "Select for copying ->", "Reverse copy direction", "Remove selection"; Space unchecks | DC syncdirs (above) |
+| Summary / confirm | TC, DC, ForkLift | confirmation before copying; ForkLift shows counts added/updated/deleted | as above |
+| Sync deletes | Double Commander | follows "Delete to recycle bin" (Shift reverses) | DC syncdirs (above) |
+| Quick filter | TC | Ctrl+S, then filter mode toggles with Ctrl+S / filter icon | https://www.ghisler.ch/wiki/index.php?title=Quick_search |
+| Quick filter | Double Commander | separate quick filter command; Esc or X resets (from a summarized page) | https://doublecmd.github.io/doc/en/help.html |
+| Flat view | Double Commander | cm_FlatView lists all files of subfolders; Esc aborts the scan; calling again returns | https://doublecmd.github.io/doc/en/help.html |
+
+Limits: TC branch view pages returned 404; FreeFileSync and ForkLift pages did not describe the
+result-list layout or row filters; nothing was installed or run.

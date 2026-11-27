@@ -612,6 +612,21 @@ pub fn location_in_archive(location: String) -> bool {
     archive_location(&location)
 }
 
+/// How many of the local `paths` are on a network volume (no Trash: F8 deletes them
+/// permanently). Off the main thread: asking a share that went away blocks.
+#[tauri::command]
+pub async fn count_on_network(paths: Vec<String>) -> usize {
+    tauri::async_runtime::spawn_blocking(move || {
+        paths
+            .iter()
+            .filter(|p| p.starts_with('/'))
+            .filter(|p| fxfm_core::volumes::on_network_volume(std::path::Path::new(p)))
+            .count()
+    })
+    .await
+    .unwrap_or(0)
+}
+
 /// Inside an archive (not the archive file itself).
 fn in_archive(loc: &str) -> bool {
     split_location(loc).is_some_and(|a| !a.inner.is_empty())
@@ -644,6 +659,11 @@ pub async fn open_viewer(
 ) -> Result<(), String> {
     let (a, loc) = (app.clone(), path.clone());
     let local = blocking(move || view_copy(&a, &loc)).await??;
+    // The page may load only the viewed file through the asset protocol (images, PDFs); the
+    // scope starts empty (tauri.conf.json), so nothing else on disk is reachable from a page.
+    app.asset_protocol_scope()
+        .allow_file(&local)
+        .map_err(|e| e.to_string())?;
     let n = state.viewer_seq.fetch_add(1, Ordering::Relaxed) + 1;
     let title = if needs_copy(&path) {
         path.clone()
@@ -895,6 +915,14 @@ pub async fn edit_confirm(app: AppHandle, id: u64, uploaded: bool) -> Result<(),
     .await
 }
 
+/// Ctrl+Z: puts the last local operation's items back (fxfm_core::undo).
+#[tauri::command]
+pub async fn undo_last(
+    plan: fxfm_core::undo::UndoPlan,
+) -> Result<fxfm_core::undo::UndoResult, String> {
+    blocking(move || fxfm_core::undo::undo(&plan)).await
+}
+
 /// Discard in the startup dialog of the previous sessions' not uploaded edits: their
 /// copies go to the Trash (never deleted permanently), then their emptied temp folders.
 #[tauri::command]
@@ -902,9 +930,7 @@ pub async fn discard_pending_edits(app: AppHandle) -> Result<(), String> {
     blocking(move || {
         let state = app.state::<AppState>();
         let (edits, dirs) = std::mem::take(&mut *lock(&state.stale_edits));
-        crate::editwatch::discard_pending(&edits, &dirs, &|p| {
-            fxfm_core::ops::trash(p).map_err(|e| e.to_string())
-        })
+        crate::editwatch::discard_pending(&edits, &dirs, &|p| fxfm_core::ops::trash(p).map(|_| ()))
     })
     .await?
 }
