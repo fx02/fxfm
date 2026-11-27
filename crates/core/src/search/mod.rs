@@ -1,6 +1,8 @@
-//! Name search (Alt+F7): query parsing, matching, ranking and the in-memory name index.
+//! Name search (Alt+F7): query parsing, matching, ranking and the in-memory name index; content
+//! search of single files.
 
 pub mod archives;
+pub mod content;
 pub mod index;
 pub mod query;
 pub mod scan;
@@ -10,6 +12,7 @@ pub use archives::{
     index_archive, index_archives_under, needs_reindex, ArchiveOptions, ArchiveOutcome,
     ArchiveStamp,
 };
+pub use content::{file_contains, Needle};
 pub use index::{apply_change, Change, EntryId, Index, Meta};
 pub use query::{fold, rank, Query, Term};
 pub use scan::{

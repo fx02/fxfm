@@ -3,7 +3,7 @@
 ## Next
 From the UI critique (docs/critique/UI_CRITIQUE_REPORT.md), not started:
 - Folder tabs per panel.
-- Content search in Find files; operation queue; thumbnails.
+- Operation queue; thumbnails.
 - Screen-reader labels (VoiceOver).
 
 ## Right-click menu
@@ -35,6 +35,7 @@ From the UI critique (docs/critique/UI_CRITIQUE_REPORT.md), not started:
 - Writing promised items has no progress or Cancel in fxfm (only what the receiver shows itself).
 
 ## Done
+- **Find files: content search and sorting** (2026-11-27): a *Text* field finds files whose content has the text (current folder, case sensitive or not, results stream in); a click on a column header sorts the results (again: reverse, a third time: best match first).
 - **Connect to server window and groups** (2026-11-27): Ctrl+F can be moved, resized and maximized inside the main window (size kept); servers in groups up to three levels (New group…, drag into a group, Alt+←/→ out of / into a group). The server rows no longer take the Synchronize dirs grid layout (a class name clash since 0.1.10).
 - **Permanent delete on network shares** (2026-11-27): F8 on an SMB/AFP/NFS/WebDAV share deletes permanently instead of trying the missing Trash; the question says so first. **Copy network path** (2026-11-27): Windows `\\server\share\…` and `smb://` forms of items on an SMB share.
 - **Font and icon styles** (2026-11-26): Options → View → Font picks the panels' font from the Mac's fixed-pitch families (default Menlo) or the system font; Icons adds Classic (drawn yellow folders) and Outline (line icons); Finder icons show the special folders' own icons and offer macOS's folder icons (CoreTypes, incl. one-color sidebar glyphs) for ordinary folders; the status line keeps size, date and mode in fixed columns.

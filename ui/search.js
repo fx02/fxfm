@@ -23,8 +23,11 @@ import {
   RESULT_COLUMN_MIN,
   resultClick,
   resultColumns,
+  nextResultSort,
+  sortResults,
   resultGridTemplate,
   feedItems,
+  searchLabel,
   searchRequest,
   searchScopes,
   searchUnder,
@@ -112,9 +115,13 @@ async function buildIndex(report) {
  */
 function showWindow(ctx, initialStatus) {
   let status = initialStatus;
-  const memory = { query: "", scope: "everywhere", archives: false, ...ctx.memory };
+  const memory = { query: "", scope: "everywhere", archives: false, text: "", caseSensitive: false, ...ctx.memory };
   let state = searchWindowState(undefined, { type: "clear" });
   let sel = -1;
+  /** Header sort ({by, desc}) or null: the search's own order (`rank`, given as rows arrive). */
+  let sort = loadLayout().sort ?? null;
+  let nextRank = 0;
+  const ordered = (rows) => (sort ? sortResults(rows, sort) : rows.slice().sort((a, b) => a.rank - b.rank));
   /** Selected rows (paths) for Feed to listbox; `anchor` is where a Shift range starts. */
   let marked = new Set();
   let anchor = -1;
@@ -136,6 +143,24 @@ function showWindow(ctx, initialStatus) {
   name.value = memory.query;
   const nameLine = el("label", "line");
   nameLine.append(el("span", null, "Name:"), name);
+
+  // Containing text: files in the current folder whose content has it (the name narrows them).
+  const text = el("input");
+  text.type = "text";
+  text.spellcheck = false;
+  text.autocomplete = "off";
+  text.value = memory.text;
+  text.placeholder = "searches the current folder";
+  const caseSens = el("input");
+  caseSens.type = "checkbox";
+  caseSens.checked = memory.caseSensitive;
+  const caseLine = el("label", "opt");
+  caseLine.append(caseSens, " Case sensitive");
+  const textLine = el("div", "line text");
+  const textLabel = el("label", "grow");
+  textLabel.append(el("span", null, "Text:"), text);
+  textLine.append(textLabel, caseLine);
+  const label = () => searchLabel(name.value, text.value);
 
   const radio = (label, value) => {
     const r = el("input");
@@ -182,7 +207,7 @@ function showWindow(ctx, initialStatus) {
   privacyBtn.addEventListener("click", () => invoke("open_fda_settings").catch((e) => say(String(e))));
   const foot = el("div", "sfoot");
   foot.append(statusLine, indexBtn, privacyBtn);
-  body.append(nameLine, inLine, archLine, note, fda, list, foot);
+  body.append(nameLine, textLine, inLine, archLine, note, fda, list, foot);
 
   const row = el("div", "buttons");
   const hint = el("span", "hint", "Enter: go to file  F3: view  Esc: close");
@@ -233,10 +258,10 @@ function showWindow(ctx, initialStatus) {
     statusLine.classList.remove("msg");
     const searching = state.id != null || state.pending || state.rows.length > 0;
     statusLine.textContent = statusText({
-      total: name.value.trim() && searching ? state.total : undefined,
+      total: (name.value.trim() || text.value) && searching ? state.total : undefined,
       shown: state.rows.length,
       state: status.state,
-      walking: (state.pending || !state.done) && scope() === "folder",
+      walking: (state.pending || !state.done) && (scope() === "folder" || Boolean(text.value)),
       entries: status.entries,
       stale: staleVolume(status),
     });
@@ -307,15 +332,36 @@ function showWindow(ctx, initialStatus) {
 
   const saveColumns = () => saveLayout({ columns });
 
+  let resizing = false;
+
+  /** Re-sorts the rows in place of the list, keeping the selected and marked rows. */
+  const resort = () => {
+    const keep = state.rows[sel]?.path;
+    state = { ...state, rows: ordered(state.rows) };
+    sel = keep == null ? sel : state.rows.findIndex((r) => r.path === keep);
+    anchor = -1;
+    renderRows();
+  };
+
   const renderHead = () => {
     const cells = shown().map((c) => {
       const label = RESULT_COLUMNS.find((d) => d.id === c.id).label;
-      const cell = el("span", `h ${c.id}`, label);
-      cell.title = "Drag the edge to resize; right-click to show or hide columns";
+      const arrow = sort?.by === c.id ? (sort.desc ? " ▼" : " ▲") : "";
+      const cell = el("span", `h ${c.id}`, label + arrow);
+      cell.title = "Click to sort (again: reverse, a third time: best match first); drag the edge to resize; right-click to show or hide columns";
+      cell.addEventListener("click", (e) => {
+        if (e.button !== 0 || resizing) return;
+        sort = nextResultSort(sort, c.id);
+        saveLayout({ sort });
+        resort();
+        renderHead();
+      });
       const grip = el("span", "grip");
+      grip.addEventListener("click", (e) => e.stopPropagation());
       grip.addEventListener("mousedown", (e) => {
         e.preventDefault();
         e.stopPropagation();
+        resizing = true;
         const x0 = e.clientX;
         const w0 = cell.getBoundingClientRect().width;
         const move = (ev) => {
@@ -326,6 +372,8 @@ function showWindow(ctx, initialStatus) {
           document.removeEventListener("mousemove", move);
           document.removeEventListener("mouseup", up);
           saveColumns();
+          // The click that ends a drag is not a sort.
+          setTimeout(() => (resizing = false), 0);
         };
         document.addEventListener("mousemove", move);
         document.addEventListener("mouseup", up);
@@ -417,9 +465,14 @@ function showWindow(ctx, initialStatus) {
 
   const dispatch = (event) => {
     const before = state;
+    const keep = before.rows[sel]?.path;
     state = searchWindowState(state, event);
     if (state === before) return;
     if (state.rows !== before.rows) {
+      for (const r of state.rows) if (r.rank == null) r.rank = nextRank++;
+      state = { ...state, rows: ordered(state.rows) };
+      // A walk's next batch can sort in above the selected row: it stays selected.
+      if (keep != null && !before.fresh && event.type !== "started") sel = state.rows.findIndex((r) => r.path === keep);
       // A new search's first batch starts at the top; a walk's batches keep the selection.
       if (before.fresh || event.type === "started") {
         sel = state.rows.length ? 0 : -1;
@@ -438,6 +491,8 @@ function showWindow(ctx, initialStatus) {
     message = null;
     const req = searchRequest({
       query: name.value,
+      text: text.value,
+      caseSensitive: caseSens.checked,
       scope: scope(),
       location: under,
       archives: !archLine.hidden && archives.checked,
@@ -484,8 +539,10 @@ function showWindow(ctx, initialStatus) {
     win = null;
     clearTimeout(timer);
     memory.query = name.value;
+    memory.text = text.value;
+    memory.caseSensitive = caseSens.checked;
     if (state.id != null && !state.done) await invoke("search_cancel", { id: state.id }).catch(() => {});
-    await ask("closed", { memory, items: state.rows, query: name.value.trim() }).catch((e) => console.error("fxfm: closed", e));
+    await ask("closed", { memory, items: state.rows, query: label() }).catch((e) => console.error("fxfm: closed", e));
   };
 
   const missing = (it) => {
@@ -580,7 +637,7 @@ function showWindow(ctx, initialStatus) {
     const items = all ? state.rows.slice() : feedItems(state.rows, marked);
     if (!items.length) return;
     try {
-      await ask("feed", { items, query: name.value.trim() });
+      await ask("feed", { items, query: label() });
     } catch (e) {
       return say(`Feed to listbox: ${e?.message ?? e}`);
     }
@@ -592,6 +649,15 @@ function showWindow(ctx, initialStatus) {
   name.addEventListener("input", () => {
     memory.query = name.value;
     schedule();
+  });
+  text.addEventListener("input", () => {
+    memory.text = text.value;
+    schedule();
+  });
+  caseSens.addEventListener("change", () => {
+    memory.caseSensitive = caseSens.checked;
+    run();
+    text.focus();
   });
   for (const c of [everywhere.r, folder.r, archives]) {
     c.addEventListener("change", () => {
@@ -685,7 +751,7 @@ function showWindow(ctx, initialStatus) {
   document.body.append(box);
   name.focus();
   name.select();
-  if (name.value.trim()) run();
+  if (name.value.trim() || text.value) run();
 }
 
 // ------------------------------------------------------------ window

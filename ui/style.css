@@ -651,6 +651,9 @@ table.keys td button { min-width: 0; padding: 0 8px; }
 .dialog.search .line > span:first-child { width: 4em; flex: none; }
 .dialog.search .line input[type="text"] { flex: 1; min-width: 0; width: auto; }
 .dialog.search .opt { display: inline-flex; align-items: center; gap: 4px; }
+.dialog.search .line .grow { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+.dialog.search .line .grow > span { width: 4em; flex: none; }
+.dialog.search .line .grow input { flex: 1; min-width: 0; width: auto; }
 .dialog.search .opt input { width: auto; margin: 0; }
 .dialog.search [hidden] { display: none !important; }
 .dialog.search .fda { display: flex; align-items: center; gap: 8px; }
@@ -686,7 +689,7 @@ table.keys td button { min-width: 0; padding: 0 8px; }
   padding-bottom: 2px;
   cursor: default;
 }
-.dialog.search .fhead .h { position: relative; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.dialog.search .fhead .h { position: relative; min-width: 0; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
 .dialog.search .fhead .grip { position: absolute; top: -2px; bottom: -2px; right: 0; width: 6px; cursor: col-resize; border-right: 1px solid var(--line); }
 .dialog.search .fhead .h.size, .frow .size { text-align: right; }
 .dialog.search .frows { width: max-content; min-width: 100%; }

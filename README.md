@@ -26,7 +26,8 @@ and on servers. One universal app for Apple Silicon and Intel Macs, macOS 15 or 
   the macOS Keychain (or encrypted with a master password in portable mode).
   Files from a server open in your editor (F4) and go back when saved.
 - **Find files** (Alt+F7) in its own window, over an index of the disk that
-  stays current, with results you can copy, move, delete or drag.
+  stays current, or by **text inside files** in a folder; results sort by any
+  column and can be copied, moved, deleted or dragged.
 - **Synchronize dirs**: compare two folders (local, archive or server), see
   what differs on each side, and copy or delete in the chosen directions
   (two-way, mirror, update).

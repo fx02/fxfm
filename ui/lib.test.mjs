@@ -1782,6 +1782,14 @@ test("searchRequest", () => {
   assert.equal(lib.searchRequest({ query: "   ", scope: "everywhere", location: "/x", archives: false }), null);
   assert.deepEqual(lib.searchRequest({ query: " scope work ", scope: "everywhere", location: "/x", archives: true }), { query: "scope work", under: null, archives: true, limit: 1000 });
   assert.deepEqual(lib.searchRequest({ query: "a", scope: "folder", location: "/x/y", archives: false }), { query: "a", under: "/x/y", archives: false, limit: 1000 });
+  // Containing text: the current folder even with Everywhere, a name is optional, no archives.
+  assert.deepEqual(lib.searchRequest({ query: " ", scope: "everywhere", location: "/x", archives: true, text: "TODO", caseSensitive: true }), {
+    query: "", under: "/x", archives: false, limit: 1000, text: "TODO", caseSensitive: true,
+  });
+  assert.equal(lib.searchRequest({ query: "*.md", scope: "folder", location: null, archives: false, text: "x" }).under, null);
+  assert.equal(lib.searchLabel(" notes ", ""), "notes");
+  assert.equal(lib.searchLabel("", "TODO"), 'containing "TODO"');
+  assert.equal(lib.searchLabel("*.md", "TODO"), '*.md containing "TODO"');
 });
 test("searchUnder: servers and the results list cannot be searched", () => {
   assert.equal(lib.searchUnder("/Users/x"), "/Users/x");
@@ -2536,4 +2544,27 @@ test("fitWindow: inside the window, not below the minimum", () => {
   assert.deepEqual(lib.fitWindow({ x: 0, y: 0, w: 5000, h: 5000 }, 1200, 800, min), { x: 0, y: 0, w: 1200, h: 800 });
   // A window smaller than the minimum: the dialog fills it.
   assert.deepEqual(lib.fitWindow({ x: 30, y: 30, w: 600, h: 400 }, 350, 250, min), { x: 0, y: 0, w: 350, h: 250 });
+});
+
+test("Find files sort: header clicks cycle A→Z, Z→A, best match; folders stay first", () => {
+  assert.deepEqual(lib.nextResultSort(null, "name"), { by: "name", desc: false });
+  assert.deepEqual(lib.nextResultSort({ by: "name", desc: false }, "name"), { by: "name", desc: true });
+  assert.equal(lib.nextResultSort({ by: "name", desc: true }, "name"), null);
+  assert.deepEqual(lib.nextResultSort({ by: "name", desc: true }, "size"), { by: "size", desc: false });
+  const rows = [
+    { name: "file10.txt", folder: "/b", size: 5, mtime: 300 },
+    { name: "File2.txt", folder: "/a", size: 50, mtime: 100 },
+    { name: "zdir", folder: "/c", size: 0, mtime: 200, isDir: true },
+    { name: "čaša.txt", folder: "/a", size: 7, mtime: 200 },
+  ];
+  const names = (sort) => lib.sortResults(rows, sort).map((r) => r.name);
+  assert.deepEqual(names(null), rows.map((r) => r.name));
+  assert.equal(lib.sortResults(rows, null), rows);
+  assert.deepEqual(names({ by: "name", desc: false }), ["zdir", "čaša.txt", "File2.txt", "file10.txt"]);
+  assert.deepEqual(names({ by: "name", desc: true }), ["zdir", "file10.txt", "File2.txt", "čaša.txt"]);
+  assert.deepEqual(names({ by: "size", desc: false }), ["zdir", "file10.txt", "čaša.txt", "File2.txt"]);
+  assert.deepEqual(names({ by: "date", desc: true }), ["zdir", "file10.txt", "čaša.txt", "File2.txt"]);
+  // Same folder: by name inside it.
+  assert.deepEqual(names({ by: "folder", desc: false }), ["zdir", "čaša.txt", "File2.txt", "file10.txt"]);
+  assert.deepEqual(names({ by: "nonsense", desc: false }), rows.map((r) => r.name));
 });

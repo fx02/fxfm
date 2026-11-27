@@ -194,4 +194,50 @@ impl Inner {
         );
         self.emit_batch(id, cancel, Vec::new(), total, true);
     }
+
+    /// Containing text: walks `under` like a name search and keeps the files (not folders, not
+    /// archive entries) whose content has `needle`. Unreadable files are skipped.
+    pub(super) fn walk_content(
+        &self,
+        id: u64,
+        cancel: &AtomicBool,
+        q: &Query,
+        under: &str,
+        needle: &fxfm_core::search::Needle,
+        limit: usize,
+    ) {
+        let mut total = 0u64;
+        let mut sent = 0usize;
+        walk_search(Path::new(under), q, None, cancel, &mut |hits: Vec<
+            WalkHit,
+        >| {
+            let found: Vec<WalkHit> = hits
+                .into_iter()
+                .filter(|h| !h.meta.is_dir && !h.meta.in_archive && readable_here(&h.path))
+                .filter(|h| {
+                    fxfm_core::search::file_contains(Path::new(&h.path), needle, cancel)
+                        .unwrap_or(false)
+                })
+                .collect();
+            if found.is_empty() {
+                return;
+            }
+            total += found.len() as u64;
+            let items: Vec<Item> = found
+                .into_iter()
+                .take(limit.saturating_sub(sent))
+                .map(walk_item)
+                .collect();
+            sent += items.len();
+            self.emit_batch(id, cancel, items, total, false);
+        });
+        self.emit_batch(id, cancel, Vec::new(), total, true);
+    }
+}
+
+/// A plain file whose data is on this Mac: never a FIFO or device (opening one blocks) or a
+/// cloud-only placeholder (reading one downloads it), nor a symbolic link.
+fn readable_here(path: &str) -> bool {
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|md| md.is_file() && !fxfm_core::search::is_dataless(&md))
 }

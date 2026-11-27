@@ -120,13 +120,18 @@ pub struct Mounted {
     pub source: Option<String>,
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchReq {
     pub query: String,
     pub under: Option<String>,
     pub archives: bool,
     pub limit: u32,
+    /// Containing text (only with `under`): files whose content has it.
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub case_sensitive: bool,
 }
 
 enum Job {
@@ -604,6 +609,22 @@ impl Service {
             )
         };
         let under = req.under.as_deref().map(trim);
+        if let Some(needle) = fxfm_core::search::Needle::new(&req.text, req.case_sensitive) {
+            // Content search walks the folder: reading every file of the index would take hours.
+            let Some(under) = under else {
+                lock(&inner.current).take();
+                return Err("Containing text searches the current folder".into());
+            };
+            // No name given: every file.
+            let q = Query::parse(if req.query.trim().is_empty() {
+                "*"
+            } else {
+                &req.query
+            });
+            let limit = req.limit.max(1) as usize;
+            std::thread::spawn(move || inner.walk_content(id, &cancel, &q, &under, &needle, limit));
+            return Ok(id);
+        }
         if under.is_none() && !ready {
             lock(&inner.current).take();
             return Err("no index".into());

@@ -705,6 +705,37 @@ export const RESULT_COLUMNS = [
   { id: "date", label: "Date", width: 140 },
 ];
 
+/**
+ * Find files sorting: a click on a column header sorts by it (A→Z, small→large, old→new), a
+ * second click turns it round, a third goes back to the search's own order (best match first).
+ * `sort` is null or {by, desc}.
+ */
+export function nextResultSort(sort, by) {
+  if (sort?.by !== by) return { by, desc: false };
+  return sort.desc ? null : { by, desc: true };
+}
+
+const resultName = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
+/** `rows` sorted by `sort` (folders first, as in the panels); null keeps the given order. */
+export function sortResults(rows, sort) {
+  if (!sort || !RESULT_COLUMNS.some((c) => c.id === sort.by)) return rows;
+  const key = {
+    name: (a, b) => resultName.compare(a.name, b.name),
+    folder: (a, b) => resultName.compare(a.folder ?? "", b.folder ?? ""),
+    size: (a, b) => (a.size ?? 0) - (b.size ?? 0),
+    date: (a, b) => (a.mtime ?? 0) - (b.mtime ?? 0),
+  }[sort.by];
+  const dir = sort.desc ? -1 : 1;
+  return rows
+    .map((r, i) => [r, i])
+    .sort(([a, i], [b, j]) => {
+      if (Boolean(a.isDir) !== Boolean(b.isDir)) return a.isDir ? -1 : 1;
+      return dir * key(a, b) || dir * resultName.compare(a.name, b.name) || i - j;
+    })
+    .map(([r]) => r);
+}
+
 /** Narrowest a result column can be dragged (px). */
 export const RESULT_COLUMN_MIN = 40;
 
@@ -864,10 +895,20 @@ export function searchUnder(location) {
 }
 
 /** The `search_start` request, or null for an empty query (the window clears its rows then). */
-export function searchRequest({ query, scope, location, archives }) {
+export function searchRequest({ query, scope, location, archives, text = "", caseSensitive = false }) {
   const q = query.trim();
+  // Containing text always searches the current folder (null when there is none: the backend
+  // says so); an empty name then means every file.
+  if (text) return { query: q, under: location ?? null, archives: false, limit: SEARCH_LIMIT, text, caseSensitive: Boolean(caseSensitive) };
   if (!q) return null;
   return { query: q, under: scope === "folder" ? location : null, archives: Boolean(archives), limit: SEARCH_LIMIT };
+}
+
+/** The name of a search's results list: the name query, or the text it looked for. */
+export function searchLabel(query, text) {
+  const q = query.trim();
+  if (!text) return q;
+  return q ? `${q} containing "${text}"` : `containing "${text}"`;
 }
 
 /** Where Enter on a result goes: its folder (inside an archive: the inner parent) and the cursor name. */

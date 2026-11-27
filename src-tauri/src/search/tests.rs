@@ -112,6 +112,7 @@ pub(super) fn run(
             under,
             archives,
             limit: 1000,
+            ..Default::default()
         })
         .unwrap();
     wait_for("search done", || {
@@ -233,6 +234,7 @@ fn newer_search_cancels_the_older_one() {
         under: Some(t.root()),
         archives: false,
         limit: 1000,
+        ..Default::default()
     };
     let old = t.svc.search_start(req("file")).unwrap();
     let new = t.svc.search_start(req("file")).unwrap();
@@ -260,6 +262,52 @@ fn newer_search_cancels_the_older_one() {
 }
 
 #[test]
+fn containing_text_walks_the_folder_and_needs_one() {
+    let t = service(&settings(None));
+    let dir = t.root.path().join("notes");
+    fs::create_dir(&dir).unwrap();
+    fs::write(dir.join("a.txt"), b"buy MILK today").unwrap();
+    fs::write(dir.join("b.md"), b"milk").unwrap();
+    fs::write(dir.join("c.txt"), b"nothing here").unwrap();
+    fs::create_dir(dir.join("milk")).unwrap(); // a folder named like the text is no hit
+    let req = |query: &str, text: &str, case_sensitive: bool| SearchReq {
+        query: query.into(),
+        under: Some(dir.to_string_lossy().into_owned()),
+        limit: 100,
+        text: text.into(),
+        case_sensitive,
+        ..Default::default()
+    };
+    let names = |id: u64| {
+        wait_for("content search done", || {
+            batches(&t.ev, id).iter().any(|b| b["done"] == true)
+        });
+        let mut n: Vec<String> = batches(&t.ev, id)
+            .iter()
+            .flat_map(|b| b["items"].as_array().cloned().unwrap_or_default())
+            .map(|i| i["name"].as_str().unwrap().to_string())
+            .collect();
+        n.sort();
+        n
+    };
+    let id = t.svc.search_start(req("", "milk", false)).unwrap();
+    assert_eq!(names(id), ["a.txt", "b.md"]);
+    let id = t.svc.search_start(req("*.txt", "milk", false)).unwrap();
+    assert_eq!(names(id), ["a.txt"]);
+    let id = t.svc.search_start(req("", "milk", true)).unwrap();
+    assert_eq!(names(id), ["b.md"]);
+    // Everywhere (no folder) is refused with a reason.
+    let err = t
+        .svc
+        .search_start(SearchReq {
+            under: None,
+            ..req("", "milk", false)
+        })
+        .unwrap_err();
+    assert!(err.contains("current folder"), "{err}");
+}
+
+#[test]
 fn under_without_index_walks() {
     let t = service(&settings(None));
     let (items, total, _) = run(&t, "hello", Some(t.root()), false);
@@ -276,6 +324,7 @@ fn under_without_index_walks() {
             under: None,
             archives: false,
             limit: 1000,
+            ..Default::default()
         })
         .unwrap_err();
     assert_eq!(err, "no index");
@@ -437,6 +486,7 @@ fn other_volumes_scan_unmount_and_disable() {
                 under: None,
                 archives: false,
                 limit: 10,
+                ..Default::default()
             })
             .unwrap();
         wait_for("done", || {
@@ -498,6 +548,7 @@ fn turning_off_drops_the_index() {
             under: None,
             archives: false,
             limit: 10,
+            ..Default::default()
         })
         .is_err());
 }
@@ -767,6 +818,7 @@ fn search_start_does_not_wait_for_the_index_lock() {
             under: None,
             archives: false,
             limit: 10,
+            ..Default::default()
         })
         .unwrap();
     assert!(start.elapsed() < Duration::from_millis(300));
