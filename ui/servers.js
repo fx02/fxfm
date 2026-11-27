@@ -31,6 +31,7 @@ import {
   operationPaths,
   operationSources,
   outdentNode,
+  reorderStep,
   parentList,
   parseModeOctal,
   parseRemote,
@@ -1150,7 +1151,7 @@ async function editServer(initial, { otherNames, save }) {
 /** The dialog's help text; the reorder keys are shown as the Mac keys in use (`mods`). */
 const help = (mods) => [
   "Enter or double click: connect to the selected server. Esc: close.",
-  `↑/↓: move the selection. ←/→: close or open a group. ${comboLabel("Ctrl+Up", mods)}/${comboLabel("Ctrl+Down", mods)} or dragging with the mouse: change the order (dropped on a group, an entry goes into it). ${comboLabel("Alt+Left", mods)}: take the entry out of its group. ${comboLabel("Alt+Right", mods)}: put it into the group right above it. Delete: delete the entry.`,
+  `↑/↓: move the selection. ←/→: close or open a group. ${comboLabel("Alt+Up", mods)}/${comboLabel("Alt+Down", mods)} or dragging with the mouse: change the order (dropped on a group, an entry goes into it). ${comboLabel("Alt+Left", mods)}: take the entry out of its group. ${comboLabel("Alt+Right", mods)}: put it into the group right above it. Delete: delete the entry.`,
   `Groups (New group…) keep many servers in order, up to ${GROUP_LEVELS} levels: a new group or connection goes into the selected group. Edit… renames a group.`,
   "New URL…: connect once without saving it, e.g. sftp://user@host:2222/var/www (also scp://, ftp:// and ftps://). Without a user name FTP logs in as anonymous.",
   "SMB (network share): macOS mounts the share into /Volumes and fxfm opens it like a disk; every saved share is also in the drive list (Alt+F1/Alt+F2) and the drive bar. Disconnect unmounts it.",
@@ -1678,9 +1679,10 @@ export async function showConnect() {
     } else if (e.key === "Tab") {
       e.preventDefault();
       cycleFocus(box, e);
-    } else if (tcModifiers(e, ctx.mods()).ctrl && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+    } else if (reorderStep(e, ctx.mods())) {
       e.preventDefault();
-      guarded(() => move(e.key === "ArrowUp" ? -1 : 1))();
+      const step = reorderStep(e, ctx.mods());
+      guarded(() => move(step))();
     } else if (tcModifiers(e, ctx.mods()).alt && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
       // Alt, not Ctrl: macOS takes Control+←/→ for switching Spaces.
       e.preventDefault();

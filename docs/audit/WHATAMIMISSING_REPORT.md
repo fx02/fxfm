@@ -35,6 +35,10 @@ Previous report: 2026-11-26 (7 gaps), reconciled below.
 
 ## Closed since 2026-11-26
 
+- Gap 2 (reorder keys): Alt+↑/↓ moves rows in Connect to server, Directory hotlist and colors by file type (0.1.23).
+- Gap 3 (core warnings): `fxfm_core::logging` writes `~/Library/Logs/fxfm/fxfm.log` (0.1.23).
+- Gap 4 (content search): shipped in 0.1.22.
+
 - The public repo lagging the local one (0.1.12 against 0.1.18): fx02/fxfm is at 0.1.22 since today. Only the release part remains (gap 1).
 
 ## By design (not gaps)

@@ -29,6 +29,13 @@ use std::time::Duration;
 use tauri::{Manager, RunEvent, WindowEvent};
 
 fn main() {
+    // Core warnings (a move that kept a source, a Trash or attribute failure) go to
+    // ~/Library/Logs/fxfm/fxfm.log and stderr.
+    if let Some(home) = std::env::var_os("HOME") {
+        fxfm_core::logging::init(&fxfm_core::logging::default_dir(std::path::Path::new(
+            &home,
+        )));
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())

@@ -2568,3 +2568,16 @@ test("Find files sort: header clicks cycle A→Z, Z→A, best match; folders sta
   assert.deepEqual(names({ by: "folder", desc: false }), ["zdir", "čaša.txt", "File2.txt", "file10.txt"]);
   assert.deepEqual(names({ by: "nonsense", desc: false }), rows.map((r) => r.name));
 });
+
+test("reorderStep: Alt or Ctrl with Up/Down moves a row; nothing else does", () => {
+  const map = { alt: "option", ctrl: "control" };
+  const k = (key, mods = {}) => ({ key, altKey: false, ctrlKey: false, metaKey: false, shiftKey: false, ...mods });
+  assert.equal(lib.reorderStep(k("ArrowUp", { altKey: true }), map), -1);
+  assert.equal(lib.reorderStep(k("ArrowDown", { altKey: true }), map), 1);
+  assert.equal(lib.reorderStep(k("ArrowDown", { ctrlKey: true }), map), 1);
+  assert.equal(lib.reorderStep(k("ArrowUp"), map), 0);
+  assert.equal(lib.reorderStep(k("ArrowLeft", { altKey: true }), map), 0);
+  // Command as Alt: Option alone does nothing then.
+  assert.equal(lib.reorderStep(k("ArrowUp", { metaKey: true }), { alt: "command", ctrl: "control" }), -1);
+  assert.equal(lib.reorderStep(k("ArrowUp", { altKey: true }), { alt: "command", ctrl: "control" }), 0);
+});

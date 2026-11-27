@@ -1307,6 +1307,18 @@ export function fitWindow(r, vw, vh, min) {
   };
 }
 
+/**
+ * Moving a row in a list dialog (Connect to server, Directory hotlist, colors by file type): -1
+ * for Alt+Up, 1 for Alt+Down, else 0. Ctrl+Up/Down works too, but macOS keeps Control+arrows
+ * for Mission Control by default, so Alt is the one shown.
+ */
+export function reorderStep(e, map) {
+  if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return 0;
+  const m = tcModifiers(e, map);
+  if (!m.alt && !m.ctrl) return 0;
+  return e.key === "ArrowUp" ? -1 : 1;
+}
+
 /** Connect to server: groups hold servers and groups, at most this many levels deep. */
 export const GROUP_LEVELS = 3;
 

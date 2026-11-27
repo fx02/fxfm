@@ -17,6 +17,7 @@ import {
   relocateNode,
   remoteRoot,
   selectedPosition,
+  reorderStep,
   tcModifiers,
   toggleHidden,
   visibleNodes,
@@ -278,7 +279,7 @@ export function configureHotlist() {
   const close = () => popModal(modal);
   const up = mkBtn("↑", () => move(-1));
   const down = mkBtn("↓", () => move(1));
-  up.title = down.title = `Move item (${comboLabel("Ctrl+Up", ctx.mods())} / ${comboLabel("Ctrl+Down", ctx.mods())})`;
+  up.title = down.title = `Move item (${comboLabel("Alt+Up", ctx.mods())} / ${comboLabel("Alt+Down", ctx.mods())})`;
   up.classList.add("mv");
   down.classList.add("mv");
   head.insertBefore(up, count);
@@ -490,9 +491,9 @@ export function configureHotlist() {
       let i = items.indexOf(document.activeElement);
       i = e.shiftKey ? (i <= 0 ? items.length - 1 : i - 1) : (i + 1) % items.length;
       items[i].focus();
-    } else if (tcModifiers(e, ctx.mods()).ctrl && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+    } else if (reorderStep(e, ctx.mods())) {
       e.preventDefault();
-      move(e.key === "ArrowUp" ? -1 : 1);
+      move(reorderStep(e, ctx.mods()));
     } else if (document.activeElement === list && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
       e.preventDefault();
       moveSel(e.key === "ArrowUp" ? -1 : 1);

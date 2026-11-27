@@ -7,6 +7,7 @@ pub mod config;
 pub mod hotlist;
 pub mod keymap;
 pub mod listing;
+pub mod logging;
 pub mod multirename;
 pub mod ops;
 pub mod process;

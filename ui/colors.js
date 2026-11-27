@@ -2,7 +2,7 @@
 // file type" dialog. Nothing here saves: the Options dialog's OK does.
 
 import { el, cycleFocus, frame } from "./dom.js";
-import { comboLabel, compileTypeRules, dragStarted, moveNode, relocateNode, rowStyle, tcModifiers } from "./lib.mjs";
+import { comboLabel, compileTypeRules, dragStarted, moveNode, relocateNode, reorderStep, rowStyle } from "./lib.mjs";
 import { dialog, popModal, pushModal } from "./dialogs.js";
 
 function button(label, fn) {
@@ -324,7 +324,7 @@ export function editTypeRules(rules, colors, mods) {
       list.focus();
     };
 
-    const keys = `${comboLabel("Ctrl+Up", mods())} / ${comboLabel("Ctrl+Down", mods())}`;
+    const keys = `${comboLabel("Alt+Up", mods())} / ${comboLabel("Alt+Down", mods())}`;
     const addBtn = button("Add…", add);
     const editBtn = button("Edit…", edit);
     const delBtn = button("Delete", del);
@@ -350,9 +350,9 @@ export function editTypeRules(rules, colors, mods) {
       } else if (e.key === "Tab") {
         e.preventDefault();
         cycleFocus(box, e, ", .typelist");
-      } else if (tcModifiers(e, mods()).ctrl && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+      } else if (reorderStep(e, mods())) {
         e.preventDefault();
-        move(e.key === "ArrowUp" ? -1 : 1);
+        move(reorderStep(e, mods()));
       } else if (onList && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
         e.preventDefault();
         moveSel(sel + (e.key === "ArrowUp" ? -1 : 1));
