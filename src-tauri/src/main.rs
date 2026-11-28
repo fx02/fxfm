@@ -18,6 +18,7 @@ mod keychain;
 mod launch;
 mod menu;
 mod openwith;
+mod quit;
 mod remote;
 mod search;
 mod smb;
@@ -58,6 +59,7 @@ fn main() {
         .on_menu_event(menu::on_event)
         .invoke_handler(tauri::generate_handler![
             commands::bootstrap,
+            quit::quit_app,
             commands::list_dir,
             commands::list_volumes,
             commands::nearest_existing,
@@ -148,8 +150,12 @@ fn main() {
             // Closing the main window (Exit, Alt+F4, red button) quits fxfm,
             // also with F3 viewer windows still open. `exit` runs ExitRequested
             // and Exit, so jobs are cancelled and the session is flushed.
-            if window.label() == "main" && matches!(event, WindowEvent::CloseRequested { .. }) {
-                window.app_handle().exit(0);
+            if window.label() == "main" {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    // With operations running the window asks first (quit::request).
+                    api.prevent_close();
+                    quit::request(window.app_handle());
+                }
             }
         })
         .build(tauri::generate_context!())

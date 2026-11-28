@@ -4,6 +4,8 @@ How to install and use fxfm. What it does in short: [README](../README.md).
 
 ## Installation
 
+### macOS
+
 Requires macOS 15 (Sequoia) or later; one universal app for Apple Silicon and Intel Macs.
 Download `fxfm_<version>_universal.dmg` from the [Releases](https://github.com/fx02/fxfm/releases)
 page, open it and drag `fxfm.app` into Applications (or into a folder of its own for the
@@ -18,6 +20,43 @@ xattr -dr com.apple.quarantine /Applications/fxfm.app
 
 or try to open fxfm, then click "Open Anyway" in System Settings → Privacy & Security.
 
+### Linux (Ubuntu, Pop!_OS, Mint, Debian)
+
+Download `fxfm_<version>_amd64.deb` (Intel/AMD PCs) or `fxfm_<version>_arm64.deb` (ARM) and
+install it with its dependencies:
+
+```sh
+sudo apt install ./fxfm_<version>_amd64.deb
+```
+
+It runs on Ubuntu 22.04 or later, Pop!_OS 22.04 or later, Linux Mint 21 or later and Debian 12 or later (built on Ubuntu 22.04: WebKitGTK 4.1, glibc 2.35) and `secret-tool` for saved
+passwords (installed with it). Recommended, also installed by `apt` unless turned off:
+`gvfs-backends` (mounting SMB shares), `smbclient` (*Shares…* in the server editor),
+`avahi-utils` (finding computers on the network) and `fontconfig` (the font list).
+
+What differs from the Mac:
+
+- **Keys**: Alt and Ctrl are the PC keys; Configuration → Keyboard offers Alt, Ctrl and Super
+  for TC's Alt and Ctrl (there is no Fn key for programs). Labels read `Alt+F5`, `Ctrl+Q`.
+  Quick search is TC's Alt+letters by default. A desktop may keep some keys for itself
+  (e.g. Super combinations, Ctrl+Alt+arrows).
+- **Passwords** go to the Secret Service (GNOME Keyring, KWallet) instead of the Keychain.
+- **SMB shares** are mounted with gvfs, as the file managers do (under
+  `/run/user/<uid>/gvfs`); kernel CIFS mounts in the mount table are used as they are.
+- **Icons** come from the desktop's icon theme (Options → View → Icons → *System icons*); the
+  macOS folder icon choices are not offered.
+- **Show in file manager**, **Open with** and **Quick Look** use the desktop: the file
+  manager's own selection (Nautilus, Dolphin, Nemo…), the applications registered for the type,
+  and GNOME's previewer (Sushi) when installed (else the default application).
+- **Clipboard and drag**: Copy/Cut/Paste and dragging out work with the file managers
+  (`text/uri-list`); items from archives and servers are written to a temporary folder when
+  the receiver asks for them.
+- **Find files**: the live index watches the home folder (inotify); the rest of the disk is
+  refreshed by the timer. `/proc`, `/sys`, `/dev`, `/run`, `/tmp`, `/media` and `/mnt` are not
+  indexed (other volumes are indexed on their own when enabled).
+- **Data**: settings in `~/.local/share/fxfm`, the log in `~/.local/state/fxfm/fxfm.log`,
+  temporary files in `~/.cache/fxfm`.
+
 ## Where the data lives
 
 Settings are four JSON files: `settings.json`, `session.json`, `keymap.json` and `hotlist.json`. They can be edited by hand (while fxfm is not running).
@@ -25,7 +64,7 @@ Settings are four JSON files: `settings.json`, `session.json`, `keymap.json` and
 - **Portable**: an `fxfm-data/` folder next to `fxfm.app`, if it exists and is writable.
 - **System** (otherwise): `~/Library/Application Support/fxfm/`.
 
-**Log**: warnings and errors (for example a move that kept a source file because it changed during the copy, or a Trash step that failed) go to `~/Library/Logs/fxfm/fxfm.log` (also in Console.app → Log Reports); past 2 MB it becomes `fxfm.old.log`, so it stays under about 4 MB. It never holds passwords.
+**Log**: warnings and errors (for example a move that kept a source file because it changed during the copy, or a Trash step that failed) go to `~/Library/Logs/fxfm/fxfm.log` (also in Console.app → Log Reports; on Linux `~/.local/state/fxfm/fxfm.log`); past 2 MB it becomes `fxfm.old.log`, so it stays under about 4 MB. It never holds passwords.
 
 The mode is changed in Configuration → Options → Storage (Apply). fxfm then copies all settings to the new location. When switching from portable to system, the old folder stays as `fxfm-data.old`.
 
@@ -112,6 +151,12 @@ Configuration → Options → View → **Font** sets the font of the panel lists
 
 - **Ctrl+S** opens a filter box above the panel's status line: the list shows only the names that contain the typed text, or that match a mask with `*`/`?` (several masks split by `;`, e.g. `*.pdf;*.docx`); the box shows how many items are left. **Enter**, **Tab**, **Up**/**Down** go back to the list and keep the filter; **Escape** clears it. Moving to another folder clears it too. Hidden items lose their marks, so no command acts on what is not shown.
 - **Alt+Left** / **Alt+Right** go back / forward through the folders visited in that panel (50 places); **Alt+Down** lists the earlier folders, newest first. Each panel has its own history; it is not kept after quitting.
+
+## Operations in the background and the queue
+
+- **Background**: every progress window (copy, move, delete, pack…) has a *Background* button (**F2**). The window goes and the operation runs on while you keep working; a row above the function keys shows what it is doing (`Copying big.iso 45%`). A click on that row brings the progress window back (with Cancel). Questions (file exists, errors) still come up when they happen. Several operations can run at the same time.
+- **Queue**: the F5/F6 dialog has a *Queue* button (**F2**, as in TC). The copy or move then waits in a queue and runs in the background when the ones queued before it are done, one after the other (start several large copies to a share and let them run in turn). Queuing clears the marks. The row above the function keys counts the queued ones (`· 2 queued`); its × removes the ones still waiting (the running one goes on).
+- **Quitting** (Cmd+Q, Exit, the red button) while operations run asks first: *Quit* cancels them (a cancelled copy removes what it had written), *Keep working* keeps fxfm open. A second Quit within 5 seconds quits without asking. Quitting from the Dock or logging out cancels them without asking.
 
 ## Undo (Ctrl+Z)
 
@@ -211,6 +256,11 @@ Configuration → Options → *Colors* works like TC's Configuration → Color p
 
 ## Notes
 
+- **Marking with the mouse** (as in TC): **Ctrl+click** (also Cmd+click on a Mac) marks or unmarks one entry, **Shift+click** marks everything from the cursor to the clicked entry. On a Mac, Control+click marks instead of opening the right-click menu (the right button still opens it).
+- **Moving with F2** (as in TC): typing a path instead of a name moves the item there: `../name` one folder up, `../../name` two up, `sub/name` into the folder `sub`, a trailing `/` keeps the name (`../`), and an absolute path (`/Users/me/x`) on a local disk. It is the same move as F6 (conflicts are asked, Undo works); files and folders alike, also inside archives and on a server (there only within that server).
+- **Text fields** (F2 rename, questions, the command line, Find files) on a Mac: **Fn+←/→** (Home/End) and **⌘←/→** go to the start/end, **⌥←/→** one word left/right; with **Shift** they select.
+- **Buttons in questions**: **←/→** go from button to button (e.g. *File exists*: → then Enter is *Overwrite all*), as in TC.
+- **Panel widths**: drag the bar between the two panels to give one more room (from 10/90 to 90/10, as in TC); a double click on it returns to 50/50, and a right click offers 20/80 to 80/20 in steps of ten. The split is kept for the next start.
 - **Dark mode**: the menus, dialogs and window chrome follow the macOS appearance (light or dark); the panel colors are set in Configuration → Options → Colors.
 - **Icons**: Configuration → Options → View → *Icons* chooses the row icons: *Finder* (default) uses the icons macOS shows in Finder — the folder icon, each file type's icon and an application's own icon — with the special folders (Desktop, Documents, Downloads, Applications, Library, the home folder…) in their own Finder icons and, under *Folder icon*, a choice of macOS's own folder icons for the other folders (Smart, Burn, Group, System, Library, Developer… and one-color sidebar glyphs drawn in the panel's font color; they are read from the Mac, not shipped with fxfm); *Classic* fxfm's own drawn icons with yellow folders (TC style), *Outline* the same shapes as plain lines in the panel's font color, and *Emoji* the older emoji icons.
 - **What the window shows**: Configuration → Options → View turns on or off the command line, the function key bar, the drive button bar (off by default; the drive dropdown and Alt+F1 / Alt+F2 stay), each panel's header (drive dropdown, free space, path) and each panel's status line. With all of them off only the file lists are left; Alt+F1 / Alt+F2 then opens the drive menu at the panel's corner, and quick search still shows its box while typing.

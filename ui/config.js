@@ -9,6 +9,7 @@ import {
   formatDate,
   keyRows,
   MAC_KEYS,
+  IS_LINUX,
   QUICK_SEARCH_KEYS,
   quickSearchMode,
   modifierChoiceError,
@@ -106,7 +107,9 @@ function captureKey(label) {
         return;
       }
       if (combo.includes("Cmd+")) {
-        note.textContent = "Command shortcuts belong to macOS; use the keys chosen for Alt and Ctrl.";
+        note.textContent = IS_LINUX
+          ? "Super shortcuts belong to the desktop; use the keys chosen for Alt and Ctrl."
+          : "Command shortcuts belong to macOS; use the keys chosen for Alt and Ctrl.";
         return;
       }
       finish(combo);
@@ -149,7 +152,7 @@ export function configureKeyboard() {
     "hint",
     "Fn: on keyboards where the F-keys need Fn, Fn+F5 then gives Alt+F5 (or Ctrl+F5); switch the F-keys to standard function keys in System Settings → Keyboard. Fn shortcuts macOS uses (Fn+E, Fn+F, Fn+Q…) stay with macOS.",
   );
-  const showFnNote = () => (fnNote.hidden = altSel.value !== "fn" && ctrlSel.value !== "fn");
+  const showFnNote = () => (fnNote.hidden = IS_LINUX || (altSel.value !== "fn" && ctrlSel.value !== "fn"));
   showFnNote();
   altSel.addEventListener("change", showFnNote);
   ctrlSel.addEventListener("change", showFnNote);
@@ -503,6 +506,8 @@ export function configureOptions() {
   showPreview();
   const folderLabel = el("label", "opt");
   folderLabel.append("Folder icon (Finder icons): ", folderSel, preview);
+  // macOS's own folder icons (CoreTypes) do not exist on Linux.
+  folderLabel.hidden = IS_LINUX;
   const syncFolder = () => {
     folderSel.disabled = iconSel.value !== "finder";
   };

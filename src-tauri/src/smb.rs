@@ -65,6 +65,7 @@ fn cstr(b: &[libc::c_char]) -> String {
 }
 
 /// File system types of network volumes.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub const NETWORK_FS: [&str; 4] = ["smbfs", "afpfs", "nfs", "webdav"];
 
 /// Mounted smbfs volumes, with their space as the mount table has it.
@@ -85,7 +86,78 @@ pub fn smb_mounts() -> Vec<SmbMount> {
         .collect()
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+pub fn smb_mounts() -> Vec<SmbMount> {
+    let (mounts, gvfs_dir, gvfs) = linux_mount_sources();
+    linux_smb_mounts(&mounts, &gvfs_dir, &gvfs)
+        .into_iter()
+        .map(|(from, on)| {
+            let (total, free) =
+                fxfm_core::volumes::space(std::path::Path::new(&on)).unwrap_or((0, 0));
+            SmbMount {
+                from,
+                on,
+                total,
+                free,
+            }
+        })
+        .collect()
+}
+
+/// `/proc/self/mounts`, the gvfs folder and the names in it.
+#[cfg(target_os = "linux")]
+fn linux_mount_sources() -> (String, String, Vec<String>) {
+    let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
+    // SAFETY: getuid cannot fail.
+    let gvfs_dir = format!("/run/user/{}/gvfs", unsafe { libc::getuid() });
+    let gvfs = std::fs::read_dir(&gvfs_dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    (mounts, gvfs_dir, gvfs)
+}
+
+/// Linux SMB mounts as `(mntfrom, mount point)`: kernel CIFS mounts (`//host/share` in the
+/// mount table) and shares mounted by gvfs (GNOME, `smb-share:server=…,share=…[,user=…]
+/// [,domain=…]` folders), whose mntfrom is written as macOS would (`//[domain;user@]host/share`).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_smb_mounts(mounts: &str, gvfs_dir: &str, gvfs: &[String]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for line in mounts.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() >= 3 && matches!(f[2], "cifs" | "smb3") {
+            let unesc = |s: &str| s.replace("\\040", " ").replace("\\134", "\\");
+            out.push((unesc(f[0]).replace('\\', "/"), unesc(f[1])));
+        }
+    }
+    for name in gvfs {
+        let Some(rest) = name.strip_prefix("smb-share:") else {
+            continue;
+        };
+        let field = |k: &str| {
+            rest.split(',')
+                .find_map(|p| p.strip_prefix(&format!("{k}=")).map(str::to_string))
+        };
+        let (Some(server), Some(share)) = (field("server"), field("share")) else {
+            continue;
+        };
+        let user = match (field("domain"), field("user")) {
+            (Some(d), Some(u)) => format!("{d};{u}@"),
+            (None, Some(u)) => format!("{u}@"),
+            _ => String::new(),
+        };
+        out.push((
+            format!("//{user}{server}/{share}"),
+            format!("{gvfs_dir}/{name}"),
+        ));
+    }
+    out
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn smb_mounts() -> Vec<SmbMount> {
     Vec::new()
 }
@@ -104,7 +176,25 @@ pub fn network_mounts() -> Vec<(String, String, String)> {
         .collect()
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Mounted network volumes (CIFS/SMB, NFS, gvfs shares) as (mount point, fstype, mntfrom);
+/// the fstype is named as on macOS (`smbfs`, `nfs`).
+#[cfg(target_os = "linux")]
+pub fn network_mounts() -> Vec<(String, String, String)> {
+    let (mounts, gvfs_dir, gvfs) = linux_mount_sources();
+    let mut out: Vec<(String, String, String)> = linux_smb_mounts(&mounts, &gvfs_dir, &gvfs)
+        .into_iter()
+        .map(|(from, on)| (on, "smbfs".to_string(), from))
+        .collect();
+    for line in mounts.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() >= 3 && matches!(f[2], "nfs" | "nfs4") {
+            out.push((f[1].replace("\\040", " "), "nfs".into(), f[0].to_string()));
+        }
+    }
+    out
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn network_mounts() -> Vec<(String, String, String)> {
     Vec::new()
 }
@@ -307,21 +397,148 @@ pub fn mount(entry: &ServerEntry, password: Option<&str>) -> Result<PathBuf, Con
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Linux: mounts the share with gvfs (as the file managers do) and returns its folder under
+/// `/run/user/<uid>/gvfs`. The login is answered by a mount operation in code (the password is
+/// never an argument, never saved by gvfs); a guest gets an anonymous login; a Kerberos entry
+/// answers no password, so gvfs uses the ticket. Runs its own GLib main loop on this thread.
+/// Blocking, at most 60 s.
+#[cfg(target_os = "linux")]
+pub fn mount(entry: &ServerEntry, password: Option<&str>) -> Result<PathBuf, ConnectError> {
+    use fxfm_core::servers::{smb_url, smb_user};
+    use gtk::gio::{self, prelude::*};
+    use gtk::glib;
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+
+    if let Some(p) = find_mount(entry) {
+        return Ok(p);
+    }
+    let url = smb_url(entry);
+    let user = smb_user(&entry.user);
+    let login = !user.is_empty() && !entry.kerberos;
+    if login && password.is_none() {
+        return Err(ConnectError::NeedPassword);
+    }
+    let (domain, name) = match user.split_once(';') {
+        Some((d, n)) => (Some(d.to_string()), n.to_string()),
+        None => (None, user.clone()),
+    };
+    let password = password.map(str::to_string);
+    let ctx = glib::MainContext::new();
+    let outcome = ctx
+        .with_thread_default(|| {
+            let ml = glib::MainLoop::new(Some(&ctx), false);
+            let op = gio::MountOperation::new();
+            op.set_password_save(gio::PasswordSave::Never);
+            if login {
+                op.set_username(Some(&name));
+                op.set_domain(domain.as_deref());
+                op.set_password(password.as_deref());
+            }
+            let asked = Rc::new(Cell::new(0u32));
+            let a = asked.clone();
+            op.connect_ask_password(move |op, _msg, _user, _domain, flags| {
+                a.set(a.get() + 1);
+                // A second question means the first answer was rejected.
+                if a.get() > 1 || entry_is_kerberos_without_answer(login, flags) {
+                    op.reply(gio::MountOperationResult::Aborted);
+                    return;
+                }
+                if !login && flags.contains(gio::AskPasswordFlags::ANONYMOUS_SUPPORTED) {
+                    op.set_anonymous(true);
+                }
+                op.reply(gio::MountOperationResult::Handled);
+            });
+            let result: Rc<RefCell<Option<Result<(), glib::Error>>>> = Rc::default();
+            let r = result.clone();
+            let m = ml.clone();
+            gio::File::for_uri(&url).mount_enclosing_volume(
+                gio::MountMountFlags::NONE,
+                Some(&op),
+                gio::Cancellable::NONE,
+                move |res| {
+                    *r.borrow_mut() = Some(res);
+                    m.quit();
+                },
+            );
+            let m = ml.clone();
+            let timer = glib::timeout_source_new(
+                std::time::Duration::from_secs(60),
+                None,
+                glib::Priority::DEFAULT,
+                move || {
+                    m.quit();
+                    glib::ControlFlow::Break
+                },
+            );
+            timer.attach(Some(&ctx));
+            ml.run();
+            timer.destroy();
+            let res = result.borrow_mut().take();
+            (res, asked.get())
+        })
+        .map_err(|e| ConnectError::Failed(format!("Cannot mount the share: {e}")))?;
+    match outcome {
+        (None, _) => Err(ConnectError::Failed(SMB_TIMEOUT.to_string())),
+        (Some(Ok(())), _) => find_mount(entry)
+            .ok_or_else(|| ConnectError::Failed("The share was mounted, but not found".into())),
+        (Some(Err(e)), _) if e.matches(gio::IOErrorEnum::AlreadyMounted) => find_mount(entry)
+            .ok_or_else(|| {
+                ConnectError::Failed("The share is mounted, but its folder was not found".into())
+            }),
+        (Some(Err(_)), asked) if asked > 1 => Err(ConnectError::AuthFailed),
+        (Some(Err(e)), _) if e.matches(gio::IOErrorEnum::PermissionDenied) => Err(if login {
+            ConnectError::AuthFailed
+        } else {
+            ConnectError::Failed(SMB_NO_GUEST.to_string())
+        }),
+        (Some(Err(e)), _) if e.matches(gio::IOErrorEnum::NotFound) => Err(ConnectError::Failed(
+            "The share was not found on the server".into(),
+        )),
+        (Some(Err(e)), _) if e.matches(gio::IOErrorEnum::TimedOut) => {
+            Err(ConnectError::Failed(SMB_TIMEOUT.to_string()))
+        }
+        (Some(Err(e)), _) => Err(ConnectError::Failed(format!(
+            "Cannot mount the share: {}",
+            e.message()
+        ))),
+    }
+}
+
+/// A Kerberos entry answers nothing: asked for a password, it gives up (no ticket, or rejected).
+#[cfg(target_os = "linux")]
+fn entry_is_kerberos_without_answer(login: bool, flags: gtk::gio::AskPasswordFlags) -> bool {
+    !login && !flags.contains(gtk::gio::AskPasswordFlags::ANONYMOUS_SUPPORTED)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn mount(_entry: &ServerEntry, _password: Option<&str>) -> Result<PathBuf, ConnectError> {
     Err(ConnectError::Failed(
-        "SMB shares can only be mounted on macOS".into(),
+        "SMB shares cannot be mounted here".into(),
     ))
 }
 
-/// `diskutil unmount <mount point>` (never forced). The error is diskutil's own text, e.g.
-/// when a file on the share is still open.
+/// Unmounts a share (never forced): `diskutil unmount` on macOS; on Linux `gio mount -u` for a
+/// gvfs share, else `umount` (a kernel CIFS mount the user may unmount). The error is the
+/// tool's own text, e.g. when a file on the share is still open.
 pub fn unmount(mount_point: &std::path::Path) -> Result<(), String> {
-    let out = std::process::Command::new("/usr/sbin/diskutil")
-        .arg("unmount")
-        .arg(mount_point)
+    let (tool, args): (&str, Vec<&std::ffi::OsStr>) = if cfg!(target_os = "macos") {
+        (
+            "/usr/sbin/diskutil",
+            vec!["unmount".as_ref(), mount_point.as_os_str()],
+        )
+    } else if mount_point.to_string_lossy().contains("/gvfs/") {
+        (
+            "gio",
+            vec!["mount".as_ref(), "-u".as_ref(), mount_point.as_os_str()],
+        )
+    } else {
+        ("umount", vec![mount_point.as_os_str()])
+    };
+    let out = std::process::Command::new(tool)
+        .args(&args)
         .output()
-        .map_err(|e| format!("Cannot run diskutil: {e}"))?;
+        .map_err(|e| format!("Cannot run {tool}: {e}"))?;
     if out.status.success() {
         return Ok(());
     }
@@ -474,6 +691,77 @@ pub fn parse_resolve(out: &str) -> Option<String> {
     (!host.is_empty()).then(|| host.to_string())
 }
 
+/// Linux: resolved SMB services of `avahi-browse -rpt _smb._tcp` (`=;iface;proto;name;type;
+/// domain;host;address;port;txt` lines; `\\DDD` decimal escapes in the name), each host once.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn parse_avahi(out: &str) -> Vec<SmbHost> {
+    let unescape = |s: &str| {
+        let b = s.as_bytes();
+        let mut v = Vec::new();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'\\' && i + 4 <= b.len() && b[i + 1..i + 4].iter().all(u8::is_ascii_digit) {
+                let n = (b[i + 1] - b'0') as u32 * 100
+                    + (b[i + 2] - b'0') as u32 * 10
+                    + (b[i + 3] - b'0') as u32;
+                if n < 256 {
+                    v.push(n as u8);
+                    i += 4;
+                    continue;
+                }
+            }
+            v.push(b[i]);
+            i += 1;
+        }
+        String::from_utf8_lossy(&v).into_owned()
+    };
+    let mut hosts: Vec<SmbHost> = Vec::new();
+    for line in out.lines() {
+        let f: Vec<&str> = line.split(';').collect();
+        if f.len() < 9 || f[0] != "=" {
+            continue;
+        }
+        let host = f[6].trim_end_matches('.').to_string();
+        if host.is_empty() || hosts.iter().any(|h| h.host == host) {
+            continue;
+        }
+        hosts.push(SmbHost {
+            name: unescape(f[3]),
+            host,
+            address: None,
+        });
+    }
+    hosts
+}
+
+/// `avahi-browse -rpt _smb._tcp` output, stopped after `wait` at the latest (empty without Avahi).
+#[cfg(target_os = "linux")]
+fn avahi_browse(wait: std::time::Duration) -> String {
+    use std::io::Read;
+    let Ok(mut child) = std::process::Command::new("avahi-browse")
+        .args(["-rpt", "_smb._tcp"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return String::new();
+    };
+    let start = std::time::Instant::now();
+    while start.elapsed() < wait {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let _ = child.kill();
+    let mut out = String::new();
+    if let Some(mut so) = child.stdout.take() {
+        let _ = so.read_to_string(&mut out);
+    }
+    let _ = child.wait();
+    out
+}
+
 /// Output of `dns-sd args…` after `wait` (dns-sd never ends on its own).
 fn dns_sd(args: &[&str], wait: std::time::Duration) -> String {
     use std::io::Read;
@@ -501,6 +789,12 @@ fn dns_sd(args: &[&str], wait: std::time::Duration) -> String {
 pub async fn smb_browse() -> Vec<SmbHost> {
     tauri::async_runtime::spawn_blocking(|| {
         let netbios = std::thread::spawn(netbios_hosts);
+        #[cfg(target_os = "linux")]
+        {
+            let bonjour = parse_avahi(&avahi_browse(std::time::Duration::from_secs(4)));
+            return merge_hosts(bonjour, netbios.join().unwrap_or_default(), &resolve_cached);
+        }
+        #[allow(unreachable_code)]
         let names = parse_browse(&dns_sd(
             &["-B", "_smb._tcp", "local."],
             std::time::Duration::from_millis(1800),
@@ -617,6 +911,46 @@ pub fn view_args(entry: &ServerEntry) -> Vec<String> {
     }
     args.push(fxfm_core::servers::smb_server_url(entry));
     args
+}
+
+/// `smbclient -L` arguments (Linux): machine-readable output (`-g`); a guest or Kerberos never
+/// gets a prompt (`-N`, `--use-kerberos=required`), a user is asked for the password on the
+/// terminal. Never holds a password.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub fn smbclient_args(entry: &ServerEntry) -> Vec<String> {
+    let user = fxfm_core::servers::smb_user(&entry.user);
+    let host = entry.host.trim();
+    let mut args = vec!["-g".to_string(), "-L".to_string(), format!("//{host}")];
+    if entry.port != 0 && entry.port != 445 {
+        args.extend(["-p".into(), entry.port.to_string()]);
+    }
+    if entry.kerberos {
+        args.extend(["--use-kerberos=required".into(), "-N".into()]);
+    } else if user.is_empty() {
+        args.push("-N".into());
+    } else {
+        // DOMAIN;user → DOMAIN\user, as smbclient writes it.
+        args.extend(["-U".into(), user.replace(';', "\\")]);
+    }
+    args
+}
+
+/// Disk shares of `smbclient -g -L` output (`Disk|name|comment` lines), hidden ones last.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub fn parse_smbclient(out: &str) -> Vec<ShareName> {
+    let mut shares: Vec<ShareName> = out
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.splitn(3, '|');
+            (f.next()? == "Disk").then(|| ShareName {
+                name: f.next().unwrap_or("").to_string(),
+                comment: f.next().unwrap_or("").trim().to_string(),
+            })
+        })
+        .filter(|s| !s.name.is_empty())
+        .collect();
+    shares.sort_by_key(|s| s.name.ends_with('$'));
+    shares
 }
 
 /// smbutil's error text for the UI ("smbutil: " and the call it failed in left out).
@@ -795,12 +1129,35 @@ pub fn list_shares(entry: &ServerEntry, password: Option<&str>) -> Result<Vec<Sh
     if login && password.is_none() {
         return Err("Enter the password".into());
     }
-    let run = run_with_tty_password(
-        "/usr/bin/smbutil",
-        &view_args(entry),
+    let (program, args) = if cfg!(target_os = "macos") {
+        ("/usr/bin/smbutil", view_args(entry))
+    } else {
+        ("smbclient", smbclient_args(entry))
+    };
+    let run = match run_with_tty_password(
+        program,
+        &args,
         password.filter(|_| login),
         std::time::Duration::from_secs(20),
-    )?;
+    ) {
+        Err(e) if !cfg!(target_os = "macos") && e.contains("No such file") => {
+            return Err("Shares… needs smbclient (install the smbclient package)".into())
+        }
+        r => r?,
+    };
+    if !cfg!(target_os = "macos") {
+        if run.timed_out {
+            return Err(SMB_TIMEOUT.to_string());
+        }
+        if run.prompts > 1 || run.stdout.contains("NT_STATUS_LOGON_FAILURE") {
+            return Err("The user name or password was not accepted".into());
+        }
+        let shares = parse_smbclient(&run.stdout);
+        if run.code != Some(0) && shares.is_empty() {
+            return Err(view_error(&format!("{}{}", run.stderr, run.stdout)));
+        }
+        return Ok(shares);
+    }
     if run.timed_out {
         return Err(SMB_TIMEOUT.to_string());
     }
@@ -1399,6 +1756,87 @@ fn links_for(mounts: &[SmbMount], paths: &[String]) -> Vec<Option<ShareLink>> {
                 .map(|(_, (smb, windows))| ShareLink { smb, windows })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod linux_tests {
+    use super::*;
+
+    #[test]
+    fn linux_mounts_and_gvfs_shares_read_as_mntfrom() {
+        let mounts = "//nas/music /mnt/music cifs rw 0 0\n//pc/My\\040Docs /home/me/docs smb3 rw 0 0\n/dev/sda1 / ext4 rw 0 0\n";
+        let gvfs = vec![
+            "smb-share:server=nas.local,share=media,user=me".to_string(),
+            "smb-share:domain=CORP,server=fs1,share=Team,user=ann".to_string(),
+            "sftp:host=web".to_string(),
+        ];
+        let got = linux_smb_mounts(mounts, "/run/user/1000/gvfs", &gvfs);
+        assert_eq!(
+            got,
+            [
+                ("//nas/music".to_string(), "/mnt/music".to_string()),
+                ("//pc/My Docs".to_string(), "/home/me/docs".to_string()),
+                (
+                    "//me@nas.local/media".to_string(),
+                    "/run/user/1000/gvfs/smb-share:server=nas.local,share=media,user=me"
+                        .to_string()
+                ),
+                (
+                    "//CORP;ann@fs1/Team".to_string(),
+                    "/run/user/1000/gvfs/smb-share:domain=CORP,server=fs1,share=Team,user=ann"
+                        .to_string()
+                ),
+            ]
+        );
+        // They match the saved entries like macOS mounts do.
+        assert_eq!(
+            fxfm_core::servers::parse_mntfrom(&got[3].0),
+            Some(("fs1".to_string(), "Team".to_string()))
+        );
+    }
+
+    #[test]
+    fn smbclient_arguments_and_output() {
+        let mut e = ServerEntry {
+            host: "nas".into(),
+            port: 445,
+            user: "CORP\\ann".into(),
+            ..ServerEntry::default()
+        };
+        assert_eq!(smbclient_args(&e), ["-g", "-L", "//nas", "-U", "CORP\\ann"]);
+        e.user.clear();
+        e.port = 1445;
+        assert_eq!(
+            smbclient_args(&e),
+            ["-g", "-L", "//nas", "-p", "1445", "-N"]
+        );
+        e.kerberos = true;
+        assert!(smbclient_args(&e).contains(&"--use-kerberos=required".to_string()));
+        let out = "Disk|media|Music and films\nIPC|IPC$|IPC Service\nDisk|admin$|\nPrinter|hp|Office\nDisk|backup|\n";
+        let names: Vec<_> = parse_smbclient(out)
+            .into_iter()
+            .map(|s| (s.name, s.comment))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("media".to_string(), "Music and films".to_string()),
+                ("backup".to_string(), String::new()),
+                ("admin$".to_string(), String::new()),
+            ]
+        );
+    }
+
+    #[test]
+    fn avahi_lines_give_hosts_once() {
+        let out = "+;eth0;IPv4;My\\032NAS;_smb._tcp;local\n=;eth0;IPv4;My\\032NAS;_smb._tcp;local;nas.local;192.168.1.5;445;\n=;eth0;IPv6;My\\032NAS;_smb._tcp;local;nas.local;fe80::1;445;\n=;eth0;IPv4;pc;_smb._tcp;local;pc.local.;192.168.1.6;445;\n";
+        let hosts = parse_avahi(out);
+        let got: Vec<_> = hosts
+            .iter()
+            .map(|h| (h.name.as_str(), h.host.as_str()))
+            .collect();
+        assert_eq!(got, [("My NAS", "nas.local"), ("pc", "pc.local")]);
+    }
 }
 
 #[cfg(test)]

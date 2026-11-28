@@ -60,7 +60,10 @@ fn put_back(now: &Path, was: &Path) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
     match fs::rename(now, was) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            forget_trash_info(now);
+            Ok(())
+        }
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
             ops::move_(
                 &[now.to_path_buf()],
@@ -69,12 +72,31 @@ fn put_back(now: &Path, was: &Path) -> Result<(), String> {
             )
             .map_err(|e| e.to_string())?;
             if exists(was) && !exists(now) {
+                forget_trash_info(now);
                 Ok(())
             } else {
                 Err(format!("{}: could not be moved back", now.display()))
             }
         }
         Err(e) => Err(format!("{}: {e}", now.display())),
+    }
+}
+
+/// Linux: an item put back from the freedesktop Trash (`…/Trash/files/<x>`) leaves its
+/// `…/Trash/info/<x>.trashinfo` behind; it goes too, so the Trash does not list a ghost.
+fn forget_trash_info(now: &Path) {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    let (Some(files), Some(name)) = (now.parent(), now.file_name()) else {
+        return;
+    };
+    if files.file_name().is_some_and(|n| n == "files") {
+        if let Some(trash) = files.parent() {
+            let mut info = name.to_os_string();
+            info.push(".trashinfo");
+            let _ = fs::remove_file(trash.join("info").join(info));
+        }
     }
 }
 

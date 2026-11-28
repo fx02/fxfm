@@ -122,9 +122,17 @@ pub fn init(dir: &Path) {
     }
 }
 
-/// The log folder: `~/Library/Logs/fxfm`.
+/// The log folder: `~/Library/Logs/fxfm` on macOS, else `$XDG_STATE_HOME/fxfm`
+/// (`~/.local/state/fxfm`).
 pub fn default_dir(home: &Path) -> PathBuf {
-    home.join("Library/Logs/fxfm")
+    if cfg!(target_os = "macos") {
+        return home.join("Library/Logs/fxfm");
+    }
+    std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| home.join(".local/state"))
+        .join("fxfm")
 }
 
 #[cfg(test)]

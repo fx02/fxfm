@@ -149,7 +149,12 @@ fn build_scans_root_and_finds_hits() {
     assert!(st.volumes[0].entries >= 6, "{:?}", st.volumes[0]);
     assert!(st.volumes[0].refreshed > 0);
     assert!(!st.fda_needed);
-    assert!(st.exclude_defaults.iter().any(|e| e == "/System"));
+    let system = if cfg!(target_os = "macos") {
+        "/System"
+    } else {
+        "/proc"
+    };
+    assert!(st.exclude_defaults.iter().any(|e| e == system));
     assert!(t.data.path().join("index/index.bin").is_file());
     assert!(t
         .ev
@@ -644,13 +649,16 @@ fn network_refresh_queues_due_volumes() {
     }];
     t.svc.apply_settings(&s);
     wait_ready(&t);
-    let v = t
-        .svc
-        .status()
-        .volumes
-        .into_iter()
-        .find(|v| v.path == vp)
-        .unwrap();
+    // wait_ready is about the startup disk: the share's own first scan may still run.
+    let scanned = || {
+        t.svc
+            .status()
+            .volumes
+            .into_iter()
+            .find(|v| v.path == vp && v.refreshed > 0)
+    };
+    wait_for("the share's first scan", || scanned().is_some());
+    let v = scanned().unwrap();
     assert_eq!(v.kind, "network");
     let first = v.refreshed;
     fs::write(vol.path().join("net-later.txt"), b"v").unwrap();
@@ -735,6 +743,14 @@ fn volume_gone_after_its_scan_keeps_the_old_entries() {
     }];
     t.svc.apply_settings(&s);
     wait_ready(&t);
+    // wait_ready is about the startup disk: the share's own first scan may still run.
+    wait_for("the share's first scan", || {
+        t.svc
+            .status()
+            .volumes
+            .iter()
+            .any(|v| v.path == vp && v.refreshed > 0)
+    });
     let before = t
         .svc
         .status()

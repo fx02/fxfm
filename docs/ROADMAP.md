@@ -1,9 +1,12 @@
 # fxfm roadmap
 
 ## Next
+- **Help → Statistics** (owner's idea, 2026-11-28): memory (physical footprint) and CPU of fxfm and its WebKit processes (Web Content, GPU, Networking; on macOS found by their responsible app), their sum, the index's entries and size, background jobs, uptime; refreshed every second.
 From the UI critique (docs/critique/UI_CRITIQUE_REPORT.md), not started:
+- A list of the background operations (TC's transfer manager: the queue, remove one, + / −), opened from the strip.
+- Text search options as in TC's Find text (whole words, UTF-16 and other encodings, inside archives).
 - Folder tabs per panel.
-- Operation queue; thumbnails.
+- Thumbnails.
 - Screen-reader labels (VoiceOver).
 
 ## Right-click menu
@@ -34,7 +37,16 @@ From the UI critique (docs/critique/UI_CRITIQUE_REPORT.md), not started:
 - A file promise dropped where an item with the same name exists is written as `name 2.ext` beside it (never overwritten, no question). Whether Finder shows that new name at once needs a check with a real drag.
 - Writing promised items has no progress or Cancel in fxfm (only what the receiver shows itself).
 
+## Linux
+- Built and tested in containers only (unit tests, a start under Xvfb); every desktop feature (Secret Service, gvfs mounting, clipboard and drag with a file manager, Sushi, icon theme) still needs a check on a real Debian/Ubuntu desktop.
+- Drag out starts a GTK drag from the page's mouse press; on Wayland a drag without a fresh event may not start.
+
 ## Done
+- **Linux packages** (2026-11-28): Debian packages for amd64 and arm64 (Docker build, scripts/build-linux.sh) with Linux equivalents of the macOS parts (see docs/superpowers/plans/2026-11-27-linux-port.md and MANUAL "Linux").
+- **Fix: a move to a share left the sources** (2026-11-28): a cross-device move compared the copy's mtime with the source, and SMB shares (also FAT, FTP) do not keep it, so every source was kept. It now compares the source with its own size and mtime taken when it was copied.
+- **TC habits and Linux wording** (2026-11-28): Ctrl/Cmd+click and Shift+click mark in the panels; F2 with a path moves the item (`../x`, `sub/x`); ←/→ walk the buttons of a question; F2 = Queue in the F5/F6 dialog and Background in a progress window; right-click presets on the panel splitter; Find files turns Everywhere off while a text search runs (it reads the current folder); the Linux build names keys Ctrl/Alt/Super and says "file manager" and "System icons".
+- **Panel splitter** (2026-11-27): drag the bar between the panels (10–90 %), double-click for 50/50; kept in the session.
+- **Operations in the background and a queue** (2026-11-27): a Background button in every progress window, a Queue button in the F5/F6 dialog (one after the other), a row above the function keys with progress and the queue count (click: progress window; ×: empty the queue); quitting with operations running asks first.
 - **Find files: content search and sorting** (2026-11-27): a *Text* field finds files whose content has the text (current folder, case sensitive or not, results stream in); a click on a column header sorts the results (again: reverse, a third time: best match first).
 - **Connect to server window and groups** (2026-11-27): Ctrl+F can be moved, resized and maximized inside the main window (size kept); servers in groups up to three levels (New group…, drag into a group, Alt+←/→ out of / into a group). The server rows no longer take the Synchronize dirs grid layout (a class name clash since 0.1.10).
 - **Permanent delete on network shares** (2026-11-27): F8 on an SMB/AFP/NFS/WebDAV share deletes permanently instead of trying the missing Trash; the question says so first. **Copy network path** (2026-11-27): Windows `\\server\share\…` and `smb://` forms of items on an SMB share.

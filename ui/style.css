@@ -69,9 +69,13 @@ html, body {
   flex: 1;
   min-height: 0;
   display: flex;
-  gap: 4px;
   padding: 3px;
 }
+
+/* Between the panels: drag to change their widths, double-click for 50/50. */
+.splitter { flex: none; width: 4px; cursor: col-resize; }
+.splitter:hover, .splitter.drag { background: var(--hover); }
+body.splitting, body.splitting * { cursor: col-resize !important; user-select: none; }
 
 .pane {
   flex: 1 1 0;
@@ -287,6 +291,15 @@ body.nofoot .status > span { display: none; }
 .player.paused .clock, .player.paused .name { color: var(--muted); }
 .player .vol { width: 6em; flex: none; margin: 0; }
 .player .close:hover { background: var(--hover); }
+
+/* Operations in the background (Background button, F5/F6 Queue): one row above the F-keys. */
+.jobs { display: flex; align-items: center; gap: 10px; padding: 1px 6px; border-top: 1px solid var(--border); white-space: nowrap; font-size: calc(var(--chrome-font) * 0.92); cursor: pointer; }
+.jobs.off { display: none; }
+.jobs .what { overflow: hidden; text-overflow: ellipsis; min-width: 4em; flex: 0 1 auto; }
+.jobs .bar { flex: 1 1 8em; height: 4px; background: var(--hover); padding: 3px 0; background-clip: content-box; }
+.jobs .bar > div { height: 100%; width: 0; background: var(--active); }
+.jobs .clear { padding: 0 4px; }
+.jobs .clear:hover, .jobs:hover .what { background: var(--hover); }
 
 .fkeys {
   display: flex;

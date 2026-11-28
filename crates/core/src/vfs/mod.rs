@@ -1647,6 +1647,11 @@ mod tests {
 
     #[test]
     fn failed_write_back_leaves_the_outer_archive_and_drops_the_copy() {
+        // Root ignores the read-only folder (the write-back would succeed): nothing to show.
+        // SAFETY: geteuid cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
         let t = tempfile::tempdir().unwrap();
         let dir = t.path().join("ro");
         fs::create_dir(&dir).unwrap();

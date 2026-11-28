@@ -2027,6 +2027,11 @@ mod tests {
     #[test]
     fn queued_password_survives_failed_save() {
         use std::os::unix::fs::PermissionsExt;
+        // Root ignores the folder's permissions (the save would succeed): nothing to show.
+        // SAFETY: geteuid cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
         let t = tempfile::tempdir().unwrap();
         let dir = t.path().join("data");
         std::fs::create_dir(&dir).unwrap();

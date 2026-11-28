@@ -31,3 +31,31 @@ export function frame(title, cls = "") {
   backdrop.append(box);
   return { backdrop, modal: { el: backdrop }, box, body, row };
 }
+
+/**
+ * The Mac's caret keys in every one-line text field of `doc` (WebKit leaves Home/End to
+ * scrolling): Fn+←/→ (Home/End) and Cmd+←/→ to the start/end, Option+←/→ by word, Shift
+ * extending the selection (see `caretMove`). Runs before fxfm's own key handling, so these
+ * keys never reach a panel or a command while a field has the focus.
+ */
+export function installCaretKeys(caretMove, doc = document) {
+  doc.addEventListener(
+    "keydown",
+    (e) => {
+      const t = e.target;
+      if (!(t instanceof HTMLInputElement) || e.isComposing) return;
+      if (!["text", "search", "password", "url", ""].includes(t.type)) return;
+      const r = caretMove(
+        t.value,
+        { start: t.selectionStart ?? 0, end: t.selectionEnd ?? 0, backward: t.selectionDirection === "backward" },
+        e.key,
+        { alt: e.altKey, cmd: e.metaKey, shift: e.shiftKey },
+      );
+      if (!r) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      t.setSelectionRange(r.start, r.end, r.backward ? "backward" : "forward");
+    },
+    true,
+  );
+}

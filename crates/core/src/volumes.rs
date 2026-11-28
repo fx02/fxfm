@@ -59,11 +59,110 @@ pub fn on_network_volume(path: &Path) -> bool {
             .filter(|p| !p.as_os_str().is_empty())
             .is_some_and(is_network_fs)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        path.parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .is_some_and(is_network_fs_linux)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = path;
         false
     }
+}
+
+/// Linux: a CIFS/SMB, NFS or NCP filesystem (`statfs` magic), or a share mounted by GNOME's
+/// gvfs (`/run/user/<uid>/gvfs/…`, a FUSE filesystem).
+#[cfg(target_os = "linux")]
+fn is_network_fs_linux(path: &Path) -> bool {
+    if path.to_string_lossy().contains("/gvfs/") {
+        return true;
+    }
+    let Ok(c) = CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: valid C string and out-pointer.
+    if unsafe { libc::statfs(c.as_ptr(), &mut st) } != 0 {
+        return false;
+    }
+    // CIFS, SMB2, SMB, NFS, NCP.
+    matches!(
+        st.f_type as u64,
+        0xFF53_4D42 | 0xFE53_4D42 | 0x517B | 0x6969 | 0x564C
+    )
+}
+
+/// Filesystem types of network mounts in `/proc/self/mounts`.
+const NETWORK_TYPES: &[&str] = &[
+    "cifs",
+    "smb3",
+    "smbfs",
+    "nfs",
+    "nfs4",
+    "ncpfs",
+    "davfs",
+    "fuse.sshfs",
+];
+
+/// `/proc/self/mounts` escapes space, tab, newline and backslash as octal (`\040`…).
+fn unescape_mount(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'\\'
+            && i + 3 < b.len()
+            && b[i + 1..i + 4].iter().all(|c| (b'0'..=b'7').contains(c))
+        {
+            out.push((b[i + 1] - b'0') * 64 + (b[i + 2] - b'0') * 8 + (b[i + 3] - b'0'));
+            i += 4;
+            continue;
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The drives of a Linux system from `/proc/self/mounts` (`mounts`) and the share folders of
+/// gvfs (`gvfs`: names in `/run/user/<uid>/gvfs`): removable and other disks under `/media`,
+/// `/run/media` and `/mnt`, network mounts anywhere, gvfs shares. `(name, path, network)`.
+pub fn linux_drives(mounts: &str, gvfs_dir: &str, gvfs: &[String]) -> Vec<(String, String, bool)> {
+    let mut found: Vec<(String, String, bool)> = Vec::new();
+    for line in mounts.lines() {
+        let mut it = line.split_whitespace();
+        let (Some(_dev), Some(mp), Some(fstype)) = (it.next(), it.next(), it.next()) else {
+            continue;
+        };
+        let mp = unescape_mount(mp);
+        let network = NETWORK_TYPES.contains(&fstype);
+        let removable = ["/media", "/mnt", "/run/media"]
+            .iter()
+            .any(|b| mp.starts_with(&format!("{b}/")));
+        if network || removable {
+            let name = mp.rsplit('/').next().unwrap_or(&mp).to_string();
+            found.push((name, mp, network));
+        }
+    }
+    for share in gvfs {
+        // e.g. smb-share:server=nas.local,share=media → "media (nas.local)".
+        let field = |k: &str| {
+            share
+                .split([':', ','])
+                .find_map(|p| p.strip_prefix(&format!("{k}=")).map(str::to_string))
+        };
+        let name = match (field("share"), field("server").or_else(|| field("host"))) {
+            (Some(sh), Some(srv)) => format!("{sh} ({srv})"),
+            (None, Some(srv)) => srv,
+            _ => share.clone(),
+        };
+        found.push((name, format!("{gvfs_dir}/{share}"), true));
+    }
+    found.sort();
+    found.dedup_by(|a, b| a.1 == b.1);
+    found
 }
 
 #[cfg(target_os = "macos")]
@@ -124,30 +223,23 @@ pub fn list_volumes(home: &Path) -> Vec<Volume> {
         volume("/".into(), Path::new("/"), VolumeKind::Root),
         volume("~".into(), home, VolumeKind::Home),
     ];
-    let mounts = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
-    let mut found: Vec<(String, String)> = Vec::new();
-    for line in mounts.lines() {
-        let mut it = line.split_whitespace();
-        let (Some(_dev), Some(mp)) = (it.next(), it.next()) else {
-            continue;
+    let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
+    // SAFETY: getuid cannot fail.
+    let gvfs_dir = format!("/run/user/{}/gvfs", unsafe { libc::getuid() });
+    let gvfs: Vec<String> = std::fs::read_dir(&gvfs_dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    for (name, mp, network) in linux_drives(&mounts, &gvfs_dir, &gvfs) {
+        let kind = if network {
+            VolumeKind::Network
+        } else {
+            VolumeKind::Volume
         };
-        // /proc/mounts escapes spaces as \040.
-        let mp = mp.replace("\\040", " ");
-        if ["/media", "/mnt", "/run/media"]
-            .iter()
-            .any(|b| mp == *b || mp.starts_with(&format!("{b}/")))
-            && mp != "/media"
-            && mp != "/mnt"
-            && mp != "/run/media"
-        {
-            let name = mp.rsplit('/').next().unwrap_or(&mp).to_string();
-            found.push((name, mp));
-        }
-    }
-    found.sort();
-    found.dedup();
-    for (name, mp) in found {
-        out.push(volume(name, Path::new(&mp), VolumeKind::Volume));
+        out.push(volume(name, Path::new(&mp), kind));
     }
     out
 }
@@ -155,6 +247,43 @@ pub fn list_volumes(home: &Path) -> Vec<Volume> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linux_mounts_give_disks_and_shares() {
+        let mounts = "\
+/dev/nvme0n1p2 / ext4 rw 0 0
+/dev/sdb1 /media/me/USB\\040Stick vfat rw 0 0
+//nas/music /mnt/music cifs rw 0 0
+nas:/export /srv/nfs nfs4 rw 0 0
+tmpfs /run tmpfs rw 0 0
+/dev/sdc1 /media vfat rw 0 0
+gvfsd-fuse /run/user/1000/gvfs fuse.gvfsd-fuse rw 0 0
+";
+        let gvfs = vec![
+            "smb-share:server=nas.local,share=media".to_string(),
+            "sftp:host=web1".to_string(),
+        ];
+        let d = linux_drives(mounts, "/run/user/1000/gvfs", &gvfs);
+        let got: Vec<(&str, &str, bool)> = d
+            .iter()
+            .map(|(n, p, k)| (n.as_str(), p.as_str(), *k))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("USB Stick", "/media/me/USB Stick", false),
+                (
+                    "media (nas.local)",
+                    "/run/user/1000/gvfs/smb-share:server=nas.local,share=media",
+                    true
+                ),
+                ("music", "/mnt/music", true),
+                ("nfs", "/srv/nfs", true),
+                ("web1", "/run/user/1000/gvfs/sftp:host=web1", true),
+            ]
+        );
+        assert_eq!(unescape_mount("a\\040b\\134c\\0"), "a b\\c\\0");
+    }
 
     /// Local items (and odd paths) are never on a network volume; nothing is mounted for this.
     #[test]

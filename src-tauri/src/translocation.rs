@@ -1,6 +1,8 @@
 //! macOS App Translocation: a quarantined app that was not moved by the
 //! Finder runs from a random read-only copy, so `fxfm-data/` beside the real
 //! `fxfm.app` cannot be found. Detection and the one-click quarantine fix.
+// macOS only; the other systems use none of this.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 use std::path::{Path, PathBuf};
 

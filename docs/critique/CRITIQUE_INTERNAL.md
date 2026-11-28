@@ -38,3 +38,17 @@ Checked and consistent: Ctrl+S filter box shows "n of m" and Esc clears it; F8 n
 item; the right-click menu hides Open with / Quick Look / Show in Finder outside local folders;
 Synchronize confirms with counts and says that server/archive deletes are permanent; dark mode
 covers dialogs, menus and bars.
+
+## 2026-11-28 walk (new surfaces)
+
+| # | Surface | Label / claim | Actual handler | Finding |
+|---|---|---|---|---|
+| J10 | Find files *Text* + *In: Everywhere* | the radio says Everywhere | a text search always walks the current folder (`searchRequest`, `ui/lib.mjs`); only the field's placeholder says so (`ui/search.js:153`) | contradiction: the checked choice is not what runs |
+| J11 | Operations strip | "click to see the progress" | `showBackgroundJob` opens the first background job; with only queued items (between jobs) a click does nothing | dead end in a short window; no list of the queued operations, × removes all of them at once |
+| J12 | F5/F6 dialog *Queue* | button only | no key (TC: F2 in the copy dialog) | keyboard path missing for a TC user |
+| J13 | Progress window *Background* | button | no key; Esc = Cancel | fine, but the most useful button for long copies has no key |
+| J14 | Quit with jobs | "Quit and cancel them?" | a second Quit within 5 s quits without asking (`quit.rs`) | intentional escape hatch; documented in MANUAL only |
+| J15 | Linux build labels | "Show in Finder", "Finder (macOS icons)", "Folder icon (Finder icons)", ⌥⌃⌘ glyphs, Fn option | same strings on Linux (`ui/lib.mjs:2263,2743`, `config.js:505`, `comboLabel`) | contradictions on Linux (in the port plan's UI pass) |
+| J16 | Linux icons in the smoke screenshot | rows | empty boxes (no emoji font in the container; GTK theme icons added since) | to re-check after the next Linux build |
+| J17 | Splitter | tooltip "double-click: 50/50" | drag 10–90 %, dblclick 50/50, kept in the session | consistent; no keyboard path (TC has none either, see benchmark) |
+| J18 | Find files sort | tooltip explains 3 states | header click; no key | consistent; mouse only |

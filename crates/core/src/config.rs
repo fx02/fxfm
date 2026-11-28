@@ -373,6 +373,8 @@ pub struct SessionState {
     /// Hidden files shown (toggled with the hidden-files command); None: a session from
     /// before this field, which means shown.
     pub show_hidden: Option<bool>,
+    /// The left panel's share of the width (the splitter between the panels); None: 50/50.
+    pub split: Option<f64>,
 }
 
 /// Resolve a saved panel location to a directory that exists now.
@@ -527,6 +529,7 @@ mod tests {
         let s: SessionState = serde_json::from_str(r#"{"showHidden": false}"#).unwrap();
         assert_eq!(s.show_hidden, Some(false));
         assert_eq!(serde_json::to_value(&s).unwrap()["showHidden"], false);
+        assert_eq!(old.split, None);
     }
 
     #[test]
@@ -545,6 +548,7 @@ mod tests {
                 h: 600,
             }),
             show_hidden: Some(false),
+            split: Some(0.25),
         };
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains("\"cursorName\""));

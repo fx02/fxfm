@@ -156,8 +156,42 @@ impl KeyCombo {
         (self.ctrl && m.ctrl == MacKey::Fn) || (self.alt && m.alt == MacKey::Fn)
     }
 
-    /// The label macOS menus use for the physical keys: `⌃⌥⇧⌘` then the key (`⌥F5`).
+    /// The label menus use for the physical keys: on macOS `⌃⌥⇧⌘` then the key (`⌥F5`), on
+    /// Linux the key names as text (`Alt+F5`, Command is Super).
     pub fn label(&self, m: &Modifiers) -> String {
+        if cfg!(target_os = "macos") {
+            self.mac_label(m)
+        } else {
+            self.text_label(m)
+        }
+    }
+
+    /// `Ctrl+Alt+Shift+Super+Key` with arrows as symbols (Linux menus).
+    pub fn text_label(&self, m: &Modifiers) -> String {
+        let p = self.physical(m);
+        let mut out = String::new();
+        for (on, name) in [
+            (p.ctrl, "Ctrl+"),
+            (p.alt, "Alt+"),
+            (p.shift, "Shift+"),
+            (p.cmd, "Super+"),
+        ] {
+            if on {
+                out.push_str(name);
+            }
+        }
+        out.push_str(match p.key.as_str() {
+            "Up" => "↑",
+            "Down" => "↓",
+            "Left" => "←",
+            "Right" => "→",
+            k => k,
+        });
+        out
+    }
+
+    /// The macOS menu label: `⌃⌥⇧⌘` then the key (`⌥F5`).
+    pub fn mac_label(&self, m: &Modifiers) -> String {
         let p = self.physical(m);
         let mut out = String::new();
         if self.uses_fn(m) {
@@ -805,23 +839,33 @@ mod tests {
     #[test]
     fn physical_keys_and_labels_follow_the_mapping() {
         let def = Modifiers::default();
-        assert_eq!(c("Alt+F5").label(&def), "⌥F5");
-        assert_eq!(c("Ctrl+Shift+F").label(&def), "⌃⇧F");
-        assert_eq!(c("Ctrl+Up").label(&def), "⌃↑");
-        assert_eq!(c("F3").label(&def), "F3");
-        assert_eq!(c("Cmd+Q").label(&def), "⌘Q");
+        assert_eq!(c("Alt+F5").mac_label(&def), "⌥F5");
+        assert_eq!(c("Ctrl+Shift+F").mac_label(&def), "⌃⇧F");
+        assert_eq!(c("Ctrl+Up").mac_label(&def), "⌃↑");
+        assert_eq!(c("F3").mac_label(&def), "F3");
+        assert_eq!(c("Cmd+Q").mac_label(&def), "⌘Q");
         let cmd_alt = mods(MacKey::Command, MacKey::Control);
-        assert_eq!(c("Alt+F5").label(&cmd_alt), "⌘F5");
+        assert_eq!(c("Alt+F5").mac_label(&cmd_alt), "⌘F5");
         assert_eq!(c("Alt+F5").physical(&cmd_alt).to_string(), "Cmd+F5");
         let swapped = mods(MacKey::Control, MacKey::Option);
-        assert_eq!(c("Ctrl+Alt+Space").label(&swapped), "⌃⌥Space");
-        assert_eq!(c("Ctrl+D").label(&swapped), "⌥D");
+        assert_eq!(c("Ctrl+Alt+Space").mac_label(&swapped), "⌃⌥Space");
+        assert_eq!(c("Ctrl+D").mac_label(&swapped), "⌥D");
         assert_eq!(c("Ctrl+D").physical(&swapped).to_string(), "Alt+D");
         let fn_alt = mods(MacKey::Fn, MacKey::Control);
-        assert_eq!(c("Alt+F5").label(&fn_alt), "fn F5");
-        assert_eq!(c("Ctrl+Alt+Shift+X").label(&fn_alt), "fn ⌃⇧X");
+        assert_eq!(c("Alt+F5").mac_label(&fn_alt), "fn F5");
+        assert_eq!(c("Ctrl+Alt+Shift+X").mac_label(&fn_alt), "fn ⌃⇧X");
         assert!(c("Alt+F5").uses_fn(&fn_alt));
         assert!(!c("Ctrl+F5").uses_fn(&fn_alt));
+    }
+
+    #[test]
+    fn text_labels_name_the_keys() {
+        let def = Modifiers::default();
+        let c = |s: &str| s.parse::<KeyCombo>().unwrap();
+        assert_eq!(c("Alt+F5").text_label(&def), "Alt+F5");
+        assert_eq!(c("Ctrl+Shift+Up").text_label(&def), "Ctrl+Shift+↑");
+        assert_eq!(c("Cmd+Q").text_label(&def), "Super+Q");
+        assert_eq!(c("F3").text_label(&def), "F3");
     }
 
     /// The key table in docs/MANUAL.md is generated from COMMANDS; this keeps it current.

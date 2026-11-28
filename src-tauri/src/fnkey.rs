@@ -2,6 +2,8 @@
 //! event monitor watches the Fn key itself and tells every window (`keys://fn`, `{down}`)
 //! before the key that comes with it. macOS sets the Fn ("function") flag on every arrow,
 //! F-key and Home/End event too, so only the Fn key's own flag changes (key code 63) count.
+// macOS only; the other systems use none of this.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 use serde::Serialize;
 

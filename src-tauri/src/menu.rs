@@ -51,9 +51,13 @@ pub fn build<R: Runtime>(
         .hide_others()
         .show_all()
         .separator()
-        // The predefined Quit (Cmd+Q) sends `terminate:`, which ends in
-        // RunEvent::Exit where the session is flushed.
-        .quit()
+        // Our own Quit (not the predefined `terminate:`): with operations running it asks
+        // first (`quit::request`); the Dock's Quit and logging out still end in RunEvent::Exit.
+        .item(
+            &MenuItemBuilder::with_id(QUIT_ID, "Quit fxfm")
+                .accelerator("CmdOrCtrl+Q")
+                .build(app)?,
+        )
         .build()?;
     let edit = SubmenuBuilder::new(app, "Edit")
         .undo()
@@ -97,8 +101,15 @@ struct MenuCommand<'a> {
     id: &'a str,
 }
 
+/// Menu id of fxfm › Quit fxfm.
+pub const QUIT_ID: &str = "app_quit";
+
 pub fn on_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
     let id = event.id().as_ref();
+    if id == QUIT_ID {
+        crate::quit::request(app);
+        return;
+    }
     if let Some(c) = COMMANDS.iter().find(|c| c.id == id) {
         if let Err(e) = app.emit_to("main", "menu://command", MenuCommand { id: c.id }) {
             eprintln!("fxfm: menu event: {e}");
@@ -127,7 +138,12 @@ mod tests {
         let mut k = Keymap::defaults();
         k.unbind(&"F5".parse().unwrap());
         k.bind(&"Ctrl+K".parse().unwrap(), "cm_copy");
-        assert_eq!(display_keys(&k, "cm_copy", &["F5"], &def), ["⌃K"]);
+        let ctrl_k = if cfg!(target_os = "macos") {
+            "⌃K"
+        } else {
+            "Ctrl+K"
+        };
+        assert_eq!(display_keys(&k, "cm_copy", &["F5"], &def), [ctrl_k]);
     }
 
     #[test]
@@ -135,18 +151,27 @@ mod tests {
         use fxfm_core::config::MacKey;
         let k = Keymap::defaults();
         let def = Modifiers::default();
-        assert_eq!(display_keys(&k, "cm_packfiles", &["Alt+F5"], &def), ["⌥F5"]);
+        let mac = cfg!(target_os = "macos");
+        let alt_f5 = if mac { "⌥F5" } else { "Alt+F5" };
+        let cmd_f5 = if mac { "⌘F5" } else { "Super+F5" };
+        assert_eq!(
+            display_keys(&k, "cm_packfiles", &["Alt+F5"], &def),
+            [alt_f5]
+        );
         let cmd = Modifiers {
             alt: MacKey::Command,
             ctrl: MacKey::Control,
         };
-        assert_eq!(display_keys(&k, "cm_packfiles", &["Alt+F5"], &cmd), ["⌘F5"]);
+        assert_eq!(
+            display_keys(&k, "cm_packfiles", &["Alt+F5"], &cmd),
+            [cmd_f5]
+        );
         assert_eq!(
             menu_title_with_key(
                 "Pack files…",
                 &display_keys(&k, "cm_packfiles", &["Alt+F5"], &cmd)
             ),
-            "Pack files…\t⌘F5"
+            format!("Pack files…\t{cmd_f5}")
         );
     }
 

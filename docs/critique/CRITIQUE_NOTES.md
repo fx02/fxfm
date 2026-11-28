@@ -29,3 +29,29 @@
   menu, filter box, Help table, F8 text, sync window in both layouts, branch view, F3 viewer).
   The owner was working on the machine, so no keystrokes were sent for this pass: keyboard paths
   (filter keys, history keys, sync list keys) are from source reading only.
+
+## 2026-11-28
+
+- **Target:** fxfm local `main`, version 0.1.25 (`232868f`, plus the Linux port work in progress). Also fx02/fxfm 0.1.23.
+- **Surfaces new since the 2026-11-26 report:**
+  - right-click *Copy network path…*;
+  - F8 on a network share;
+  - Connect to server window (move/resize/maximize, groups, Alt+arrows);
+  - Find files *Text* field and column sorting;
+  - Background button, F5/F6 *Queue*, the operations strip and the quit question;
+  - the panel splitter;
+  - the Linux build (Debian 12, GTK).
+- **Audience:** one keyboard-driven Total Commander user. The owner now also targets Linux.
+- **Live evidence (2026-11-27, isolated instance, temp HOME, demo data):**
+  - Connect dialog with groups (screenshots);
+  - Find files text search and the Folder sort (screenshots);
+  - a queued F5 copy (file arrived, strip gone afterwards);
+  - the 25/75 split restored;
+  - the Linux arm64 package started under Xvfb (screenshot).
+- **Not exercised live:**
+  - a long background job (the strip while running, clicking it back to the window);
+  - the quit question with jobs running;
+  - Alt+↑/↓ in the dialogs (the guard blocked keys: another app was frontmost);
+  - drag in the Linux build;
+  - every Linux GTK feature on a real desktop.
+- **Benchmark candidates:** Total Commander, Double Commander, ForkLift 4 (same as before, comparable keyboard/two-panel tools).

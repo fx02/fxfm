@@ -392,6 +392,9 @@ pub(crate) struct Live {
     tx: Option<Sender<(String, Vec<Event>)>>,
     #[cfg(target_os = "macos")]
     streams: HashMap<String, crate::fsevents::Stream>,
+    /// Linux: inotify watchers by volume root (for the startup disk: the home folder).
+    #[cfg(target_os = "linux")]
+    watchers: HashMap<String, notify::RecommendedWatcher>,
     /// Local volumes whose stream could not be created: refreshed by the timer instead.
     pub(crate) unwatched: HashSet<String>,
 }
@@ -595,7 +598,31 @@ impl Inner {
                 }
             }
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        {
+            if live.watchers.contains_key(root) {
+                return;
+            }
+            // The rest of the startup disk (and a volume without a watcher) gets the timer.
+            live.unwatched.insert(root.to_string());
+            drop(live);
+            // Registering a recursive inotify watch walks the tree: no lock held meanwhile.
+            match linux_watcher(root, &self.root, tx) {
+                Ok(w) => {
+                    let mut live = lock(&self.live);
+                    if !live.watchers.contains_key(root) {
+                        if root != self.root {
+                            live.unwatched.remove(root);
+                        }
+                        live.watchers.insert(root.to_string(), w);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("fxfm: search: no live updates for {root} ({e}); refreshed by timer")
+                }
+            }
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             drop(tx);
             live.unwatched.insert(root.to_string());
@@ -607,6 +634,10 @@ impl Inner {
         let live = lock(&self.live);
         #[cfg(target_os = "macos")]
         if live.streams.contains_key(root) {
+            return true;
+        }
+        #[cfg(target_os = "linux")]
+        if live.watchers.contains_key(root) {
             return true;
         }
         live.unwatched.contains(root)
@@ -625,6 +656,18 @@ impl Inner {
                 .collect();
             keys.iter().filter_map(|k| live.streams.remove(k)).collect()
         };
+        #[cfg(target_os = "linux")]
+        let dropped_watchers: Vec<notify::RecommendedWatcher> = {
+            let keys: Vec<String> = live
+                .watchers
+                .keys()
+                .filter(|k| root.is_none_or(|r| r == k.as_str()))
+                .cloned()
+                .collect();
+            keys.iter()
+                .filter_map(|k| live.watchers.remove(k))
+                .collect()
+        };
         match root {
             Some(r) => {
                 live.unwatched.remove(r);
@@ -632,6 +675,8 @@ impl Inner {
             None => live.unwatched.clear(),
         }
         drop(live);
+        #[cfg(target_os = "linux")]
+        drop(dropped_watchers);
         // Dropping a stream waits for a running callback; that callback never takes `live`.
         #[cfg(target_os = "macos")]
         drop(dropped);
@@ -655,10 +700,90 @@ impl Inner {
                 self.unwatch(Some(&r));
             }
         }
+        #[cfg(target_os = "linux")]
+        {
+            let enabled = self.enabled_mounted();
+            let gone: Vec<String> = lock(&self.live)
+                .watchers
+                .keys()
+                .filter(|k| **k != self.root && !enabled.contains(*k))
+                .cloned()
+                .collect();
+            for r in gone {
+                self.unwatch(Some(&r));
+            }
+        }
         if lock(&self.run).settings.index == Some(true) {
             self.start_streams();
         }
     }
+}
+
+/// Linux live updates: a recursive inotify watcher on `root` (the home folder when `root` is
+/// the startup disk `startup`). Its events go, gathered for about a second like FSEvents'
+/// latency, as one batch per volume into `tx`; a queue overflow asks for a rescan of the
+/// watched folder.
+#[cfg(target_os = "linux")]
+fn linux_watcher(
+    root: &str,
+    startup: &str,
+    tx: Sender<(String, Vec<Event>)>,
+) -> notify::Result<notify::RecommendedWatcher> {
+    use notify::Watcher;
+    let target = if root == startup {
+        std::env::var("HOME").unwrap_or_else(|_| root.to_string())
+    } else {
+        root.to_string()
+    };
+    let (raw_tx, raw_rx) = channel::<Vec<Event>>();
+    let watched = target.clone();
+    let mut w = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        let batch = match res {
+            Ok(ev) => {
+                let flags = if ev.need_rescan() {
+                    MUST_SCAN_SUB_DIRS
+                } else {
+                    0
+                };
+                ev.paths
+                    .iter()
+                    .map(|p| Event {
+                        path: p.to_string_lossy().into_owned(),
+                        flags,
+                        id: 0,
+                    })
+                    .collect()
+            }
+            Err(_) => vec![Event {
+                path: watched.clone(),
+                flags: MUST_SCAN_SUB_DIRS,
+                id: 0,
+            }],
+        };
+        let _ = raw_tx.send(batch);
+    })?;
+    w.watch(Path::new(&target), notify::RecursiveMode::Recursive)?;
+    let r = root.to_string();
+    std::thread::Builder::new()
+        .name("search-inotify".into())
+        .spawn(move || {
+            // Ends when the watcher (and with it `raw_tx`) is dropped.
+            while let Ok(first) = raw_rx.recv() {
+                let mut batch = first;
+                let until = std::time::Instant::now() + Duration::from_secs(1);
+                while let Some(left) = until.checked_duration_since(std::time::Instant::now()) {
+                    match raw_rx.recv_timeout(left) {
+                        Ok(more) => batch.extend(more),
+                        Err(_) => break,
+                    }
+                }
+                if tx.send((r.clone(), batch)).is_err() {
+                    return;
+                }
+            }
+        })
+        .map_err(|e| notify::Error::generic(&e.to_string()))?;
+    Ok(w)
 }
 
 /// The current FSEvents id (0 off macOS).

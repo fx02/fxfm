@@ -206,9 +206,15 @@ fn handle_events_root_is_never_removed() {
 
 #[test]
 fn handle_events_excluded_paths_change_nothing() {
+    // A default exclusion by name (".Trashes" on macOS, "lost+found" on Linux).
+    let name = if cfg!(target_os = "macos") {
+        ".Trashes"
+    } else {
+        "lost+found"
+    };
     let (dir, root, mut s) = indexed(|d| {
         fs::create_dir_all(d.join("skip/deep")).unwrap();
-        fs::create_dir_all(d.join("x/.Trashes/in")).unwrap();
+        fs::create_dir_all(d.join("x").join(name).join("in")).unwrap();
         fs::create_dir_all(d.join("mnt")).unwrap();
     });
     let mut o = opts(&root);
@@ -217,7 +223,7 @@ fn handle_events_excluded_paths_change_nothing() {
     let before = s.index.len();
     for p in [
         format!("{root}/skip/deep/a.txt"),
-        format!("{root}/x/.Trashes/in/b.txt"),
+        format!("{root}/x/{name}/in/b.txt"),
         format!("{root}/mnt/c.txt"),
     ] {
         fs::write(&p, b"").unwrap();
@@ -231,22 +237,33 @@ fn handle_events_excluded_paths_change_nothing() {
 
 #[test]
 fn handle_events_absolute_excludes_above_the_volume_do_not_apply() {
-    // "/Volumes" is a default exclusion of the startup disk, not of volumes mounted below it.
+    // The volumes folder ("/Volumes", "/media") is a default exclusion of the startup disk,
+    // not of volumes mounted below it; exclusions by name hold everywhere.
+    let (vols, name, tmp, home) = if cfg!(target_os = "macos") {
+        (
+            "/Volumes",
+            ".Spotlight-V100",
+            "/private/tmp/x",
+            "/Users/x/a.txt",
+        )
+    } else {
+        ("/media", "lost+found", "/proc/1/x", "/home/x/a.txt")
+    };
     let o = EventOpts {
-        vol_root: "/Volumes/Disk".into(),
+        vol_root: format!("{vols}/Disk"),
         exclude: default_excludes(),
         skip_mounts: Vec::new(),
         archives: false,
     };
-    assert!(!o.excluded("/Volumes/Disk/a/b.txt"));
-    assert!(o.excluded("/Volumes/Disk/a/.Spotlight-V100/x"));
+    assert!(!o.excluded(&format!("{vols}/Disk/a/b.txt")));
+    assert!(o.excluded(&format!("{vols}/Disk/a/{name}/x")));
     let o = EventOpts {
         vol_root: "/".into(),
         ..o
     };
-    assert!(o.excluded("/Volumes/Disk/a/b.txt"));
-    assert!(o.excluded("/private/tmp/x"));
-    assert!(!o.excluded("/Users/x/a.txt"));
+    assert!(o.excluded(&format!("{vols}/Disk/a/b.txt")));
+    assert!(o.excluded(tmp));
+    assert!(!o.excluded(home));
 }
 
 #[test]

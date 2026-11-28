@@ -3,7 +3,7 @@
 // run here; going to a file, Feed to listbox, mounting a share and F3 on audio run in the main
 // window over the `findfiles://` bridge (see FIND_FILES_ACTION in lib.mjs).
 
-import { el, cycleFocus } from "./dom.js";
+import { el, cycleFocus, installCaretKeys } from "./dom.js";
 import {
   FIND_FILES_ACTION,
   FIND_FILES_COMMAND,
@@ -28,6 +28,8 @@ import {
   resultGridTemplate,
   feedItems,
   searchLabel,
+  caretMove,
+  IS_LINUX,
   searchRequest,
   searchScopes,
   searchUnder,
@@ -218,6 +220,8 @@ function showWindow(ctx, initialStatus) {
   box.append(body, row, colMenu);
 
   const scope = () => (everywhere.r.checked ? "everywhere" : "folder");
+  /** The scope was set to Current folder by a text search (not by the user). */
+  let textForced = false;
 
   // ------------------------------------------------------------ rendering
 
@@ -229,18 +233,27 @@ function showWindow(ctx, initialStatus) {
   const applyScopes = (initial) => {
     const s = searchScopes(status.state);
     const was = everywhere.r.checked ? "everywhere" : folder.r.checked ? "folder" : null;
-    everywhere.r.disabled = !s.everywhere;
+    // A text search reads the files of the current folder: Everywhere is off meanwhile, and
+    // the user's own choice comes back when the text is cleared.
+    const byText = Boolean(text.value);
+    everywhere.r.disabled = !s.everywhere || byText;
     folder.r.disabled = !under;
-    let pick = initial ? memory.scope : was;
+    let pick = initial || (textForced && !byText) ? memory.scope : was;
+    textForced = byText;
+    if (byText) pick = "folder";
     if (pick === "everywhere" && !s.everywhere) pick = "folder";
     if (pick === "folder" && !under && s.everywhere) pick = "everywhere";
     everywhere.r.checked = pick === "everywhere";
     folder.r.checked = pick === "folder";
     // The index is off: "Current folder" is the only choice, so Everywhere is not shown at all.
     everywhere.l.hidden = status.state === "off";
-    const text = s.note ?? (!under && !s.everywhere ? "The active panel's folder cannot be searched (a server or the results list)." : null);
-    note.textContent = text ?? "";
-    note.hidden = !text;
+    const noteText = byText
+      ? under
+        ? "A text search reads the files of the current folder (Everywhere is for names)."
+        : "A text search needs a folder: the active panel shows a server or the results list."
+      : (s.note ?? (!under && !s.everywhere ? "The active panel's folder cannot be searched (a server or the results list)." : null));
+    note.textContent = noteText ?? "";
+    note.hidden = !noteText;
     fda.hidden = !status.fdaNeeded;
     const b = indexButton(status.state);
     indexBtn.textContent = b.label;
@@ -652,6 +665,7 @@ function showWindow(ctx, initialStatus) {
   });
   text.addEventListener("input", () => {
     memory.text = text.value;
+    if (Boolean(text.value) !== textForced) applyScopes(false);
     schedule();
   });
   caseSens.addEventListener("change", () => {
@@ -809,6 +823,7 @@ async function main() {
   await appWin.onResized(keepGeometry);
 
   // A dialog on top (Rebuild index, a password) gets the keys first.
+  if (!IS_LINUX) installCaretKeys(caretMove);
   document.addEventListener("keydown", (e) => {
     if (handleModalKey(e)) return;
     win?.onKey(e);

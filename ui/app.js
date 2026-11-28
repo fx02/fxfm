@@ -7,6 +7,10 @@ import {
   audioF3Action,
   cmdlineKeyGoesToPanel,
   comboFromEvent,
+  clampSplit,
+  IS_LINUX,
+  caretMove,
+  SHOW_IN_FILE_MANAGER,
   comboLabel,
   compileTypeRules,
   displayLocation,
@@ -56,6 +60,9 @@ import {
   copyMove,
   copyMoveTo,
   copyNames,
+  clearQueue,
+  queuedCount,
+  showBackgroundJob,
   shareLinks,
   pasteFiles,
   undoLast,
@@ -77,6 +84,7 @@ import {
   topModal,
 } from "./dialogs.js";
 import { cancelDrag, initDragDrop, rowPress } from "./dragdrop.js";
+import { installCaretKeys } from "./dom.js";
 import { configureKeyboard, configureOptions, firstRunConflictHint, initConfig, optionsSearchReload, optionsSearchStatus } from "./config.js";
 import { initHotlist, showHotlist } from "./hotlist.js";
 import { initMultiRename, multiRename } from "./multirename.js";
@@ -112,6 +120,8 @@ const app = {
   panels: {},
   activeSide: "left",
   showHidden: true,
+  /** The left panel's share of the width (the splitter). */
+  split: 0.5,
   /** Drives: `list_volumes` merged with the saved SMB shares (`mergeShares`). */
   volumes: [],
   /** The last `list_volumes` and `smb_shares` answers. */
@@ -271,7 +281,7 @@ function contextMenu(panel, index, at = null) {
     open: () => panel.enter(),
     open_with: () => openWithMenu(path, at),
     quick_look: () => invoke("quick_look", { path }).catch((e) => status(`Quick Look: ${e}`)),
-    show_in_finder: () => invoke("show_in_finder", { path }).catch((e) => status(`Show in Finder: ${e}`)),
+    show_in_finder: () => invoke("show_in_finder", { path }).catch((e) => status(`${SHOW_IN_FILE_MANAGER}: ${e}`)),
     cm_copy_share_links: () => shareLinksMenu(panel, at),
   };
   const items = contextMenuItems(entry, n, app.settings.contextMenuOff ?? [], local, network).map((i) =>
@@ -963,6 +973,54 @@ function quickSearchKey(e, combo) {
 
 let saveTimer = 0;
 
+/** The panels' widths from `app.split` (the left panel's share). */
+function applySplit() {
+  document.getElementById("left").style.flexGrow = String(app.split);
+  document.getElementById("right").style.flexGrow = String(1 - app.split);
+}
+
+/** The splitter between the panels: drag to change the widths (TC), double-click for 50/50. */
+function initSplitter() {
+  const splitter = document.getElementById("splitter");
+  const panes = splitter.parentElement;
+  splitter.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    splitter.classList.add("drag");
+    document.body.classList.add("splitting");
+    const move = (ev) => {
+      const b = panes.getBoundingClientRect();
+      app.split = clampSplit((ev.clientX - b.left) / b.width);
+      applySplit();
+    };
+    const up = () => {
+      document.removeEventListener("mousemove", move);
+      document.removeEventListener("mouseup", up);
+      splitter.classList.remove("drag");
+      document.body.classList.remove("splitting");
+      scheduleSave();
+    };
+    document.addEventListener("mousemove", move);
+    document.addEventListener("mouseup", up);
+  });
+  const setSplit = (r) => {
+    app.split = clampSplit(r);
+    applySplit();
+    scheduleSave();
+  };
+  splitter.addEventListener("dblclick", () => setSplit(0.5));
+  // As in TC: a right click offers fixed splits.
+  splitter.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    if (topModal()) return;
+    const items = [20, 30, 40, 50, 60, 70, 80].map((p) => ({
+      label: `${p} / ${100 - p}${Math.round(app.split * 100) === p ? "  ✓" : ""}`,
+      run: () => setSplit(p / 100),
+    }));
+    popupMenu({ x: e.clientX, y: e.clientY }, items);
+  });
+}
+
 function sessionState() {
   return {
     left: panelState(app.panels.left),
@@ -970,6 +1028,7 @@ function sessionState() {
     active: app.activeSide,
     window: app.geom,
     showHidden: app.showHidden,
+    split: app.split,
   };
 }
 
@@ -1292,6 +1351,9 @@ async function main() {
   app.geom = boot.session.window ?? null;
   app.activeSide = boot.session.active === "right" ? "right" : "left";
   app.showHidden = boot.session.showHidden ?? true;
+  app.split = clampSplit(boot.session.split ?? 0.5);
+  applySplit();
+  initSplitter();
 
   app.panels.left = makePanel("left");
   app.panels.right = makePanel("right");
@@ -1398,6 +1460,8 @@ async function main() {
   app.ready = true;
   scheduleSave();
 
+  // Fn+←/→, Cmd+←/→ and Option+←/→ in text fields as on the Mac (Linux fields do this already).
+  if (!IS_LINUX) installCaretKeys(caretMove);
   document.addEventListener("keydown", onKeyDown);
   document.getElementById("fkeys").addEventListener("click", (e) => {
     const b = e.target.closest("[data-cmd]");
@@ -1420,6 +1484,31 @@ async function main() {
   await refreshConnections();
   initPlayer();
   await T.event.listen("audio://state", (ev) => setPlayer(ev.payload));
+  // Operations in the background: the strip brings the progress back, × empties the queue.
+  const jobsStrip = document.getElementById("jobs");
+  jobsStrip.addEventListener("click", (e) => {
+    if (topModal()) return;
+    if (e.target.closest(".clear")) clearQueue();
+    else showBackgroundJob();
+  });
+  // Quit (Cmd+Q, Exit, red button) with operations running asks first; a second Quit within a
+  // few seconds quits without asking (see quit.rs).
+  await T.event.listen("app://quit-asked", async (ev) => {
+    const running = ev.payload?.running ?? 0;
+    const waiting = queuedCount();
+    const r = await dialog({
+      title: "Quit fxfm",
+      text: [
+        `${running} operation(s) still running${waiting ? `, ${waiting} queued` : ""}.`,
+        "Quit and cancel them? Cancelled copies remove what they had written.",
+      ],
+      buttons: [
+        { label: "Quit", value: "quit" },
+        { label: "Keep working", value: null, default: true },
+      ],
+    });
+    if (r === "quit") invoke("quit_app").catch((e) => status(`Quit: ${e}`));
+  });
   // The Find files window listens to search:// and volumes:// itself.
   await initSearchHost(searchCtx());
   await T.event.listen("search://status", (ev) => optionsSearchStatus(ev.payload));
@@ -1462,7 +1551,7 @@ async function pendingEditsDialog(edits) {
     const r = await dialog(pendingEditsSpec(edits));
     if (r === "show") {
       for (const e of edits) {
-        await invoke("reveal_file", { path: e.local }).catch((err) => status(`Show in Finder: ${err}`));
+        await invoke("reveal_file", { path: e.local }).catch((err) => status(`${SHOW_IN_FILE_MANAGER}: ${err}`));
       }
       continue;
     }

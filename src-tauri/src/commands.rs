@@ -551,7 +551,8 @@ pub async fn view_text_as(path: String, encoding: String) -> Result<ViewContent,
         .await?
 }
 
-/// PDF fallback for the viewer: Quick Look (`qlmanage -p`) on macOS, else the default app.
+/// Quick Look: `qlmanage -p` on macOS, GNOME's previewer on Linux when present, else the
+/// default app.
 #[tauri::command]
 pub async fn quick_look(app: AppHandle, path: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
@@ -566,6 +567,13 @@ pub async fn quick_look(app: AppHandle, path: String) -> Result<(), String> {
             spawn_detached(cmd)
         })
         .await?
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let p = path.clone();
+        if blocking(move || crate::openwith::native::preview(&p)).await? {
+            return Ok(());
+        }
     }
     #[cfg(not(target_os = "macos"))]
     {

@@ -224,6 +224,10 @@ impl EditWatch {
                         return;
                     }
                 };
+                // Reading a copy (also fxfm's own hash) is no change; Linux reports it.
+                if matches!(ev.kind, notify::EventKind::Access(_)) {
+                    return;
+                }
                 let Some(inner) = weak.upgrade() else { return };
                 // The copies the event is about: same folder, same file name.
                 let ids: Vec<u64> = inner

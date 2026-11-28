@@ -60,6 +60,30 @@ pub struct WalkHit {
 }
 
 pub fn default_excludes() -> Vec<String> {
+    if cfg!(target_os = "linux") {
+        // Kernel and runtime filesystems, temporary folders, and the mount folders of other
+        // volumes (indexed on their own when enabled).
+        return [
+            "/proc",
+            "/sys",
+            "/dev",
+            "/run",
+            "/tmp",
+            "/var/tmp",
+            "/media",
+            "/mnt",
+            "/snap",
+            "lost+found",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        // The Trash of this user on other volumes (`.Trash-<uid>`).
+        // SAFETY: getuid cannot fail.
+        .chain(std::iter::once(format!(".Trash-{}", unsafe {
+            libc::getuid()
+        })))
+        .collect();
+    }
     [
         "/System",
         "/private/var",
@@ -458,15 +482,21 @@ mod tests {
 
     #[test]
     fn excludes_by_name_and_path() {
+        // A default exclusion by name: ".Trashes" on macOS, "lost+found" on Linux.
+        let name = if cfg!(target_os = "macos") {
+            ".Trashes"
+        } else {
+            "lost+found"
+        };
         let t = tempfile::tempdir().unwrap();
-        touch(&t.path().join("x/.Trashes/f"));
+        touch(&t.path().join(format!("x/{name}/f")));
         touch(&t.path().join("skip/f"));
         touch(&t.path().join("keep/f"));
         let mut o = opts();
         o.exclude.push(p(t.path(), "skip"));
         let (ix, _) = scan(t.path(), &o);
-        assert!(ix.lookup(&p(t.path(), "x/.Trashes/f")).is_none());
-        assert!(ix.lookup(&p(t.path(), "x/.Trashes")).is_none());
+        assert!(ix.lookup(&p(t.path(), &format!("x/{name}/f"))).is_none());
+        assert!(ix.lookup(&p(t.path(), &format!("x/{name}"))).is_none());
         assert!(ix.lookup(&p(t.path(), "skip/f")).is_none());
         assert!(ix.lookup(&p(t.path(), "keep/f")).is_some());
         assert!(ix.lookup(&p(t.path(), "x")).is_some());

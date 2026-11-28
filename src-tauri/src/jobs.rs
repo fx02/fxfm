@@ -502,6 +502,11 @@ impl Jobs {
     }
 
     /// The bridge of a running job.
+    /// How many jobs are running now.
+    pub fn count(&self) -> usize {
+        self.lock().len()
+    }
+
     pub fn get(&self, job: u64) -> Option<Arc<ConflictBridge>> {
         self.lock().get(&job).cloned()
     }

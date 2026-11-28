@@ -5,7 +5,7 @@
 //! interrupted copy removes only what this operation created, and sources of a
 //! cross-device move are deleted only after their copy completed.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Read, Write};
@@ -231,8 +231,15 @@ pub fn sync_tree(p: &Path) -> io::Result<()> {
 
 /// Deletes the source `src` of a cross-device move whose copy is `copy`, but only what was
 /// copied: a file that appeared in a source folder during the copy (an active download, another
-/// user on a share) or changed after it was copied stays, and so does its folder.
-fn remove_moved(src: &Path, copy: &Path) -> io::Result<()> {
+/// user on a share) or changed after it was copied stays, and so does its folder. A file counts
+/// as unchanged when its size and mtime still match `stamps` (taken from the source when it was
+/// copied): the copy's own mtime is no measure, since many targets (SMB shares, FAT, FTP) do
+/// not keep or round it.
+fn remove_moved(
+    src: &Path,
+    copy: &Path,
+    stamps: &HashMap<PathBuf, (u64, FileTime)>,
+) -> io::Result<()> {
     let md = match fs::symlink_metadata(src) {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -242,7 +249,7 @@ fn remove_moved(src: &Path, copy: &Path) -> io::Result<()> {
         for name in read_dir_sorted(src)? {
             let c = copy.join(&name);
             if fs::symlink_metadata(&c).is_ok() {
-                remove_moved(&src.join(&name), &c)?;
+                remove_moved(&src.join(&name), &c, stamps)?;
             }
         }
         return match fs::remove_dir(src) {
@@ -255,9 +262,9 @@ fn remove_moved(src: &Path, copy: &Path) -> io::Result<()> {
         };
     }
     if md.is_file() {
-        // The copy got the source's size and mtime when it was written.
-        let unchanged = fs::symlink_metadata(copy)
-            .is_ok_and(|c| c.len() == md.len() && mtime_of(&c) == mtime_of(&md));
+        let unchanged = stamps
+            .get(src)
+            .is_some_and(|&(len, t)| len == md.len() && t == mtime_of(&md));
         if !unchanged {
             log::warn!("{} kept: it changed after it was copied", src.display());
             return Ok(());
@@ -294,10 +301,32 @@ pub fn trash(p: &Path) -> Result<Option<PathBuf>, String> {
             .and_then(|u| u.path())
             .map(|p| PathBuf::from(p.to_string())));
     }
+    #[cfg(target_os = "linux")]
+    {
+        // The freedesktop Trash records the original folder canonically.
+        let parent = p.parent().and_then(|d| fs::canonicalize(d).ok());
+        trash_context().delete(p).map_err(|e| e.to_string())?;
+        return Ok(parent.and_then(|d| trashed_file(&d, p.file_name()?)));
+    }
+    #[allow(unreachable_code)]
     trash_context()
         .delete(p)
         .map(|()| None)
         .map_err(|e| e.to_string())
+}
+
+/// Linux: where the item last trashed from `parent/name` is in the Trash (`…/Trash/files/<x>`,
+/// next to its `…/Trash/info/<x>.trashinfo`), for Undo.
+#[cfg(target_os = "linux")]
+fn trashed_file(parent: &Path, name: &std::ffi::OsStr) -> Option<PathBuf> {
+    let item = trash::os_limited::list()
+        .ok()?
+        .into_iter()
+        .filter(|i| i.name == name && i.original_parent == parent)
+        .max_by_key(|i| i.time_deleted)?;
+    let info = Path::new(&item.id);
+    let trash_dir = info.parent()?.parent()?;
+    Some(trash_dir.join("files").join(info.file_stem()?))
 }
 
 /// Creates `parent/name`; `name` may contain `/` to create a chain.
@@ -722,6 +751,9 @@ struct Ctx<'a> {
     force_copy: bool,
     /// `(source, copy)` copied completely during a cross-device move, to delete at the end.
     copied: Vec<(PathBuf, PathBuf)>,
+    /// Size and mtime of each source file of a cross-device move when it was copied: it is
+    /// deleted only while it still matches (see `remove_moved`).
+    stamps: HashMap<PathBuf, (u64, FileTime)>,
     /// (dev, ino) of target directories of this operation; never used as a
     /// source, so a missed into-itself case cannot recurse forever.
     target_dirs: HashSet<(u64, u64)>,
@@ -750,6 +782,7 @@ impl<'a> Ctx<'a> {
             moving: false,
             force_copy: false,
             copied: Vec::new(),
+            stamps: HashMap::new(),
             target_dirs: HashSet::new(),
         })
     }
@@ -1022,6 +1055,11 @@ impl<'a> Ctx<'a> {
                     self.file_done(true, 0);
                     if self.moving {
                         self.copied.push((src.to_path_buf(), target.clone()));
+                        if smd.is_file() {
+                            // As read before the copy: a change during the copy shows too.
+                            self.stamps
+                                .insert(src.to_path_buf(), (smd.len(), mtime_of(smd)));
+                        }
                     }
                     return Ok(true);
                 }
@@ -1297,10 +1335,11 @@ impl<'a> Ctx<'a> {
     }
 
     fn delete_copied_sources(&mut self) -> Result<(), Stop> {
+        let stamps = std::mem::take(&mut self.stamps);
         for (p, copy) in std::mem::take(&mut self.copied) {
             self.check_cancel()?;
             self.set_current(&p);
-            self.attempt(&p, || remove_moved(&p, &copy))?;
+            self.attempt(&p, || remove_moved(&p, &copy, &stamps))?;
         }
         Ok(())
     }
@@ -2388,6 +2427,54 @@ mod tests {
         );
         assert_eq!(read(&d.join("a.txt")), "edited later");
         assert_eq!(read(&d.join("new.txt")), "new");
+    }
+
+    /// A target that does not keep mtimes (an SMB share, FAT, FTP): the moved files are still
+    /// deleted from the source (owner's report 2026-11-28: a move to a share kept every source).
+    #[test]
+    fn cross_device_move_deletes_sources_when_the_target_changes_mtimes() {
+        struct ShareLike {
+            dst: PathBuf,
+        }
+        impl OpObserver for ShareLike {
+            fn progress(&self, _p: &Progress) {
+                // Every copy written so far gets "now" as its mtime, as such targets do.
+                for f in ["d/a.txt", "d/sub/b.txt"] {
+                    let p = self.dst.join(f);
+                    if p.exists() {
+                        let _ = filetime::set_file_mtime(&p, FileTime::now());
+                    }
+                }
+            }
+            fn conflict(&self, _c: &ConflictInfo) -> ConflictAnswer {
+                ConflictAnswer::Skip
+            }
+            fn error(&self, _p: &str, _m: &str) -> ErrorAnswer {
+                ErrorAnswer::Skip
+            }
+            fn is_cancelled(&self) -> bool {
+                false
+            }
+        }
+        let t = tempfile::tempdir().unwrap();
+        let (d, dst) = (t.path().join("d"), t.path().join("dst"));
+        fs::create_dir_all(d.join("sub")).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        write(&d.join("a.txt"), "a");
+        write(&d.join("sub/b.txt"), "b");
+        set_mtime(&d.join("a.txt"), 1_000_000_000);
+        set_mtime(&d.join("sub/b.txt"), 1_000_000_000);
+        let obs = ShareLike { dst: dst.clone() };
+        move_impl(
+            std::slice::from_ref(&d),
+            &Dest::IntoDir(dst.clone()),
+            &obs,
+            true,
+        )
+        .unwrap();
+        assert_eq!(read(&dst.join("d/a.txt")), "a");
+        assert_eq!(read(&dst.join("d/sub/b.txt")), "b");
+        assert!(!exists(&d), "the moved folder is gone from the source");
     }
 
     #[test]

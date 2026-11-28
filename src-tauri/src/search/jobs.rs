@@ -5,6 +5,9 @@ use super::*;
 
 impl Inner {
     pub(super) fn load(&self) {
+        // The mount list may be older than this job (the index was turned on later): the
+        // enabled volumes mounted now are queued below.
+        self.refresh_mounts();
         let cancel = lock(&self.run).cancel.clone();
         if self.read().is_none() {
             let dir = lock(&self.run).dir.clone();

@@ -1,8 +1,9 @@
 # fxfm
 
-A Total Commander-style dual-panel file manager for macOS: two panels, TC's keys
-(F3–F8, Tab, Ctrl+D…) and its way of working, on local disks, inside archives
-and on servers. One universal app for Apple Silicon and Intel Macs, macOS 15 or later.
+A Total Commander-style dual-panel file manager for macOS and Linux: two panels, TC's
+keys (F3–F8, Tab, Ctrl+D…) and its way of working, on local disks, inside archives
+and on servers. One universal app for Apple Silicon and Intel Macs (macOS 15 or later),
+and Debian packages for amd64 and arm64 (Ubuntu 22.04+, Pop!_OS 22.04+, Linux Mint 21+, Debian 12+).
 
 ![Main window: two panels, a local website project on the left and music on the right](docs/screenshots/main.png)
 
@@ -16,7 +17,8 @@ and on servers. One universal app for Apple Silicon and Intel Macs, macOS 15 or 
   the Trash (F8), rename in place (F2), mark with Space/Insert, quick search
   (Cmd+letters), a command line, a directory hotlist (Ctrl+D), the drive menu
   (Alt+F1/F2). Every key can be changed, and Option, Control or Command can play
-  TC's Alt and Ctrl.
+  TC's Alt and Ctrl. Copies and moves can run **in the background** or wait in a
+  **queue** while you keep working.
 - **Archives as folders**: ZIP, 7z and TAR (also .tar.gz, .tar.bz2, .tar.xz)
   open like folders, even inside each other; copy in and out, edit, delete and
   rename inside them. Pack files into a new archive (Alt+F5), a ZIP also with a

@@ -1,5 +1,6 @@
-//! Finder's icons for the panel rows (Options → View → Icons: Finder). The UI asks once per
-//! icon key and caches the result:
+//! The system's icons for the panel rows (Options → View → Icons: Finder / system icons):
+//! Finder's on macOS, the GTK icon theme on Linux. The UI asks once per icon key and caches
+//! the result:
 //! - `dir`: the plain folder icon;
 //! - `file`: the plain document icon (no extension);
 //! - `ext:<extension>`: the icon of that file type;
@@ -10,18 +11,56 @@
 use std::collections::HashMap;
 
 /// Side of the bitmap in pixels: rows show icons at about 16 points, so 32 covers Retina.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const SIZE: f64 = 32.0;
 
 /// PNG data URLs for `keys`; a key whose icon cannot be made is left out.
 #[tauri::command]
-pub async fn file_icons(keys: Vec<String>) -> HashMap<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+pub async fn file_icons(app: tauri::AppHandle, keys: Vec<String>) -> HashMap<String, String> {
+    let make = move || -> HashMap<String, String> {
         keys.into_iter()
             .filter_map(|k| native::png(&k).map(|png| (k, data_url(&png))))
             .collect()
-    })
-    .await
-    .unwrap_or_default()
+    };
+    // GTK may only be used on the main thread.
+    #[cfg(target_os = "linux")]
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if app
+            .run_on_main_thread(move || drop(tx.send(make())))
+            .is_err()
+        {
+            return HashMap::new();
+        }
+        tauri::async_runtime::spawn_blocking(move || rx.recv().unwrap_or_default())
+            .await
+            .unwrap_or_default()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = app;
+        tauri::async_runtime::spawn_blocking(make)
+            .await
+            .unwrap_or_default()
+    }
+}
+
+/// The freedesktop icon name for a macOS `sys:` folder icon key (special folders get their
+/// own icons, the other folder styles the plain folder).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn freedesktop_folder(key: &str) -> &'static str {
+    match key.strip_prefix("sys:").unwrap_or("") {
+        "HomeFolderIcon" | "SidebarHomeFolder" => "user-home",
+        "DesktopFolderIcon" | "SidebarDesktopFolder" => "user-desktop",
+        "DocumentsFolderIcon" | "SidebarDocumentsFolder" => "folder-documents",
+        "DownloadsFolder" | "SidebarDownloadsFolder" => "folder-download",
+        "MovieFolderIcon" | "SidebarMoviesFolder" => "folder-videos",
+        "MusicFolderIcon" | "SidebarMusicFolder" => "folder-music",
+        "PicturesFolderIcon" | "SidebarPicturesFolder" => "folder-pictures",
+        "PublicFolderIcon" => "folder-publicshare",
+        "OpenFolderIcon" => "folder-open",
+        _ => "folder",
+    }
 }
 
 fn data_url(png: &[u8]) -> String {
@@ -33,9 +72,11 @@ fn data_url(png: &[u8]) -> String {
 }
 
 /// Where macOS keeps its system icons.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const CORE_TYPES: &str = "/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources";
 
 /// The `.icns` file of a `sys:` key: letters and digits only, and it must exist.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn system_icon(key: &str) -> Option<std::path::PathBuf> {
     let name = key.strip_prefix("sys:")?;
     if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric()) {
@@ -90,7 +131,55 @@ mod native {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+mod native {
+    use super::{file_type, freedesktop_folder};
+    use gtk::gdk_pixbuf::Pixbuf;
+    use gtk::gio::{self, prelude::*};
+    use gtk::prelude::*;
+
+    /// Side of the bitmap in pixels (rows show about 16 px; 32 covers HiDPI).
+    const PX: i32 = 32;
+
+    /// Call on the main thread (GTK).
+    pub fn png(key: &str) -> Option<Vec<u8>> {
+        let theme = gtk::IconTheme::default()?;
+        let icon: gio::Icon = if key == "dir" || key.starts_with("sys:") {
+            let name = if key == "dir" {
+                "folder"
+            } else {
+                freedesktop_folder(key)
+            };
+            gio::ThemedIcon::with_default_fallbacks(name).upcast()
+        } else if let Some(path) = key.strip_prefix("path:") {
+            if !path.starts_with('/') || std::fs::symlink_metadata(path).is_err() {
+                return None;
+            }
+            gio::File::for_path(path)
+                .query_info(
+                    "standard::icon",
+                    gio::FileQueryInfoFlags::NONE,
+                    gio::Cancellable::NONE,
+                )
+                .ok()?
+                .icon()?
+        } else {
+            let ext = file_type(key).filter(|_| key.starts_with("ext:"));
+            let (ct, _) = gio::content_type_guess(ext.map(|e| format!("x.{e}")).as_deref(), &[]);
+            let ct = if key == "file" {
+                "application/octet-stream".into()
+            } else {
+                ct
+            };
+            gio::content_type_get_icon(&ct)
+        };
+        let info = theme.lookup_by_gicon(&icon, PX, gtk::IconLookupFlags::FORCE_SIZE)?;
+        let pix: Pixbuf = info.load_icon().ok()?;
+        pix.save_to_bufferv("png", &[]).ok()
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod native {
     pub fn png(_key: &str) -> Option<Vec<u8>> {
         None
@@ -128,5 +217,13 @@ mod tests {
         assert!(native::png("sys:NoSuchIcon").is_none());
         assert!(native::png("path:/no/such/file").is_none());
         assert!(data_url(b"x").starts_with("data:image/png;base64,"));
+    }
+
+    #[test]
+    fn mac_folder_icons_have_freedesktop_names() {
+        assert_eq!(freedesktop_folder("sys:DownloadsFolder"), "folder-download");
+        assert_eq!(freedesktop_folder("sys:SidebarHomeFolder"), "user-home");
+        assert_eq!(freedesktop_folder("sys:SmartFolderIcon"), "folder");
+        assert_eq!(freedesktop_folder("dir"), "folder");
     }
 }

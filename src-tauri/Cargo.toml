@@ -1,6 +1,6 @@
 [package]
 name = "fxfm"
-version = "0.1.23"
+version = "0.1.28"
 edition = "2021"
 
 [build-dependencies]
@@ -20,6 +20,10 @@ sha2 = "0.10"
 base64 = "0.22"
 # F3 audio output (decoding is in fxfm-core).
 cpal = "0.18.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The GTK that Tauri itself uses on Linux (icon theme, clipboard, file chooser bits).
+gtk = "0.18"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"

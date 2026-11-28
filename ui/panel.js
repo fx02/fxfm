@@ -209,6 +209,15 @@ export class Panel {
       const r = ev.target.closest("[data-i]");
       if (!r) return;
       const i = Number(r.dataset.i);
+      // As in TC: Ctrl+click (Cmd+click too) marks or unmarks one entry, Shift+click marks
+      // from the cursor to the clicked entry. No drag starts from such a click.
+      if (ev.button === 0 && (ev.ctrlKey || ev.metaKey || ev.shiftKey)) {
+        ev.preventDefault();
+        if (ev.shiftKey) this.markRange(this.cursorIndex, i);
+        else this.toggleAt(i);
+        this.setCursor(i);
+        return;
+      }
       if (ev.button === 0) this.api.onRowPress(this, i, ev);
       this.setCursor(i);
     });
@@ -216,6 +225,8 @@ export class Panel {
     // empty space below the rows.
     this.listEl.addEventListener("contextmenu", (ev) => {
       ev.preventDefault();
+      // Control+click on a Mac is also a right click: it marked the entry above, no menu.
+      if (ev.ctrlKey && ev.button === 0) return;
       const r = ev.target.closest("[data-i]");
       this.api.onContextMenu(this, r ? Number(r.dataset.i) : null, ev.clientX, ev.clientY);
     });
@@ -680,6 +691,25 @@ export class Panel {
       }
     }
     this.setCursor(this.cursorIndex + 1);
+  }
+
+  /** Ctrl+click: marks or unmarks the entry at `i`. */
+  toggleAt(i) {
+    const e = this.entries[i];
+    if (!e || e.up) return;
+    if (this.marked.has(e.name)) this.marked.delete(e.name);
+    else this.marked.add(e.name);
+    this.render();
+  }
+
+  /** Shift+click: marks every entry from `a` to `b` (both included; ".." stays unmarked). */
+  markRange(a, b) {
+    const [lo, hi] = a <= b ? [a, b] : [b, a];
+    for (let k = Math.max(0, lo); k <= hi && k < this.entries.length; k++) {
+      const e = this.entries[k];
+      if (!e.up) this.marked.add(e.name);
+    }
+    this.render();
   }
 
   markAll() {

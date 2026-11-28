@@ -188,3 +188,26 @@ old (Synchronize_directories last edited 2009, Quick_search 2012).
 
 Limits: TC branch view pages returned 404; FreeFileSync and ForkLift pages did not describe the
 result-list layout or row filters; nothing was installed or run.
+
+# Benchmark for the surfaces of 2026-11-27 (read 2026-11-28)
+
+Read by a fetch agent. Its summaries are paraphrase-grade. TC's manual (.chm) was not readable online, so TC claims come from history.txt, the wiki and the forum.
+
+| Topic | Tool | Observed | URL |
+|---|---|---|---|
+| Background / queue | TC | F5 then F2 puts the copy into the Background Transfer Manager (forum); the manager has + / − buttons (history.txt 11.50) | https://www.ghisler.com/history.txt ; https://ghisler.ch/board/viewtopic.php?p=439972 |
+| Background / queue | Double Commander | Operations Viewer (Alt+V) lists the operations; change the order in the queue, stop or pause; progress in its own window, minimized, or a panel above the function keys | https://doublecmd.github.io/doc/en/help.html ; https://doublecmd.github.io/doc/en/cmds.html |
+| Background / queue | ForkLift 4 | the manual mentions only an "Activities" view | https://binarynights.com/manual |
+| Content search | TC | "Find text"; ANSI, ASCII, UTF-16, UTF-8 at once (8.50); FTP search (11.57) | https://www.ghisler.com/advanced.htm ; https://www.ghisler.com/850.htm |
+| Content search | Double Commander | case sensitive, hexadecimal, regular expression, encoding choice, search in archives | https://doublecmd.github.io/doc/en/findfiles.html |
+| Content search | ForkLift 4 | own search reads files one by one, also on remote connections; Spotlight for local content | https://binarynights.com/manual |
+| Results sorting | TC, DC, ForkLift | header sorting not stated; feed to listbox in TC and DC | as above |
+| Splitter | TC | right-click on the divider gives presets incl. 50 %; double-click 50/50 (forum, TC 7 era); Ctrl+drag snaps to 25 %; cm_50Percent | https://www.ghisler.ch/wiki/index.php/Position_of_window_divider |
+| Splitter | Double Commander | drag with a width tooltip; right-click 20/80 … 80/20; cm_PanelsSplitterPerPos | https://doublecmd.github.io/doc/en/help.html |
+| Connection dialogs | ForkLift 4 | favorites organized into groups in the sidebar | https://binarynights.com/manual |
+| Connection dialogs | TC, DC | resizing and groups not stated | as above |
+
+**Limits:**
+- These pages returned 404: DC `queue.html`, TC wiki Queue and Background_Transfer_Manager.
+- history.txt was read only partly.
+- Nothing was installed or run.

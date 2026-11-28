@@ -37,15 +37,32 @@ function keyFromCode(code) {
 export const DEFAULT_MODIFIERS = Object.freeze({ alt: "option", ctrl: "control" });
 
 /**
- * Mac keys that can act as Alt or Ctrl, with their names. WebKit never reports Fn, so the app
- * tracks it natively (`keys://fn` → `setFnHeld`).
+ * True in the Linux build (WebKitGTK names Linux in its user agent; Node in the tests does not):
+ * key names, words like "Finder" and some defaults follow the platform.
  */
-export const MAC_KEYS = [
-  ["option", "Option"],
-  ["control", "Control"],
-  ["command", "Command"],
-  ["fn", "Fn (globe)"],
-];
+export const IS_LINUX =
+  typeof navigator !== "undefined" && /\bLinux\b/.test(navigator.userAgent ?? "") && !/Android/.test(navigator.userAgent ?? "");
+
+/** "Show in Finder" on macOS, "Show in file manager" on Linux. */
+export const SHOW_IN_FILE_MANAGER = IS_LINUX ? "Show in file manager" : "Show in Finder";
+
+/**
+ * Keys that can act as Alt or Ctrl, with their names (the ids are the Mac keys; on Linux Option
+ * is Alt and Command is Super). WebKit never reports Fn, so macOS tracks it natively
+ * (`keys://fn` → `setFnHeld`); Linux has no such key for programs.
+ */
+export const MAC_KEYS = IS_LINUX
+  ? [
+      ["option", "Alt"],
+      ["control", "Ctrl"],
+      ["command", "Super"],
+    ]
+  : [
+      ["option", "Option"],
+      ["control", "Control"],
+      ["command", "Command"],
+      ["fn", "Fn (globe)"],
+    ];
 
 let fnHeld = false;
 
@@ -123,11 +140,15 @@ function keyCombo(e, map) {
 export function captureRefusal(e, map = DEFAULT_MODIFIERS) {
   const r = keyCombo(e, map);
   if (r.why === "macOwned") {
+    if (IS_LINUX) {
+      const physical = (e.ctrlKey ? "Ctrl+" : "") + (e.altKey ? "Alt+" : "") + (e.shiftKey ? "Shift+" : "") + "Super+";
+      return `${physical}${r.key} belongs to the desktop.`;
+    }
     const physical = (e.ctrlKey ? "⌃" : "") + (e.altKey ? "⌥" : "") + (e.shiftKey ? "⇧" : "") + "⌘";
     return `${physical}${r.key} is reserved by macOS.`;
   }
   if (r.why === "stray") {
-    const name = e.ctrlKey && map.alt !== "control" && map.ctrl !== "control" ? "Control" : "Option";
+    const name = e.ctrlKey && map.alt !== "control" && map.ctrl !== "control" ? (IS_LINUX ? "Ctrl" : "Control") : IS_LINUX ? "Alt" : "Option";
     return `${name} is neither Alt nor Ctrl now; choose the Alt and Ctrl keys above.`;
   }
   return null;
@@ -165,10 +186,17 @@ export function physicalCombo(combo, map = DEFAULT_MODIFIERS) {
 
 const ARROWS = { Up: "↑", Down: "↓", Left: "←", Right: "→" };
 
-/** Label of a TC combo with the Mac keys in use, as macOS menus write it: "⌥F5", "⌃⇧F". */
-export function comboLabel(combo, map = DEFAULT_MODIFIERS) {
+/**
+ * Label of a TC combo with the keys in use: as macOS menus write it ("⌥F5", "⌃⇧F"), or on
+ * Linux as text ("Alt+F5", "Ctrl+Shift+F", Command is Super).
+ */
+export function comboLabel(combo, map = DEFAULT_MODIFIERS, linux = IS_LINUX) {
   const p = splitCombo(physicalCombo(combo, map));
-  return (p.fn ? "fn " : "") + (p.ctrl ? "⌃" : "") + (p.alt ? "⌥" : "") + (p.shift ? "⇧" : "") + (p.cmd ? "⌘" : "") + (ARROWS[p.key] ?? p.key);
+  const key = ARROWS[p.key] ?? p.key;
+  if (linux) {
+    return (p.ctrl ? "Ctrl+" : "") + (p.alt ? "Alt+" : "") + (p.shift ? "Shift+" : "") + (p.cmd ? "Super+" : "") + key;
+  }
+  return (p.fn ? "fn " : "") + (p.ctrl ? "⌃" : "") + (p.alt ? "⌥" : "") + (p.shift ? "⇧" : "") + (p.cmd ? "⌘" : "") + key;
 }
 
 /**
@@ -1048,12 +1076,46 @@ export function modalKeyBlocked(k, msSinceOpen) {
 }
 
 /** Inline rename: {kind:"same"} | {kind:"invalid", reason} | {kind:"rename", name} (no trimming). */
-export function renameDecision(original, value) {
+export function renameDecision(original, value, dir = null) {
   if (value === original) return { kind: "same" };
   if (!value.trim()) return { kind: "invalid", reason: "empty name" };
-  if (value.includes("/")) return { kind: "invalid", reason: "name contains '/'" };
+  if (value.includes("/")) {
+    // As in TC: a path moves the item ("../a.txt" one folder up, "sub/a.txt" into sub).
+    const target = dir == null ? null : renameTarget(dir, original, value);
+    if (!target) return { kind: "invalid", reason: `invalid path '${value}'` };
+    if (target === joinLocation(dir, original)) return { kind: "same" };
+    return { kind: "move", target };
+  }
   if (value === "." || value === "..") return { kind: "invalid", reason: `invalid name '${value}'` };
   return { kind: "rename", name: value };
+}
+
+/**
+ * F2 with a path (TC): where `original` in the folder `dir` goes for the typed `value`:
+ * relative to `dir` (".." goes up), absolute ("/…") for a local folder; a trailing "/" keeps
+ * the name. On a server the path stays on that server. Null when it would end above the root,
+ * is empty, or is absolute on a server.
+ */
+export function renameTarget(dir, original, value) {
+  const r = parseRemote(dir);
+  const base = r ? r.path || "/" : dir;
+  if (value.startsWith("/") && r) return null;
+  const parts = (value.startsWith("/") ? [] : base.split("/")).filter(Boolean);
+  const typed = value.split("/");
+  const keepName = value.endsWith("/");
+  for (const p of typed) {
+    if (!p || p === ".") continue;
+    if (p === "..") {
+      if (!parts.length) return null;
+      parts.pop();
+    } else {
+      parts.push(p);
+    }
+  }
+  if (keepName) parts.push(original);
+  if (!parts.length) return null;
+  const path = `/${parts.join("/")}`;
+  return r ? `${r.scheme}://${r.server}${path}` : path;
 }
 
 /** First real component of a relative path ("./a/b" -> "a"). */
@@ -1319,6 +1381,77 @@ export function reorderStep(e, map) {
   return e.key === "ArrowUp" ? -1 : 1;
 }
 
+/**
+ * The operations strip above the F-key bar: `running` background jobs [{kind, progress}] and
+ * how many are `queued`. Returns {text, ratio} (ratio 0..1 of the first job's bytes, or of its
+ * files when it has no bytes) or null when there is nothing to show.
+ */
+export function jobsStrip(running, queued) {
+  if (!running.length && !queued) return null;
+  const verb = { copy: "Copying", move: "Moving", delete: "Deleting", upload: "Uploading", pack: "Packing" };
+  const parts = [];
+  let ratio = 0;
+  const first = running[0];
+  if (first) {
+    const p = first.progress;
+    const part = (d, t) => (t > 0 ? Math.min(1, d / t) : 0);
+    ratio = p ? (p.totalBytes > 0 ? part(p.doneBytes, p.totalBytes) : part(p.doneFiles, p.totalFiles)) : 0;
+    const name = p?.current ? ` ${p.current.slice(p.current.lastIndexOf("/") + 1)}` : "…";
+    parts.push(`${verb[first.kind] ?? "Working"}${name} ${Math.floor(ratio * 100)}%`);
+    if (running.length > 1) parts.push(`${running.length - 1} more running`);
+  } else {
+    parts.push("Starting…");
+  }
+  if (queued) parts.push(`${queued} queued`);
+  return { text: parts.join(" · "), ratio };
+}
+
+/** The splitter keeps each panel at least this share of the width. */
+export const SPLIT_MIN = 0.1;
+
+/** The left panel's share of the width (dragged splitter, saved session): 10–90 %, 50 % for junk. */
+export function clampSplit(r) {
+  const n = typeof r === "number" ? r : Number.NaN;
+  if (!Number.isFinite(n)) return 0.5;
+  return Math.round(Math.min(1 - SPLIT_MIN, Math.max(SPLIT_MIN, n)) * 1000) / 1000;
+}
+
+const WORD_CHAR = /[\p{L}\p{N}_]/u;
+
+/**
+ * Caret keys of the Mac in a one-line text field, for every field in fxfm (rename, questions,
+ * the command line, Find files): Home/End (Fn+←/→) and Cmd+←/→ go to the start/end, Option+←/→
+ * one word left/right; Shift extends the selection. `sel` is {start, end, backward}; returns
+ * the new {start, end, backward}, or null for any other key.
+ */
+export function caretMove(value, sel, key, { alt = false, cmd = false, shift = false } = {}) {
+  let left;
+  let unit;
+  if (key === "Home" || key === "End") {
+    left = key === "Home";
+    unit = "line";
+  } else if ((key === "ArrowLeft" || key === "ArrowRight") && (alt || cmd)) {
+    left = key === "ArrowLeft";
+    unit = cmd ? "line" : "word";
+  } else {
+    return null;
+  }
+  const anchor = sel.backward ? sel.end : sel.start;
+  const focus = sel.backward ? sel.start : sel.end;
+  // Without Shift a selection collapses on the side the caret moves to, then moves.
+  let pos = shift ? focus : left ? sel.start : sel.end;
+  if (unit === "line") pos = left ? 0 : value.length;
+  else if (left) {
+    while (pos > 0 && !WORD_CHAR.test(value[pos - 1])) pos--;
+    while (pos > 0 && WORD_CHAR.test(value[pos - 1])) pos--;
+  } else {
+    while (pos < value.length && !WORD_CHAR.test(value[pos])) pos++;
+    while (pos < value.length && WORD_CHAR.test(value[pos])) pos++;
+  }
+  if (!shift) return { start: pos, end: pos, backward: false };
+  return pos < anchor ? { start: pos, end: anchor, backward: true } : { start: anchor, end: pos, backward: false };
+}
+
 /** Connect to server: groups hold servers and groups, at most this many levels deep. */
 export const GROUP_LEVELS = 3;
 
@@ -1415,6 +1548,7 @@ const SYSTEM_USES = {
 
 /** Warning for a binding (TC combo) macOS takes before fxfm sees it, with the keys in use under `map`. */
 export function conflictMessage(combo, map = DEFAULT_MODIFIERS) {
+  if (IS_LINUX) return `The desktop may use ${comboLabel(combo, map)} itself; choose another key if it does not reach fxfm.`;
   const use = SYSTEM_USES[physicalCombo(combo, map)] ?? "a system shortcut";
   return `macOS uses ${comboLabel(combo, map)} for ${use}. Turn it off in System Settings → Keyboard → Keyboard Shortcuts or choose another key.`;
 }
@@ -1531,7 +1665,7 @@ export function pendingEditsDialog(edits) {
       ...edits.map((e) => `${e.location} → ${e.local}`),
     ],
     buttons: [
-      { label: "Show in Finder", value: "show" },
+      { label: SHOW_IN_FILE_MANAGER, value: "show" },
       { label: "Keep", value: "keep", default: true },
       { label: "Discard", value: "discard" },
     ],
@@ -2225,7 +2359,7 @@ export function specialFolderIcon(path, home, sidebar = false) {
 
 /** Row icon styles for Options → View: macOS's own icons (default) or emoji. */
 export const ICON_STYLES = [
-  ["finder", "Finder (macOS icons)"],
+  ["finder", IS_LINUX ? "System icons" : "Finder (macOS icons)"],
   ["classic", "Classic (yellow folders)"],
   ["outline", "Outline (line icons)"],
   ["emoji", "Emoji"],
@@ -2431,21 +2565,28 @@ export function searchSettingsPatch(settings, change) {
 // ---------------------------------------------------------------- quick search
 
 /**
- * Quick search (TC Alt+letters): which keys type into it. Settings `quickSearch`;
- * "command" is the default because Command sits where TC's Alt is on a PC keyboard.
+ * Quick search (TC Alt+letters): which keys type into it. Settings `quickSearch`; the default
+ * is "command" on macOS (Command sits where TC's Alt is on a PC keyboard) and TC's own
+ * Alt+letters ("option") on Linux, where Super belongs to the desktop.
  */
-export const QUICK_SEARCH_KEYS = [
-  ["command", "Command+letters"],
-  ["controlCommand", "Control+Command+letters"],
-  ["option", "Option+letters"],
-  ["letters", "Letters alone"],
-  ["off", "Off"],
-];
+export const QUICK_SEARCH_KEYS = IS_LINUX
+  ? [
+      ["option", "Alt+letters"],
+      ["letters", "Letters alone"],
+      ["off", "Off"],
+    ]
+  : [
+      ["command", "Command+letters"],
+      ["controlCommand", "Control+Command+letters"],
+      ["option", "Option+letters"],
+      ["letters", "Letters alone"],
+      ["off", "Off"],
+    ];
 
-/** The quick search key setting of `settings`; unknown values give "command". */
+/** The quick search key setting of `settings`; unknown values give the platform default. */
 export function quickSearchMode(settings) {
   const v = settings?.quickSearch;
-  return QUICK_SEARCH_KEYS.some(([id]) => id === v) ? v : "command";
+  return QUICK_SEARCH_KEYS.some(([id]) => id === v) ? v : QUICK_SEARCH_KEYS[0][0];
 }
 
 /** Command shortcuts macOS keeps (Quit, Hide) never type into the quick search. */
@@ -2705,7 +2846,7 @@ export const CONTEXT_ITEMS = [
   ["cm_view", "View"],
   ["open_with", "Open with…"],
   ["quick_look", "Quick Look"],
-  ["show_in_finder", "Show in Finder"],
+  ["show_in_finder", SHOW_IN_FILE_MANAGER],
   "-",
   ["cm_copy_names_to_clip", "Copy name"],
   ["cm_copy_full_names_to_clip", "Copy path"],

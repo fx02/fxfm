@@ -20,6 +20,7 @@ import {
   syncShowKind,
   syncSort,
   syncSymbol,
+  IS_LINUX,
 } from "./lib.mjs";
 import { dialog, handleModalKey } from "./dialogs.js";
 import { SYNC_COMMAND, SYNC_LAYOUT_KEY } from "./sync.js";
@@ -179,7 +180,7 @@ function showWindow(start) {
   const note = el(
     "p",
     "note",
-    "→ / ← copy that way, Shift+→ / Shift+← move the item on that side to the Trash, Space skips; they act on the picked rows (Shift+↑/↓, Shift-click, ⌘-click) or the cursor row. Click a symbol to change only its row. Synchronize asks before doing anything.",
+    `→ / ← copy that way, Shift+→ / Shift+← move the item on that side to the Trash, Space skips; they act on the picked rows (Shift+↑/↓, Shift-click, ${IS_LINUX ? "Ctrl" : "⌘"}-click) or the cursor row. Click a symbol to change only its row. Synchronize asks before doing anything.`,
   );
   const statusLine = el("div", "sstatus");
   body.append(optLine, sides, head, list, note, statusLine);

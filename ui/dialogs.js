@@ -22,6 +22,8 @@ import {
   formatK,
   groupSources,
   groupThousands,
+  jobsStrip,
+  IS_LINUX,
   jobErrorBox,
   jobServers,
   joinLocation,
@@ -124,7 +126,8 @@ export function handleModalKey(e) {
 }
 
 /**
- * Modal dialog. buttons: [{label, value, default?}]; resolves with the clicked
+ * Modal dialog. buttons: [{label, value, default?, key?}] (`key`: a function key that presses
+ * the button, e.g. "F2"); resolves with the clicked
  * value (Enter = focused or default button, Escape = null). With `input`
  * (initial text) it resolves with {value, text}; `select` ({start, end})
  * limits the initial selection. `ctl.close()` (set by the dialog) closes it
@@ -172,6 +175,15 @@ export function dialog({ title, text, input, inputType = "text", select, buttons
         const focused = document.activeElement;
         const btn = focused?.tagName === "BUTTON" && box.contains(focused) ? focused : def;
         if (btn) btn.click();
+      } else if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && document.activeElement?.parentElement === row) {
+        // As in TC: Left/Right walk the buttons (Right, Enter = the next one, e.g. Overwrite all).
+        e.preventDefault();
+        const all = [...row.querySelectorAll("button:not(:disabled)")];
+        const i = all.indexOf(document.activeElement);
+        all[(i + (e.key === "ArrowRight" ? 1 : all.length - 1)) % all.length]?.focus();
+      } else if (!e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && buttons.some((b) => b.key === e.key)) {
+        e.preventDefault();
+        finish(buttons.find((b) => b.key === e.key).value);
       }
     };
     pushModal(modal);
@@ -305,6 +317,76 @@ function route(type, payload) {
 
 const TITLES = { copy: "Copying", move: "Moving", delete: "Deleting", upload: "Uploading", pack: "Packing" };
 
+// ---------------------------------------------------------------- background jobs and the queue
+
+/** F5/F6 "Queue": transfers waiting to run in the background, one after the other. */
+const queued = [];
+let queueBusy = false;
+
+/** Repaints the operations strip above the F-key bar (background jobs and the queue). */
+function paintJobs() {
+  const strip = document.getElementById("jobs");
+  if (!strip) return;
+  const running = [...jobs.values()].filter((j) => j.background);
+  const s = jobsStrip(
+    running.map((j) => ({ kind: j.req.kind, progress: j.progress })),
+    queued.length,
+  );
+  strip.classList.toggle("off", !s);
+  if (!s) return;
+  strip.querySelector(".what").textContent = s.text;
+  strip.querySelector(".bar > div").style.width = `${s.ratio * 100}%`;
+  strip.querySelector(".clear").hidden = !queued.length;
+}
+
+/** A click on the strip: the first background job's progress window again. */
+export function showBackgroundJob() {
+  [...jobs.values()].find((j) => j.background)?.toForeground();
+}
+
+/** × on the strip: drops the operations still waiting (the running one goes on). */
+export async function clearQueue() {
+  if (!queued.length) return;
+  const n = queued.length;
+  const r = await dialog({ title: "Queue", text: `Remove the ${n} queued operation(s)? The running one goes on.`, buttons: YES_NO });
+  if (r !== "yes") return;
+  queued.splice(0, n);
+  paintJobs();
+}
+
+/** How many operations wait in the queue (the quit question counts them). */
+export function queuedCount() {
+  return queued.length;
+}
+
+/** F5/F6 "Queue": the transfer runs in the background after the ones queued before it. */
+function enqueue(item) {
+  queued.push(item);
+  // The marked items are on their way: the panel is free for the next ones.
+  item.source?.clearMarks();
+  item.source = null;
+  paintJobs();
+  if (!queueBusy) runQueue();
+}
+
+async function runQueue() {
+  queueBusy = true;
+  try {
+    while (queued.length) {
+      const it = queued.shift();
+      paintJobs();
+      try {
+        await transfer(it.kind, { ...it, background: true });
+      } catch (e) {
+        console.error("fxfm: queued operation", e);
+      }
+    }
+  } finally {
+    queueBusy = false;
+    paintJobs();
+  }
+}
+
 /** One background job: progress dialog (after 300 ms), conflict and error questions. */
 class Job {
   /** `start()` resolves with the job id (default: `start_job` with `req`). */
@@ -319,6 +401,8 @@ class Job {
     this.timer = 0;
     /** Shared by the jobs of one F5/F6 from a results list: an "all" answer holds for all. */
     this.shared = null;
+    /** Runs without its progress window, shown on the strip above the F-key bar. */
+    this.background = false;
   }
 
   /** Runs the job; resolves with the job://done payload. */
@@ -328,7 +412,8 @@ class Job {
     });
     this.id = await this.start();
     jobs.set(this.id, this);
-    this.timer = setTimeout(() => this.showView(), 300);
+    if (!this.background) this.timer = setTimeout(() => this.showView(), 300);
+    paintJobs();
     for (const [type, payload] of early.get(this.id) ?? []) this.handle(type, payload);
     early.delete(this.id);
     return done;
@@ -350,6 +435,7 @@ class Job {
   finish(payload) {
     clearTimeout(this.timer);
     jobs.delete(this.id);
+    paintJobs();
     deferredViews.delete(this);
     this.question?.close();
     if (this.view) popModal(this.view.modal);
@@ -365,8 +451,25 @@ class Job {
     ctx.invoke("cancel_job", { job: this.id }).catch((e) => console.error("fxfm: cancel_job", e));
   }
 
+  /** "Background": the window goes, the job goes on (the strip shows it). */
+  toBackground() {
+    this.background = true;
+    clearTimeout(this.timer);
+    deferredViews.delete(this);
+    if (this.view) popModal(this.view.modal);
+    this.view = null;
+    paintJobs();
+  }
+
+  /** A click on the strip: the progress window again. */
+  toForeground() {
+    this.background = false;
+    paintJobs();
+    this.showView();
+  }
+
   showView() {
-    if (this.view || !jobs.has(this.id)) return;
+    if (this.background || this.view || !jobs.has(this.id)) return;
     if (blockingTop()) {
       // Shown once the question/prompt is closed, so keys never go to the wrong job.
       deferredViews.add(this);
@@ -384,9 +487,12 @@ class Job {
     const bytesFill = el("div", "fill");
     bytesBar.append(bytesFill);
     body.append(current, filesLabel, filesBar, bytesLabel, bytesBar);
+    const bgBtn = el("button", null, "F2 Background");
+    bgBtn.title = "Go on working; the operation runs on, shown above the function keys (click there to see it again)";
+    bgBtn.addEventListener("click", () => this.toBackground());
     const cancelBtn = el("button", null, "Cancel");
     cancelBtn.addEventListener("click", () => this.cancel());
-    row.append(cancelBtn);
+    row.append(bgBtn, cancelBtn);
     const modal = { el: backdrop, progress: true };
     modal.onKey = (e) => {
       if (e.key === "Escape") {
@@ -398,6 +504,10 @@ class Job {
       } else if (e.key === "Enter") {
         e.preventDefault();
         if (document.activeElement === cancelBtn && !cancelBtn.disabled) this.cancel();
+        else if (document.activeElement === bgBtn) this.toBackground();
+      } else if (e.key === "F2" && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+        e.preventDefault();
+        this.toBackground();
       }
     };
     this.view = { modal, current, filesLabel, filesFill, bytesLabel, bytesFill, cancelBtn };
@@ -406,6 +516,7 @@ class Job {
   }
 
   paint() {
+    if (this.background) paintJobs();
     const v = this.view;
     const p = this.progress;
     if (!v || !p) return;
@@ -547,13 +658,14 @@ const OVERWRITE_CANCEL = [
  * job's `job://done` payload, or null when no job ran. `recheck: false` leaves the search
  * results lists alone after a move/delete (the caller rechecks once at its end).
  */
-async function runJob(req, source, { recheck = true, shared = null } = {}) {
+async function runJob(req, source, { recheck = true, shared = null, background = false } = {}) {
   // A pack target may be on a server too: it is connected first like a copy's destination.
   const servers = jobServers([...(req.sources ?? req.paths ?? []), req.dest, req.cwd, req.target]);
   const connected = await connectServers(servers);
   if (!connected) return null;
   const job = new Job(req);
   job.shared = shared;
+  job.background = background;
   const done = await job.run();
   // Local moves and Trash deletes can be undone; jobs of one operation (shared answers) add up.
   const pairs = done?.summary?.undo ?? [];
@@ -720,14 +832,20 @@ export async function copyMoveTo(kind, { paths, cwd, dest, source = null, switch
   const sources = paths.map((p) => ({ name: lastComponent(p) }));
   const verb = VERB[kind];
   const otherKind = kind === "copy" ? "move" : "copy";
+  // Queue: runs in the background, after the operations queued before it (TC's F2).
+  const queueBtn = { label: "F2 Queue", value: "queue", key: "F2" };
   const buttons = switchable
-    ? [OK_CANCEL[0], { label: `${VERB[otherKind]} instead`, value: "switch" }, OK_CANCEL[1]]
-    : OK_CANCEL;
+    ? [OK_CANCEL[0], queueBtn, { label: `${VERB[otherKind]} instead`, value: "switch" }, OK_CANCEL[1]]
+    : [OK_CANCEL[0], queueBtn, OK_CANCEL[1]];
   // A server archive's copy shows as its place on the server; the job writes into the copy
   // (and the edit watcher offers the upload).
   const r = await dialog({ title: verb, text: `${verb} ${countText(sources, "file(s)")} to:`, input: displayLocation(dest, remoteArchives), buttons });
   const target = r?.text.trim() ? realLocation(r.text.trim(), remoteArchives) : "";
   if (!target) return;
+  if (r.value === "queue") {
+    enqueue({ kind, paths, cwd, target, source });
+    return;
+  }
   await transfer(r.value === "switch" ? otherKind : kind, { paths, cwd, target, source });
 }
 
@@ -735,12 +853,12 @@ export async function copyMoveTo(kind, { paths, cwd, dest, source = null, switch
  * Copies or moves `paths` into `target` without a dialog (after F5/F6 and for Paste); `source`:
  * the panel whose marks a finished job clears (or null).
  */
-async function transfer(jobKind, { paths, cwd, target, source }) {
+async function transfer(jobKind, { paths, cwd, target, source, background = false }) {
   // A search results list can mix local items and entries of several archives; one job takes
   // one archive (or none), so each group gets its own job, one after the other.
   const groups = groupSources(paths, cwd);
   if (groups.length <= 1) {
-    const done = await runJob({ kind: jobKind, sources: paths, dest: target, cwd }, source);
+    const done = await runJob({ kind: jobKind, sources: paths, dest: target, cwd }, source, { background });
     return Boolean(done && jobSucceeded(done));
   }
   let ok = true;
@@ -754,6 +872,7 @@ async function transfer(jobKind, { paths, cwd, target, source }) {
       const done = await runJob({ kind: jobKind, sources: g.paths, dest: target, cwd: g.cwd }, last ? source : null, {
         recheck: false,
         shared,
+        background,
       });
       // A cancelled, failed or never started job stops the rest.
       if (!done || !jobSucceeded(done)) {
@@ -982,7 +1101,7 @@ function packDialog(sources, initial) {
       line("Password", password),
       line("Repeat password", repeat),
       line("Encryption", method),
-      el("p", "note", "AES-256 zips do not open with a double-click in Finder; use fxfm, Keka or 7-Zip."),
+      el("p", "note", IS_LINUX ? "Some archive tools cannot open AES-256 zips; fxfm and 7-Zip can." : "AES-256 zips do not open with a double-click in Finder; use fxfm, Keka or 7-Zip."),
     );
     const error = el("p", "error");
     error.hidden = true;
@@ -1177,12 +1296,17 @@ export function renameInline() {
     return true;
   };
   const save = async () => {
-    const d = renameDecision(entry.name, input.value);
+    const d = renameDecision(entry.name, input.value, dir);
     if (d.kind === "invalid") {
       panel.setMessage(`Cannot rename: ${d.reason}`);
       return;
     }
     if (!close() || d.kind === "same") return;
+    if (d.kind === "move") {
+      // A path moves the item there (as F6 with that target: conflicts asked, Undo kept).
+      await runJob({ kind: "move", sources: [joinLocation(dir, entry.name)], dest: d.target, cwd: dir }, panel);
+      return;
+    }
     try {
       await ctx.invoke("rename", { path: joinLocation(dir, entry.name), newName: d.name });
     } catch (e) {

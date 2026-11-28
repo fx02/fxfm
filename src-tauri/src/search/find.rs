@@ -105,10 +105,12 @@ impl Inner {
         let Some(best) = best else {
             return false;
         };
+        // An exclusion counts only inside the volume (the startup disk's "/tmp" or "/Volumes"
+        // is no exclusion for a volume mounted below it), as for live updates.
         complete(best)
             && !excludes(settings)
                 .iter()
-                .any(|x| x.starts_with('/') && is_under(under, x))
+                .any(|x| x.starts_with('/') && is_under(under, x) && is_under(x, best))
             && s.index.lookup(under).is_some()
     }
 

@@ -2581,3 +2581,74 @@ test("reorderStep: Alt or Ctrl with Up/Down moves a row; nothing else does", () 
   assert.equal(lib.reorderStep(k("ArrowUp", { metaKey: true }), { alt: "command", ctrl: "control" }), -1);
   assert.equal(lib.reorderStep(k("ArrowUp", { altKey: true }), { alt: "command", ctrl: "control" }), 0);
 });
+
+test("jobsStrip: first background job with its progress, others and the queue counted", () => {
+  assert.equal(lib.jobsStrip([], 0), null);
+  assert.deepEqual(lib.jobsStrip([], 2), { text: "Starting… · 2 queued", ratio: 0 });
+  const p = { current: "/Volumes/nas/big.iso", doneBytes: 50, totalBytes: 200, doneFiles: 0, totalFiles: 1 };
+  assert.deepEqual(lib.jobsStrip([{ kind: "copy", progress: p }], 0), { text: "Copying big.iso 25%", ratio: 0.25 });
+  assert.equal(lib.jobsStrip([{ kind: "move", progress: null }, { kind: "copy", progress: p }], 3).text, "Moving… 0% · 1 more running · 3 queued");
+  // Deleting has no bytes: files count instead.
+  const d = { current: "/x/a", doneBytes: 0, totalBytes: 0, doneFiles: 3, totalFiles: 4 };
+  assert.equal(lib.jobsStrip([{ kind: "delete", progress: d }], 0).text, "Deleting a 75%");
+});
+
+test("clampSplit: the panels' split stays within 10-90 %, junk is 50/50", () => {
+  assert.equal(lib.clampSplit(0.2), 0.2);
+  assert.equal(lib.clampSplit(0.33333), 0.333);
+  assert.equal(lib.clampSplit(0.01), 0.1);
+  assert.equal(lib.clampSplit(1.5), 0.9);
+  assert.equal(lib.clampSplit(null), 0.5);
+  assert.equal(lib.clampSplit(undefined), 0.5);
+  assert.equal(lib.clampSplit("0.3"), 0.5);
+  assert.equal(lib.clampSplit(Number.NaN), 0.5);
+});
+
+test("comboLabel: Mac glyphs, or Linux key names as text", () => {
+  const map = { alt: "option", ctrl: "control" };
+  assert.equal(lib.comboLabel("Alt+F5", map, false), "⌥F5");
+  assert.equal(lib.comboLabel("Alt+F5", map, true), "Alt+F5");
+  assert.equal(lib.comboLabel("Ctrl+Shift+Up", map, true), "Ctrl+Shift+↑");
+  assert.equal(lib.comboLabel("Alt+F7", { alt: "command", ctrl: "control" }, true), "Super+F7");
+  assert.equal(lib.IS_LINUX, false, "Node is no Linux build");
+  assert.equal(lib.SHOW_IN_FILE_MANAGER, "Show in Finder");
+});
+
+test("renameTarget / renameDecision: F2 with a path moves the item (TC)", () => {
+  const t = (dir, v, orig = "a.txt") => lib.renameTarget(dir, orig, v);
+  assert.equal(t("/x/y", "../a.txt"), "/x/a.txt");
+  assert.equal(t("/x/y", "../../b.txt"), "/b.txt");
+  assert.equal(t("/x/y", "sub/a.txt"), "/x/y/sub/a.txt");
+  assert.equal(t("/x/y", "../"), "/x/a.txt");
+  assert.equal(t("/x/y", "./sub/"), "/x/y/sub/a.txt");
+  assert.equal(t("/x/y", "/tmp/c.txt"), "/tmp/c.txt");
+  assert.equal(t("/x", "../../a.txt"), null);
+  assert.equal(t("sftp://web/var/www", "../a.txt"), "sftp://web/var/a.txt");
+  assert.equal(t("sftp://web/var/www", "/etc/a.txt"), null);
+  assert.deepEqual(lib.renameDecision("a.txt", "../a.txt", "/x/y"), { kind: "move", target: "/x/a.txt" });
+  assert.deepEqual(lib.renameDecision("a.txt", "./a.txt", "/x/y"), { kind: "same" });
+  assert.equal(lib.renameDecision("a.txt", "../../../a", "/x").kind, "invalid");
+  assert.deepEqual(lib.renameDecision("a.txt", "b.txt", "/x"), { kind: "rename", name: "b.txt" });
+});
+
+test("caretMove: Home/End, Cmd+arrows and Option+arrows in a text field (Mac)", () => {
+  const v = "report final.v2.txt";
+  const at = (n) => ({ start: n, end: n, backward: false });
+  assert.deepEqual(lib.caretMove(v, at(8), "Home"), at(0));
+  assert.deepEqual(lib.caretMove(v, at(3), "End"), at(v.length));
+  assert.deepEqual(lib.caretMove(v, at(3), "ArrowRight", { cmd: true }), at(v.length));
+  assert.deepEqual(lib.caretMove(v, at(9), "ArrowLeft", { alt: true }), at(7));
+  assert.deepEqual(lib.caretMove(v, at(7), "ArrowLeft", { alt: true }), at(0));
+  assert.deepEqual(lib.caretMove(v, at(0), "ArrowRight", { alt: true }), at(6));
+  assert.deepEqual(lib.caretMove(v, at(6), "ArrowRight", { alt: true }), at(12));
+  assert.deepEqual(lib.caretMove("čaša žlica", at(10), "ArrowLeft", { alt: true }), at(5));
+  // Shift extends from the anchor; going back past it flips the direction.
+  assert.deepEqual(lib.caretMove(v, at(6), "End", { shift: true }), { start: 6, end: v.length, backward: false });
+  assert.deepEqual(lib.caretMove(v, at(6), "Home", { shift: true }), { start: 0, end: 6, backward: true });
+  assert.deepEqual(lib.caretMove(v, { start: 2, end: 6, backward: false }, "ArrowLeft", { alt: true, shift: true }), { start: 0, end: 2, backward: true });
+  // A selection collapses on the side the caret goes to.
+  assert.deepEqual(lib.caretMove(v, { start: 7, end: 12, backward: false }, "ArrowLeft", { alt: true }), at(0));
+  assert.deepEqual(lib.caretMove(v, { start: 7, end: 12, backward: false }, "ArrowRight", { alt: true }), at(15));
+  assert.equal(lib.caretMove(v, at(3), "ArrowLeft"), null);
+  assert.equal(lib.caretMove(v, at(3), "a", { alt: true }), null);
+});

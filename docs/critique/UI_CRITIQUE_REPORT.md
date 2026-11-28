@@ -1,12 +1,22 @@
-# fxfm UI critique report (2026-11-26)
+# fxfm UI critique report (2026-11-28)
 
-Target: fxfm 0.1.14 (`2406bb8`): the surfaces added since the 2026-11-21 report and a recheck of
-its findings. Audience: one keyboard-driven Total Commander user on macOS. Evidence: source walk
-of the new surfaces, screenshots of an isolated instance taken during this week's work (see
-CRITIQUE_INTERNAL.md, 2026-11-26), benchmark of Total Commander, Double Commander, FreeFileSync
-and ForkLift 4 from their docs (CRITIQUE_BENCHMARK.md, 2026-11-26). Keyboard paths were not
-exercised live in this pass (the owner was using the machine): **static walk for keys**.
-Scales: shared lifecycle scale.
+**Target:** fxfm 0.1.25 (local `main`). The surfaces added since the 2026-11-26 report are covered, and its findings are rechecked:
+- Copy network path;
+- F8 on a share;
+- the Connect window and groups;
+- Find files text search and sorting;
+- Background / Queue / operations strip / quit question;
+- the panel splitter;
+- the Linux build.
+
+**Audience:** one keyboard-driven Total Commander user, on macOS and now on Linux.
+
+**Evidence:**
+- an isolated live instance of 2026-11-27 (see CRITIQUE_NOTES.md for what was and was not exercised);
+- a source walk (CRITIQUE_INTERNAL.md J10–J18);
+- a benchmark of Total Commander, Double Commander and ForkLift 4 from their docs (CRITIQUE_BENCHMARK.md, 2026-11-28).
+
+**Scales:** the shared lifecycle scale.
 
 ## Findings
 
@@ -14,26 +24,23 @@ Scales: shared lifecycle scale.
 
 | ID | Finding | Evidence | User impact | Sev. | Effort | Conf. | Route |
 |---|---|---|---|---|---|---|---|
-| K1 | In the Synchronize dirs list **Delete means "skip"**, while Delete deletes in the panels | J1, `ui/syncwin.js:420` | A TC user pressing Delete to drop a row expects the opposite of "delete the file"; today it is harmless (skip) but the meaning flips between windows | medium | trivial | high | polish (Delete/Backspace out; Space only) |
-| K2 | **Alt+Left/Right in the command line** go to the folder history instead of moving the caret by word | J4, `cmdlineKeyGoesToPanel` | Editing a typed command with Option+arrows jumps folders | medium | trivial | moderate (static) | polish (keep Alt+Left/Right in the field) |
-| K3 | Right-click **Properties…** opens Change attributes only | J2 | The label promises size, dates, kind; the dialog shows only permissions | nice | trivial | high | this-pass candidate (rename to "Change attributes…") |
-| K4 | Branch view stops with **Ctrl+B**, not Esc | J5 | A long scan of a big tree cannot be stopped the usual way | nice | trivial | high | polish |
+| K5 | **Find files: *In: Everywhere* stays checked while a *Text* search runs in the current folder** | J10; `ui/lib.mjs` searchRequest, `ui/search.js:153` (placeholder only) | The checked choice says one thing and the search does another; a user may think the whole disk was searched | medium | trivial | high | polish (disable Everywhere and show why while Text has a value) |
+| K6 | **Linux shows macOS words and keys**: "Show in Finder", "Finder (macOS icons)", "Folder icon (Finder icons)", ⌥⌃⌘ glyphs, the Fn option | J15; `ui/lib.mjs:2263,2743`, `config.js:505`, `comboLabel`; the Rust menu uses the same glyphs (`keymap.rs` label) | A Linux user reads keys that do not exist on their keyboard | medium | small | high | polish (Linux port UI pass, already planned) |
 
 ### Unjustified overlaps
 
-None found. Right-click items reuse the existing commands (same handlers as the menu and keys).
+None found.
 
-### Industry gaps (relevant to a TC user)
+### Industry gaps
 
 | ID | Finding | Benchmark | Sev. | Effort | Conf. | Route |
 |---|---|---|---|---|---|---|
-| H1 | **Clipboard keys**: Copy/Cut/Paste have no default keys (TC: Ctrl+C/X/V in the panels) | J3; TC model | medium | trivial | high | polish (bind Ctrl+C/X/V; Control is free on macOS) |
-| H2 | **Sync row filters**: only "Show equal"; no show →, ←, ≠ (not copied), singles, duplicates | TC, Double Commander | medium | small | high | evolve |
-| H3 | **Sync: change several rows at once** (select rows, then →/←/skip/reverse) | Double Commander | medium | small | high | evolve |
-| H4 | Folder **tabs** (from 2026-11-21, G1) | all five earlier targets | medium (owner: not a priority) | large | high | evolve (deferred by owner) |
-| H5 | **Content search** in Find files (G2) | TC, ForkLift, Commander One, Nimble | medium | medium | high | evolve |
-| H6 | **Operation queue** (G6) | Marta, TC partial | medium | medium | moderate | evolve |
-| H7 | **Thumbnails** (G8) | TC, Commander One, Nimble | nice | medium | moderate | evolve |
+| H8 | **No list of the operations**: the strip shows the first background job and a queued count. There is no window that lists each running and queued operation, removes one, reorders or pauses (J11). | DC Operations Viewer (order, pause, stop); TC transfer manager (+/−) | medium | medium | high (DC) | evolve |
+| H10 | **Content search options**: case only. No regex, whole words, hex, UTF-16 or other encodings, and nothing inside archives or on servers. | DC: case, hex, regex, encodings, archives; TC: UTF-16 and several encodings at once, FTP search | medium | medium | high | evolve |
+| H11 | **Splitter presets**: drag and double-click only. No right-click presets (20/80 … 80/20) and no command or key for 50 %. | DC right-click presets; TC presets, cm_50Percent, Ctrl+drag snap | nice | small | high | evolve |
+| H9 | **No key for *Queue* in the F5/F6 dialog or for *Background* in the progress window** (J12, J13) | TC: F2 in the copy dialog (forum-sourced) | nice | trivial | moderate | polish |
+| H4 | Folder tabs (from 2026-11-21) | all earlier targets | medium (owner: not a priority) | large | high | evolve (deferred) |
+| H7 | Thumbnails (from 2026-11-21) | TC, Commander One, Nimble | nice | medium | moderate | evolve |
 
 ### Obsolete patterns
 
@@ -43,57 +50,68 @@ None supported.
 
 | ID | Finding | Evidence | Sev. | Effort | Conf. | Route |
 |---|---|---|---|---|---|---|
-| N1 | **Undo** of the last move/rename/delete is still missing (S1); Synchronize can now delete (to the Trash) as well | README, ROADMAP | medium | medium | high | evolve |
-| N2 | **Screen reader** labels (S2) unchanged; the new sync window and menus add more unlabeled controls | source | medium | medium | moderate | polish |
-| N3 | **In-app help** stops at the key table; feature rules (sync modes, quick filter, branch view) live only in the README | J8 | nice | small | high | evolve |
+| N2 | Screen reader labels (still 5 aria/role attributes) | source | medium | medium | moderate | polish |
+| N3 | In-app help stops at the key table. Queue, groups, text search, splitter and network delete live only in docs/MANUAL.md. | source | nice | small | high | evolve |
 
-## Recheck of the 2026-11-21 findings
+**By design, not findings:**
+- A second Quit within 5 s quits without asking (J14). It is the escape hatch for a hung window, and MANUAL documents it.
+- Results sorting has no key (J18). No benchmark tool documents one.
+
+## Recheck of the 2026-11-26 findings
 
 | ID | Finding | Now |
 |---|---|---|
-| C1 | Change attributes refused local files | fixed (0.1.4) |
-| C2 | Empty Start and Help menus | fixed (0.1.7): Start gone, Help → Keyboard shortcuts |
-| C3 | Selects smaller than the dialog font | fixed (0.1.2) |
-| C4 | F8 never named the item | fixed (0.1.7) |
-| G1 | Folder tabs | open (H4) |
-| G2 | Content search | open (H5) |
-| G3 | Quick filter | fixed (0.1.8, Ctrl+S) |
-| G4 | Directory compare / synchronize | fixed (0.1.9–0.1.12) |
-| G5 | Folder history | fixed (0.1.8) |
-| G6 | Operation queue | open (H6) |
-| G7 | Branch view | fixed (0.1.13, Ctrl+B) |
-| G8 | Thumbnails | open (H7) |
-| S1 | Undo | open (N1) |
-| S2 | Accessibility | open (N2) |
-| S3 | Dark mode | fixed (0.1.7) |
+| K1 | Delete = skip in Synchronize | fixed |
+| K2 | Alt+Left/Right in the command line | fixed |
+| K3 | "Properties…" opened Change attributes | fixed (renamed) |
+| K4 | Esc did not stop a branch view | fixed |
+| H1 | Clipboard keys | fixed (Ctrl+C/X/V) |
+| H2 | Sync row filters | fixed |
+| H3 | Sync several rows at once | fixed |
+| H4 | Tabs | open |
+| H5 | Content search | fixed (0.1.22); options gap → H10 |
+| H6 | Operation queue | fixed partly (0.1.24): Background, Queue, strip; list and control → H8 |
+| H7 | Thumbnails | open |
+| N1 | Undo | fixed (0.1.16) |
+| N2 | Accessibility | open |
+| N3 | In-app help | open |
 
 ## UX baseline (local copy)
 
 | Pattern | Status |
 |---|---|
 | Command palette (Cmd/Ctrl-K) | ABSENT (not a TC-user baseline) |
-| Dark mode | PRESENT (system appearance for chrome; panel colors configurable) |
-| Keyboard navigability for every primary action | PARTIAL (clipboard commands have no default keys, H1; sync rows one at a time) |
-| Empty states with a CTA | PARTIAL (sync window: "Press Compare." / "No differences."; panels unchanged) |
-| Inline edit instead of modal-then-save for single fields | PRESENT (F2 renames in place) |
-| Bulk select + bulk action on list views | PARTIAL (panels yes; sync list no, H3) |
-| Optimistic updates with rollback on error | N/A (jobs report per-item errors) |
-| Undo for destructive actions, rather than a confirm modal | ABSENT for file ops (Trash + confirm) |
-| Global search across the app | PRESENT (Find files over the index) |
-| Saved views / filters as first-class objects | ABSENT (sync mode and sort are remembered; no saved comparisons or filters) |
+| Dark mode | PRESENT (macOS appearance; Linux follows GTK: UNVERIFIED on a real desktop) |
+| Keyboard navigability for every primary action | PARTIAL (Queue, Background, splitter, result sorting are mouse only: H9, J17, J18) |
+| Empty states with a CTA | PARTIAL (unchanged) |
+| Inline edit instead of modal-then-save for single fields | PRESENT |
+| Bulk select + bulk action on list views | PRESENT (panels, sync list, Find results) |
+| Optimistic updates with rollback on error | N/A |
+| Undo for destructive actions, rather than a confirm modal | PARTIAL (Undo for local moves, renames, Trash; network-share and server deletes are permanent and say so) |
+| Global search across the app | PRESENT (Find files by name and by text) |
+| Saved views / filters as first-class objects | ABSENT |
 | API access / webhook surface | N/A |
 | Audit log for multi-user state changes | N/A |
-| OS-level integrations | PARTIAL (Quick Look, Show in Finder, Open with, clipboard with Finder, Trash; no Services/notifications) |
-| Accessibility: keyboard nav, focus rings, ARIA, contrast, screen reader | PARTIAL (keyboard and focus rings; ARIA largely missing) |
+| OS-level integrations | PRESENT on macOS (Finder clipboard, Quick Look, Open with, Trash, drag). Linux equivalents are built but UNVERIFIED on a real desktop. |
+| Accessibility: keyboard nav, focus rings, ARIA, contrast, screen reader | PARTIAL (ARIA largely missing) |
 
 ## Counts
 
-Contradictions 4, overlaps 0, industry gaps 7, obsolete 0, safety nets 3.
-Routes: polish 5 (K1, K2, K4, H1, N2), evolve 8 (H2–H7, N1, N3), this-pass 1 (K3).
-Recheck: 10 of 15 earlier findings fixed, 5 open.
+- **Unique findings:** 11.
+  - Contradictions 2 (K5, K6). Overlaps 0. Obsolete 0.
+  - Industry gaps 6 (H8, H10, H11, H9, plus H4 and H7 still open).
+  - Safety nets 2 (N2, N3 open).
+- **Routes:** polish 4 (K5, K6, H9, N2), evolve 7 (H8, H10, H11, H4, H7, N3).
+- **Recheck:** of the 14 earlier findings, 10 are fixed (2 of them partly, with the rest now H8 and H10) and 4 are open.
 
 ## Next work (evidence-based)
 
-1. Polish batch, all trivial: K1, K2, K4, H1 (and K3 if the rename is wanted).
-2. Sync list: row filters (H2) and multi-row actions (H3) — the two things TC and DC both have.
-3. Undo of the last file operation (N1), now more useful since sync and paste exist.
+1. **Trivial polish:**
+   - K5: Everywhere disabled and explained while Text has a value;
+   - H9: F2 = Queue in the copy dialog, B or F2 = Background in the progress window.
+2. **K6 as part of the Linux UI pass:**
+   - key names Ctrl/Alt/Super;
+   - "Show in file manager", "System icons";
+   - no Fn option and no macOS folder icons.
+3. **H8:** an operations list (running and queued, remove one, move up/down), opened from the strip. Double Commander's viewer is the model.
+4. **H10:** text search options (whole words, regex, UTF-16), then archives.

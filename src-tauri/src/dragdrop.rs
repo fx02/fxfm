@@ -1,5 +1,9 @@
-//! Drag & drop: the native drag-out of panel entries (an AppKit dragging session) and the
-//! modifier state the UI reads when a drop arrives (the drop event itself carries none).
+//! Drag & drop: the native drag-out of panel entries (an AppKit dragging session on macOS, a
+//! GTK drag with `text/uri-list` on Linux) and the modifier state the UI reads when a drop
+//! arrives (the drop event itself carries none).
+//!
+//! Linux has no file promises: archive and server entries are written to a temporary folder
+//! when the receiver asks for the data, and their copies are dragged (copy only).
 //!
 //! Local files go on the pasteboard as file URLs, so the receiver may copy or move them
 //! (Finder's own rules: move on the same disk, Option copies, Cmd moves). Archive and server
@@ -7,6 +11,8 @@
 //! until the receiver asks, and then the item (a folder with everything in it) is written
 //! straight to the location the receiver names, on fxfm's own operation queue. Promised
 //! items are copy only.
+// The drag image badge and NSDragOperation helpers are macOS only.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 use crate::state::AppState;
 use fxfm_core::archive::split_location;
@@ -710,7 +716,121 @@ mod native {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+mod native {
+    use super::{write_promise, DragEnded, DragItems, Modifiers};
+    use fxfm_core::vfs;
+    use gtk::prelude::*;
+    use gtk::{gdk, glib};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+    use tauri::Emitter;
+
+    pub fn start(
+        window: tauri::WebviewWindow,
+        items: DragItems,
+        ctx: Arc<vfs::Ctx>,
+    ) -> Result<(), String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let w = window.clone();
+        window
+            .run_on_main_thread(move || drop(tx.send(begin(w, items, ctx))))
+            .map_err(|e| e.to_string())?;
+        rx.recv().map_err(|e| e.to_string())?
+    }
+
+    /// The `file://` URIs of the dragged items; archive and server entries are written into a
+    /// temporary folder first (once per drag, when the receiver asks).
+    fn uris(items: &DragItems, ctx: &vfs::Ctx) -> Result<Vec<String>, String> {
+        let local = |p: &std::path::Path| gtk::gio::File::for_path(p).uri().to_string();
+        match items {
+            DragItems::Local(paths) => Ok(paths.iter().map(|p| local(p)).collect()),
+            DragItems::Promised(ps) => {
+                let dir = ctx.new_temp_dir("drag").map_err(|e| e.to_string())?;
+                ps.iter()
+                    .map(|p| {
+                        let dest = dir.join(&p.name);
+                        write_promise(ctx, &p.location, &dest)?;
+                        Ok(local(&dest))
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    fn begin(
+        window: tauri::WebviewWindow,
+        items: DragItems,
+        ctx: Arc<vfs::Ctx>,
+    ) -> Result<(), String> {
+        let gw = window.gtk_window().map_err(|e| e.to_string())?;
+        let targets = gtk::TargetList::new(&[gtk::TargetEntry::new(
+            "text/uri-list",
+            gtk::TargetFlags::OTHER_APP,
+            0,
+        )]);
+        let actions = match items {
+            DragItems::Local(_) => gdk::DragAction::COPY | gdk::DragAction::MOVE,
+            DragItems::Promised(_) => gdk::DragAction::COPY,
+        };
+        let cache: Rc<RefCell<Option<Vec<String>>>> = Rc::default();
+        let ids: Rc<RefCell<Vec<glib::SignalHandlerId>>> = Rc::default();
+        let w = window.clone();
+        let get = gw.connect_drag_data_get(move |_, _, sel, _, _| {
+            let mut c = cache.borrow_mut();
+            if c.is_none() {
+                match uris(&items, &ctx) {
+                    Ok(u) => *c = Some(u),
+                    Err(msg) => {
+                        let _ = w.emit("drag://ended", DragEnded::error(msg));
+                        *c = Some(Vec::new());
+                    }
+                }
+            }
+            let list: Vec<&str> = c
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(String::as_str)
+                .collect();
+            sel.set_uris(&list);
+        });
+        let w = window.clone();
+        let ids_end = ids.clone();
+        let end = gw.connect_drag_end(move |gw, dctx| {
+            let op = match dctx.selected_action() {
+                a if a.contains(gdk::DragAction::MOVE) => "move",
+                a if a.contains(gdk::DragAction::COPY) => "copy",
+                a if a.contains(gdk::DragAction::LINK) => "link",
+                _ => "none",
+            };
+            let ended = DragEnded {
+                result: if op == "none" { "cancelled" } else { "dropped" },
+                operation: Some(op),
+                message: None,
+            };
+            let _ = w.emit("drag://ended", ended);
+            for id in ids_end.borrow_mut().drain(..) {
+                gw.disconnect(id);
+            }
+        });
+        ids.borrow_mut().extend([get, end]);
+        // The button is still held (the drag started in the page): GTK takes the pointer.
+        gw.drag_begin_with_coordinates(&targets, actions, 1, None, -1, -1)
+            .map(|_| ())
+            .ok_or_else(|| "The drag could not start".to_string())
+    }
+
+    pub fn modifiers() -> Modifiers {
+        let shift = gdk::Display::default()
+            .and_then(|d| gdk::Keymap::for_display(&d))
+            .is_some_and(|k| k.modifier_state() & gdk::ModifierType::SHIFT_MASK.bits() != 0);
+        Modifiers { shift }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod native {
     use super::{DragItems, Modifiers};
     use fxfm_core::vfs;
@@ -721,7 +841,7 @@ mod native {
         _items: DragItems,
         _ctx: Arc<vfs::Ctx>,
     ) -> Result<(), String> {
-        Err("Dragging files out is only supported on macOS".into())
+        Err("Dragging files out is not supported here".into())
     }
 
     pub fn modifiers() -> Modifiers {
